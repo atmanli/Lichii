@@ -70,6 +70,7 @@ add_executable(tests
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
     video_core/unbacked_fallback.cpp
+    video_core/image_placement.cpp
     video_core/fire_emblem_upscale.cpp
     video_core/dlss_contract.cpp
     video_core/ampere_fast_fusion.cpp

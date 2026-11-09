@@ -1004,23 +1004,37 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
         QMessageBox::information(parent_widget, job->title,
                                  tr("Cancelled. Nothing was changed on disk."));
         break;
-    default:
+    default: {
+        // add keeps the content it committed before the failure: report it and refresh.
+        const bool changed = !job->added.isEmpty();
+        const QString kept =
+            changed ? QStringLiteral("\n\n") +
+                          tr("Already added to the archive: %1")
+                              .arg(job->added.join(QStringLiteral(", ")))
+                    : QString{};
         if (job->CanRetryWithoutRecipe(error)) {
             const auto answer = QMessageBox::question(
                 parent_widget, job->title,
                 tr("The operation failed because the rebuild recipe could not be kept:\n%1\n\n"
                    "Try again without the recipe? The game still runs from the NX archive, but "
                    "the original package cannot be rebuilt exactly from it.")
-                    .arg(error),
+                        .arg(error) +
+                    kept,
                 QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Retry);
             if (answer == QMessageBox::Retry) {
+                // The retry refreshes the archives when it ends.
                 job->PrepareRetryWithoutRecipe();
                 Start(std::move(job));
+                break;
             }
-            break;
+        } else {
+            QMessageBox::warning(parent_widget, job->title,
+                                 tr("The operation failed:\n%1").arg(error) + kept);
         }
-        QMessageBox::warning(parent_widget, job->title,
-                             tr("The operation failed:\n%1").arg(error));
+        if (changed) {
+            emit ArchivesChanged();
+        }
         break;
+    }
     }
 }

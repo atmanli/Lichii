@@ -315,8 +315,8 @@ struct NxTools::Job {
         written = 0;
         counting_since = -1;
         seconds_left = -1;
+        // `added` is kept: what the failed run committed stays in the archive.
         std::scoped_lock lock{lines_mutex};
-        added.clear();
         skipped.clear();
     }
 
@@ -898,8 +898,12 @@ void NxTools::Start(std::shared_ptr<Job> job) {
                                       QStringLiteral(" v") + fields[3]);
                 } else if (fields[0] == QStringLiteral("@SKIPPED") && fields.size() >= 4) {
                     std::scoped_lock lock{j.lines_mutex};
-                    j.skipped.push_back(fields[1] + QLatin1Char(' ') + fields[2].toUpper() +
-                                        QStringLiteral(" v") + fields[3]);
+                    auto entry = fields[1] + QLatin1Char(' ') + fields[2].toUpper() +
+                                 QStringLiteral(" v") + fields[3];
+                    // A retry finds what the failed run added: it is listed as added.
+                    if (!j.added.contains(entry)) {
+                        j.skipped.push_back(std::move(entry));
+                    }
                 }
             },
             job.get(), job->cancel, error, sizeof(error));
@@ -982,6 +986,13 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     running.reset();
     emit RunningChanged(false);
 
+    // add keeps the content it committed before a failure or a cancel, also across a retry:
+    // report it and refresh.
+    const bool changed = !job->added.isEmpty();
+    const QString kept = changed ? QStringLiteral("\n\n") +
+                                       tr("Already added to the archive: %1")
+                                           .arg(job->added.join(QStringLiteral(", ")))
+                                 : QString{};
     switch (code) {
     case NXFORMAT_OK: {
         QString text = job->done_message;
@@ -1001,17 +1012,15 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
         break;
     }
     case NXFORMAT_CANCELLED:
-        QMessageBox::information(parent_widget, job->title,
-                                 tr("Cancelled. Nothing was changed on disk."));
+        if (changed) {
+            QMessageBox::information(parent_widget, job->title, tr("Cancelled.") + kept);
+            emit ArchivesChanged();
+        } else {
+            QMessageBox::information(parent_widget, job->title,
+                                     tr("Cancelled. Nothing was changed on disk."));
+        }
         break;
     default: {
-        // add keeps the content it committed before the failure: report it and refresh.
-        const bool changed = !job->added.isEmpty();
-        const QString kept =
-            changed ? QStringLiteral("\n\n") +
-                          tr("Already added to the archive: %1")
-                              .arg(job->added.join(QStringLiteral(", ")))
-                    : QString{};
         if (job->CanRetryWithoutRecipe(error)) {
             const auto answer = QMessageBox::question(
                 parent_widget, job->title,

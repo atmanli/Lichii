@@ -46,6 +46,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/k_system_resource.h"
 #include "core/hle/kernel/k_memory_manager.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/kernel/k_page_group.h"
 #include "core/hle/kernel/k_resource_limit.h"
 #include "core/hle/kernel/k_server_session.h"
@@ -859,8 +860,8 @@ private:
         // cleared: the GPU writes these before reading them, and touching 300 MB would commit it
         // on the host.
         // A title that fills the system pool (The Duskbloods network test's six regions) falls
-        // back to the application pool, only when EDEN_NX2_APP_POOL_PROBE has grown that pool.
-        static const bool application_fallback = std::getenv("EDEN_NX2_APP_POOL_PROBE") != nullptr;
+        // back to the application pool, only when that pool was grown for the title.
+        const bool application_fallback = Kernel::KSystemControl::Init::GetApplicationPoolGrowth() != 0;
         const auto allocate = [&](Kernel::KMemoryManager::Pool pool) {
             return kernel_core.MemoryManager().AllocateAndOpen(
                 pg.get(), size / YUZU_PAGESIZE,

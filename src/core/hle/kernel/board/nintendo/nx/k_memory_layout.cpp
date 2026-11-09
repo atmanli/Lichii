@@ -134,9 +134,8 @@ void SetupPoolPartitionMemoryRegions(KMemoryLayout& memory_layout) {
     const size_t unsafe_system_pool_min_size =
         KSystemControl::Init::GetMinimumNonSecureSystemPoolSize();
 
-    // EDEN_NX2_APP_POOL_PROBE can ask for a larger application pool than DRAM holds. The pools
-    // below it, their management region and a nonempty system pool must still fit above the pool
-    // partitions start; otherwise the probe is ignored.
+    // A title's pool growth must leave the pools below it, their management region and a nonempty
+    // system pool above the pool partitions start; otherwise the growth is dropped.
     const auto pools_fit = [&](size_t application_size) {
         if (application_size + applet_pool_size + unsafe_system_pool_min_size >=
             pool_end - pool_partitions_start) {
@@ -170,7 +169,7 @@ void SetupPoolPartitionMemoryRegions(KMemoryLayout& memory_layout) {
     };
     if (!pools_fit(application_pool_size)) {
         const size_t base_size = application_pool_size - KSystemControl::Init::GetApplicationPoolGrowth();
-        LOG_WARNING(Kernel, "Application pool of {} MiB does not fit, ignoring EDEN_NX2_APP_POOL_PROBE",
+        LOG_WARNING(Kernel, "Application pool of {} MiB does not fit, using the base size",
                     application_pool_size / 1_MiB);
         application_pool_size = base_size;
     }

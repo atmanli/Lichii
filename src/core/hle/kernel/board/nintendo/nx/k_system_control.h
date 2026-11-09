@@ -29,12 +29,15 @@ public:
     static constexpr size_t Nx2GraphicsServerMemorySize = 2ULL * 1024 * 1024 * 1024; // 2_GiB
 
 public:
-    // Switch 2 "remote memory" (svcGetInfo types 31 and 32). Only with EDEN_NX2_APP_POOL_PROBE,
-    // which the network test launchers set. The application pool grows by this much, and the
+    // Switch 2 "remote memory" (svcGetInfo types 31 and 32), for The Duskbloods network test
+    // (see SetApplicationProgramId). The application pool grows by this much, and the
     // memory totals the game reads leave it out: The Duskbloods network test sizes its heap from
     // those totals, so the remote memory stays free for MapPhysicalMemory. Its Gameface UI maps
     // pages there and fails with ResultOutOfMemory in The Blood-Drenched Moon without it.
     static size_t Nx2RemoteMemorySize();
+
+    /// The Switch 2 application the kernel is about to be set up for (0 for any other program).
+    static void SetApplicationProgramId(u64 program_id);
 
     class Init {
     public:
@@ -44,7 +47,7 @@ public:
         static KPhysicalAddress GetKernelPhysicalBaseAddress(KPhysicalAddress base_address);
         static bool ShouldIncreaseThreadResourceLimit();
         static std::size_t GetApplicationPoolSize();
-        /// The part of GetApplicationPoolSize that EDEN_NX2_APP_POOL_PROBE adds.
+        /// The part of GetApplicationPoolSize the application needs beyond the arrangement.
         static std::size_t GetApplicationPoolGrowth();
         static std::size_t GetAppletPoolSize();
         static std::size_t GetMinimumNonSecureSystemPoolSize();

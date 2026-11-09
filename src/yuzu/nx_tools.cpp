@@ -297,6 +297,29 @@ struct NxTools::Job {
     // The new icon given to set-metadata, removed when the job ends.
     std::unique_ptr<QTemporaryFile> icon_file;
 
+    // nxformat 1.0.1 fails pack and add when the rebuild recipe cannot be kept (1.0.0 only
+    // warned). Such a failure can be run again without the recipe.
+    bool CanRetryWithoutRecipe(const QString& error) const {
+        if (args.empty() || (args[0] != "pack" && args[0] != "add") ||
+            std::ranges::find(args, std::string{"--no-recipe"}) != args.end()) {
+            return false;
+        }
+        return error.contains(QStringLiteral("recipe"), Qt::CaseInsensitive) ||
+               error.contains(QStringLiteral("rebuild"), Qt::CaseInsensitive);
+    }
+
+    // Runs the same command again, without the recipe. The decrypted sources stay open.
+    void PrepareRetryWithoutRecipe() {
+        args.emplace_back("--no-recipe");
+        total = 0;
+        written = 0;
+        counting_since = -1;
+        seconds_left = -1;
+        std::scoped_lock lock{lines_mutex};
+        added.clear();
+        skipped.clear();
+    }
+
     // Closes the packages nxformat read, so the original can be moved.
     void ReleaseSources() {
         for (auto* source : sources) {
@@ -982,6 +1005,20 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
                                  tr("Cancelled. Nothing was changed on disk."));
         break;
     default:
+        if (job->CanRetryWithoutRecipe(error)) {
+            const auto answer = QMessageBox::question(
+                parent_widget, job->title,
+                tr("The operation failed because the rebuild recipe could not be kept:\n%1\n\n"
+                   "Try again without the recipe? The game still runs from the NX archive, but "
+                   "the original package cannot be rebuilt exactly from it.")
+                    .arg(error),
+                QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Retry);
+            if (answer == QMessageBox::Retry) {
+                job->PrepareRetryWithoutRecipe();
+                Start(std::move(job));
+            }
+            break;
+        }
         QMessageBox::warning(parent_widget, job->title,
                              tr("The operation failed:\n%1").arg(error));
         break;

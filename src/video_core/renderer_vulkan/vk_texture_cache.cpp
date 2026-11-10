@@ -542,7 +542,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         VideoCore::Surface::GetFormatType(info.format) != VideoCore::Surface::SurfaceType::ColorTexture,
         static_cast<u32>(info.resources.levels),
         VideoCore::Surface::IsPixelFormatASTC(info.format) ||
-            VideoCore::Surface::IsPixelFormatBCn(info.format));
+            VideoCore::Surface::IsPixelFormatBCn(info.format) ||
+            VideoCore::Surface::IsPixelFormatETC2(info.format));
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }

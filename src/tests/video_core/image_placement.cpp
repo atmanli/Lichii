@@ -206,16 +206,20 @@ TEST_CASE("Images require video memory only where host memory is a separate type
 TEST_CASE("The stream buffer goes to host memory where the CPU writes video memory through a small window",
           "[video_core][vulkan][image_placement]") {
     // A 4 GB GTX 1650 without resizable BAR: the device-local host-visible heap is 246 MiB.
-    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 246 * MiB));
-    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB));
+    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 246 * MiB, false));
+    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB, false));
     // With resizable BAR the whole of video memory is host visible: keep it there.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 12 * 1024 * MiB));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 12 * 1024 * MiB, false));
     // No device-local host-visible heap at all: the allocator falls back to host memory anyway.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 0));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 0, false));
     // An integrated GPU has no host memory apart from video memory.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, false, 246 * MiB));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, false, 246 * MiB, false));
+    // An integrated GPU that does report host memory apart and a 256 MiB device-local heap: the
+    // CPU already writes that heap at host memory speed.
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB, true));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", true, 256 * MiB, true));
     // EDEN_NX2_STREAM_IN_HOST: 0 keeps it in video memory, 1 sends it to host memory.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("0", true, 246 * MiB));
-    REQUIRE(Vulkan::StreamBufferInHostMemory("1", true, 12 * 1024 * MiB));
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", false, 246 * MiB));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("0", true, 246 * MiB, false));
+    REQUIRE(Vulkan::StreamBufferInHostMemory("1", true, 12 * 1024 * MiB, false));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", false, 246 * MiB, false));
 }

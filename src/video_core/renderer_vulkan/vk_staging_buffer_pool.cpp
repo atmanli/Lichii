@@ -126,7 +126,7 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
     const bool in_host = StreamBufferInHostMemory(
         std::getenv("EDEN_NX2_STREAM_IN_HOST"),
         HasHostMemoryApartFromVideo(type_flags.data(), memory_props.memoryTypeCount),
-        window_bytes);
+        window_bytes, device.IsIntegrated());
     stream_buffer = memory_allocator.CreateBuffer(
         stream_ci, in_host ? MemoryUsage::Upload : MemoryUsage::Stream);
     LOG_INFO(Render_Vulkan,

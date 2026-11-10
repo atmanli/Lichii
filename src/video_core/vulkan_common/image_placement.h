@@ -72,11 +72,13 @@ constexpr u64 RenderTargetReserveBytes(const char* value, u64 heap_budget) {
 /// 1 GB/s (4 GB GTX 1650, PCIe 3.0 x8: 9 ms of every 40 ms frame went into those copies, against
 /// 25 GB/s into host memory). The GPU reads host memory over PCIe instead, which it has time for.
 /// `host_memory_apart`: HasHostMemoryApartFromVideo; `window_bytes`: the largest device-local
-/// host-visible heap (0 if none). EDEN_NX2_STREAM_IN_HOST: '0' keeps it in video memory, '1'
-/// sends it to host memory where there is host memory apart.
+/// host-visible heap (0 if none). An integrated GPU keeps the old placement even when it reports
+/// host memory apart and a heap that small: its CPU writes that heap at host memory speed, so
+/// there is no slow window to avoid. EDEN_NX2_STREAM_IN_HOST: '0' keeps it in video memory, '1'
+/// sends it to host memory where there is host memory apart and the device is not integrated.
 constexpr bool StreamBufferInHostMemory(const char* value, bool host_memory_apart,
-                                        u64 window_bytes) {
-    if (!host_memory_apart) {
+                                        u64 window_bytes, bool integrated) {
+    if (!host_memory_apart || integrated) {
         return false;
     }
     if (value != nullptr && (value[0] == '0' || value[0] == '1')) {

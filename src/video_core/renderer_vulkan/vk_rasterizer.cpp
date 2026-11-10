@@ -437,6 +437,10 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(device, memory_allocator, scheduler) {
     scheduler.SetQueryCache(query_cache);
+    VideoCommon::Nx2FastDraw::g_dynamic_strides.store(
+        device.IsExtExtendedDynamicStateSupported() &&
+            device.IsExtVertexInputDynamicStateSupported(),
+        std::memory_order_relaxed);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
             gpu.ForEachPendingCpuWrite(callback);

@@ -10,6 +10,7 @@
 #include <codecvt>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <locale>
 #include <map>
 #include <set>
@@ -279,10 +280,34 @@ void EmulationSession::SetAppletId(int applet_id) {
         static_cast<Service::AM::AppletId>(m_applet_id));
 }
 
+// Applies EDEN_* NAME=VALUE lines from <config>/nx2_switches.txt, as the desktop build does with
+// its user copy. Read at every boot, so edits apply to the next game started.
+static void LoadNx2SwitchFile() {
+    const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir) / "nx2_switches.txt";
+    std::ifstream file{path};
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        const auto equals = line.find('=');
+        if (line.empty() || line[0] == '#' || equals == std::string::npos ||
+            !line.starts_with("EDEN_")) {
+            continue;
+        }
+        const std::string name = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+        setenv(name.c_str(), value.c_str(), 1);
+        LOG_INFO(Frontend, "nx2_switches.txt: {}={}", name, value);
+    }
+}
+
 Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,
                                                                const std::size_t program_index,
                                                                const bool frontend_initiated) {
     std::scoped_lock lock(m_mutex);
+
+    LoadNx2SwitchFile();
 
     // Create the render window.
     m_window = std::make_unique<EmuWindow_Android>(m_native_window, m_vulkan_library);

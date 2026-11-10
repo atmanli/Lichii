@@ -78,6 +78,38 @@ static int memfd_create(const char* name, unsigned int flags) {
 }
 #endif
 
+#ifdef __ANDROID__
+#include <fstream>
+#include <string>
+
+// EDEN_FILE_BACKED_MEMORY=1 (or a directory) backs guest memory with an unlinked file in the
+// app's internal cache instead of a memfd. The kernel can then write cold guest pages to
+// storage and drop them, where a memfd can only go to swap and the low memory killer ends the
+// app once swap runs short.
+static int OpenFileBackedMemory() {
+    const char* value = std::getenv("EDEN_FILE_BACKED_MEMORY");
+    if (value == nullptr || value[0] == '\0' || value[0] == '0') {
+        return -1;
+    }
+    std::string dir = value;
+    if (dir == "1") {
+        std::ifstream cmdline{"/proc/self/cmdline"};
+        std::string package;
+        std::getline(cmdline, package, '\0');
+        dir = "/data/data/" + package + "/cache";
+    }
+    const std::string path = dir + "/eden_guest_memory";
+    const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        LOG_WARNING(Common_Memory, "Could not create {}: {}", path, strerror(errno));
+        return -1;
+    }
+    unlink(path.c_str());
+    LOG_INFO(Common_Memory, "Guest memory is backed by a file in {}", dir);
+    return fd;
+}
+#endif
+
 namespace Common {
 
 thread_local HostMemory::AllocationTestControl* HostMemory::allocation_test_control{};
@@ -639,7 +671,13 @@ public:
             unlink(template_path);
         }
 #else
-        fd = memfd_create("HostMemory", 0);
+        fd = -1;
+#ifdef __ANDROID__
+        fd = OpenFileBackedMemory();
+#endif
+        if (fd < 0) {
+            fd = memfd_create("HostMemory", 0);
+        }
 #endif
         bool use_anon = false;
         if (fd <= 0) {

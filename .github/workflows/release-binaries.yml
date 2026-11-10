@@ -612,25 +612,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir dist
-          # Asset names drop the commit sha: the release tag already identifies the build, and
-          # stable names let the notes table link to them.
-          strip_sha() { sed "s/-${GITHUB_SHA}//" <<< "$1"; }
-          for artifact in artifacts/*/; do
-            name=$(basename "$artifact")
-            if compgen -G "$artifact*.AppImage" > /dev/null; then
-              # Linux: ship the AppImage and the tar.gz as they are.
-              for file in "$artifact"*.AppImage "$artifact"*.tar.gz; do
-                cp "$file" "dist/$(strip_sha "$(basename "$file")")"
-              done
-            elif compgen -G "$artifact*.zip" > /dev/null; then
-              for file in "$artifact"*.zip "$artifact"*.dmg; do
-                [[ -e "$file" ]] && cp "$file" "dist/$(strip_sha "$(basename "$file")")"
-              done
-            else
-              (cd "$artifact" && zip -qr "${GITHUB_WORKSPACE}/dist/$(strip_sha "$name").zip" .)
-            fi
-          done
+          mkdir -p dist
+          # This matrix builds only windows-x86_64-pgo. The artifact is the raw build/release/bin
+          # contents (lichii.exe + libraries + Qt plugin folders). download-artifact may place them
+          # directly under artifacts/ or under artifacts/<name>/, so find lichii.exe and zip its
+          # whole directory ONCE into a single package (not one zip per subfolder).
+          exe=$(find artifacts -name lichii.exe -print -quit)
+          if [[ -z "$exe" ]]; then
+            echo "lichii.exe not found under artifacts/:"
+            find artifacts -maxdepth 3 | head -80
+            exit 1
+          fi
+          win_root=$(dirname "$exe")
+          echo "Windows build root: $win_root"
+          (cd "$win_root" && zip -qr "${GITHUB_WORKSPACE}/dist/lichii-windows-x86_64-pgo.zip" .)
           ls -la dist
 
       - name: Generate package checksums
@@ -689,9 +684,9 @@ jobs:
           git fetch --no-tags -q upstream nx2 2>/dev/null || true
           pr_base=$(git merge-base upstream/nx2 HEAD 2>/dev/null || true)
           if [[ -n "$pr_base" ]]; then
-            pr_nums=$(git log --format='%s' "${pr_base}..HEAD" | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq)
+            pr_nums=$( { git log --format='%s' "${pr_base}..HEAD" || true; } | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq || true)
           else
-            pr_nums=$(git log --format='%s' | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq)
+            pr_nums=$( { git log --format='%s' || true; } | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq || true)
           fi
           pr_section=""
           if [[ -n "$pr_nums" ]]; then

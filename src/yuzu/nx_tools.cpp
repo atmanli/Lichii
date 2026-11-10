@@ -42,7 +42,7 @@
 #include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QWheelEvent>
+#include <QSlider>
 #include <QtConcurrentRun>
 
 #include <nxformat.h>
@@ -272,7 +272,7 @@ struct Snapshot {
     QString name;
 };
 
-// Shows a picture with a square selection: drag to move it, scroll to resize it.
+// Shows a picture with a square selection: click or drag to move it.
 class CropArea final : public QWidget {
 public:
     CropArea(const QImage& image_, QWidget* parent) : QWidget(parent), image{image_} {
@@ -282,6 +282,12 @@ public:
         side = std::min(image.width(), image.height());
         center = QPointF(image.width() / 2.0, image.height() / 2.0);
         setCursor(Qt::SizeAllCursor);
+    }
+
+    // 100: the whole short side; 400: a quarter of it.
+    void SetZoom(int percent) {
+        side = std::min(image.width(), image.height()) * 100.0 / percent;
+        Clamp();
     }
 
     QRect Selection() const {
@@ -307,6 +313,7 @@ protected:
     }
     void mousePressEvent(QMouseEvent* event) override {
         last = event->position();
+        pressed = event->position();
     }
     void mouseMoveEvent(QMouseEvent* event) override {
         if ((event->buttons() & Qt::LeftButton) == 0) {
@@ -316,11 +323,12 @@ protected:
         last = event->position();
         Clamp();
     }
-    void wheelEvent(QWheelEvent* event) override {
-        const double shortest = std::min(image.width(), image.height());
-        const double factor = event->angleDelta().y() > 0 ? 0.9 : 1.0 / 0.9;
-        side = std::clamp(side * factor, std::max(16.0, shortest / 10.0), shortest);
-        Clamp();
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        // A simple click centers the square on the point.
+        if (event->position() == pressed) {
+            center = event->position() / scale;
+            Clamp();
+        }
     }
 
 private:
@@ -335,20 +343,26 @@ private:
     double side = 0.0;
     QPointF center;
     QPointF last;
+    QPointF pressed;
 };
 
-// The square part of the picture to keep. A square picture is kept whole.
+// The square part of the picture to keep.
 std::optional<QRect> ChooseCrop(const QImage& image, QWidget* parent) {
-    if (image.width() == image.height()) {
-        return image.rect();
-    }
     QDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("Crop Icon"));
     auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(
-        new QLabel(QObject::tr("Drag the square to move it, scroll to resize it."), &dialog));
+    layout->addWidget(new QLabel(
+        QObject::tr("Click or drag to move the square. Zoom to keep a smaller part."), &dialog));
     auto* area = new CropArea(image, &dialog);
     layout->addWidget(area, 0, Qt::AlignCenter);
+    auto* zoom_row = new QHBoxLayout;
+    zoom_row->addWidget(new QLabel(QObject::tr("Zoom:"), &dialog));
+    auto* zoom = new QSlider(Qt::Horizontal, &dialog);
+    zoom->setRange(100, 400);
+    QObject::connect(zoom, &QSlider::valueChanged, area,
+                     [area](int value) { area->SetZoom(value); });
+    zoom_row->addWidget(zoom, 1);
+    layout->addLayout(zoom_row);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);

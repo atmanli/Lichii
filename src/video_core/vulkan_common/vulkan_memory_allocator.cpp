@@ -223,6 +223,8 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
     return image;
 }
 
+// Places an image of 8 to 16 MiB in the medium image pool of its memory type. False when the
+// image is not of that size or the pool has no room: the caller takes the usual path.
 bool MemoryAllocator::AllocateMediumImage(const VkImageCreateInfo &ci, VkImage &handle,
                                           VmaAllocation &allocation) const {
     // Over half a default block (8 MiB), VMA gives an image memory of its own: one driver
@@ -298,6 +300,8 @@ bool MemoryAllocator::AllocateMediumImage(const VkImageCreateInfo &ci, VkImage &
     return true;
 }
 
+// Creates the image and its memory: the medium image pool first, then the default blocks within
+// the budget, then the fallbacks. The image is left null when the result is an error.
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                         vk::Image &image) const {
     const VmaAllocationCreateInfo alloc_ci = {

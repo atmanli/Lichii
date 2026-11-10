@@ -80,6 +80,8 @@ void Proc(T& result, const DeviceDispatch& dld, const char* proc_name, VkDevice 
     result = reinterpret_cast<T>(dld.vkGetDeviceProcAddr(device, proc_name));
 }
 
+// Loads the device-level functions into `dld`, with the KHR or EXT name of those that are core
+// only in a later Vulkan version.
 void Load(VkDevice device, DeviceDispatch& dld) noexcept {
 #define X(name) Proc(dld.name, dld, #name, device)
     X(vkAcquireNextImageKHR);

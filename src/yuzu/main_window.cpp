@@ -166,6 +166,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/savedata_factory.h"
+#include "core/loader/nx.h"
 
 #include "core/tools/renderdoc.h"
 
@@ -2925,33 +2926,49 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
         return;
     }
 
-    FileSys::VirtualFile packed_update_raw{};
-    loader->ReadUpdateRaw(packed_update_raw);
-
     const auto& installed = QtCommon::system->GetContentProvider();
 
     u64 title_id{};
-    u8 raw_type{};
-    if (!SelectRomFSDumpTarget(installed, program_id, &title_id, &raw_type)) {
-        failed();
-        return;
+    FileSys::VirtualFile romfs;
+    if (loader->GetFileType() == Loader::FileType::NX) {
+        // An NX archive is never installed: it gives its own RomFS, update applied.
+        Loader::AppLoader_NX nx_loader{*QtCommon::system,
+                                       QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read),
+                                       program_id};
+        title_id = program_id;
+        if (nx_loader.ReadPatchedRomFS(romfs) != Loader::ResultStatus::Success) {
+            failed();
+            return;
+        }
+    } else {
+        FileSys::VirtualFile packed_update_raw{};
+        loader->ReadUpdateRaw(packed_update_raw);
+
+        u8 raw_type{};
+        if (!SelectRomFSDumpTarget(installed, program_id, &title_id, &raw_type)) {
+            failed();
+            return;
+        }
+
+        const auto type = static_cast<FileSys::ContentRecordType>(raw_type);
+        const auto base_nca = installed.GetEntry(title_id, type);
+        if (!base_nca) {
+            failed();
+            return;
+        }
+
+        const FileSys::NCA update_nca{packed_update_raw, nullptr};
+        if (type != FileSys::ContentRecordType::Program ||
+            update_nca.GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS ||
+            update_nca.GetTitleId() != FileSys::GetUpdateTitleID(title_id)) {
+            packed_update_raw = {};
+        }
+
+        const FileSys::PatchManager pm{title_id, QtCommon::system->GetFileSystemController(),
+                                       installed};
+        romfs = pm.PatchRomFS(base_nca.get(), base_nca->GetRomFS(), type, packed_update_raw, false);
     }
 
-    const auto type = static_cast<FileSys::ContentRecordType>(raw_type);
-    const auto base_nca = installed.GetEntry(title_id, type);
-    if (!base_nca) {
-        failed();
-        return;
-    }
-
-    const FileSys::NCA update_nca{packed_update_raw, nullptr};
-    if (type != FileSys::ContentRecordType::Program ||
-        update_nca.GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS ||
-        update_nca.GetTitleId() != FileSys::GetUpdateTitleID(title_id)) {
-        packed_update_raw = {};
-    }
-
-    const auto base_romfs = base_nca->GetRomFS();
     const auto dump_dir =
         target == DumpRomFSTarget::Normal
             ? Common::FS::GetEdenPath(Common::FS::EdenPath::DumpDir)
@@ -2959,10 +2976,6 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
     const auto romfs_dir = fmt::format("{:016X}/romfs", title_id);
 
     const auto path = Common::FS::PathToUTF8String(dump_dir / romfs_dir);
-
-    const FileSys::PatchManager pm{title_id, QtCommon::system->GetFileSystemController(),
-                                   installed};
-    auto romfs = pm.PatchRomFS(base_nca.get(), base_romfs, type, packed_update_raw, false);
 
     const auto out = VfsFilesystemCreateDirectoryWrapper(path, FileSys::OpenMode::ReadWrite);
 

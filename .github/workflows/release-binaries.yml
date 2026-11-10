@@ -612,6 +612,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Start from a clean dist/ (the repo checkout may ship its own dist/ with subfolders,
+          # and 'gh release create dist/*' would choke on a directory).
+          rm -rf dist
           mkdir -p dist
           # This matrix builds only windows-x86_64-pgo. The artifact is the raw build/release/bin
           # contents (lichii.exe + libraries + Qt plugin folders). download-artifact may place them

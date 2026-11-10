@@ -202,3 +202,20 @@ TEST_CASE("Images require video memory only where host memory is a separate type
     REQUIRE_FALSE(Vulkan::HasHostMemoryApartFromVideo(integrated.data(), 2));
     REQUIRE_FALSE(Vulkan::HasHostMemoryApartFromVideo(nullptr, 0));
 }
+
+TEST_CASE("The stream buffer goes to host memory where the CPU writes video memory through a small window",
+          "[video_core][vulkan][image_placement]") {
+    // A 4 GB GTX 1650 without resizable BAR: the device-local host-visible heap is 246 MiB.
+    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 246 * MiB));
+    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB));
+    // With resizable BAR the whole of video memory is host visible: keep it there.
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 12 * 1024 * MiB));
+    // No device-local host-visible heap at all: the allocator falls back to host memory anyway.
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 0));
+    // An integrated GPU has no host memory apart from video memory.
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, false, 246 * MiB));
+    // EDEN_NX2_STREAM_IN_HOST: 0 keeps it in video memory, 1 sends it to host memory.
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("0", true, 246 * MiB));
+    REQUIRE(Vulkan::StreamBufferInHostMemory("1", true, 12 * 1024 * MiB));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", false, 246 * MiB));
+}

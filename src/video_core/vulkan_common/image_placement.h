@@ -66,6 +66,26 @@ constexpr u64 RenderTargetReserveBytes(const char* value, u64 heap_budget) {
     return mib << 20;
 }
 
+/// Whether the stream buffer (staging uploads, uniform, index and storage buffers the CPU fills
+/// every draw) goes to host memory instead of the device-local host-visible heap. Without
+/// resizable BAR that heap is a 256 MiB window into video memory, and the CPU writes it at about
+/// 1 GB/s (4 GB GTX 1650, PCIe 3.0 x8: 9 ms of every 40 ms frame went into those copies, against
+/// 25 GB/s into host memory). The GPU reads host memory over PCIe instead, which it has time for.
+/// `host_memory_apart`: HasHostMemoryApartFromVideo; `window_bytes`: the largest device-local
+/// host-visible heap (0 if none). EDEN_NX2_STREAM_IN_HOST: '0' keeps it in video memory, '1'
+/// sends it to host memory where there is host memory apart.
+constexpr bool StreamBufferInHostMemory(const char* value, bool host_memory_apart,
+                                        u64 window_bytes) {
+    if (!host_memory_apart) {
+        return false;
+    }
+    if (value != nullptr && (value[0] == '0' || value[0] == '1')) {
+        return value[0] == '1';
+    }
+    constexpr u64 SmallWindow = u64{256} << 20;
+    return window_bytes != 0 && window_bytes <= SmallWindow;
+}
+
 /// Whether the device has vkGetDeviceImageMemoryRequirements (Vulkan 1.3 core), which gives an
 /// image's size without making one.
 constexpr bool HasDeviceImageRequirements(u32 api_version) {

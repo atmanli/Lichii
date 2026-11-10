@@ -117,10 +117,22 @@ TEST_CASE("Depth and stencil images never yield to render targets",
     // 12 GB card: a 12288x12288 D16 image (288 MiB), first made from a texture header and then
     // written as a depth buffer and sampled (a shadow map), went to host memory as a texture with
     // video memory at 5575 of 7382 MiB.
-    REQUIRE_FALSE(Vulkan::YieldsAsTexture(false, true));
-    REQUIRE_FALSE(Vulkan::YieldsAsTexture(true, false));
-    REQUIRE_FALSE(Vulkan::YieldsAsTexture(true, true));
-    REQUIRE(Vulkan::YieldsAsTexture(false, false));
+    REQUIRE_FALSE(Vulkan::YieldsAsTexture(false, true, 1, false));
+    REQUIRE_FALSE(Vulkan::YieldsAsTexture(true, false, 1, false));
+    REQUIRE_FALSE(Vulkan::YieldsAsTexture(true, true, 1, false));
+    REQUIRE(Vulkan::YieldsAsTexture(false, false, 11, true));
+}
+
+TEST_CASE("Single-level uncompressed color images never yield to render targets",
+          "[video_core][vulkan][image_placement]") {
+    // 4 GB card: a 512x512 RGBA16F image and a 960x540 RGBA16F one, each first made from a texture
+    // header and then written by compute shaders every frame (a blur chain), went to host memory
+    // as textures; the two dispatches took 4.8 and 4.2 ms of a 45 ms frame over PCIe.
+    REQUIRE_FALSE(Vulkan::YieldsAsTexture(false, false, 1, false));
+    // What a title loads keeps yielding: block-compressed images, and mipmapped ones.
+    REQUIRE(Vulkan::YieldsAsTexture(false, false, 1, true));
+    REQUIRE(Vulkan::YieldsAsTexture(false, false, 11, true));
+    REQUIRE(Vulkan::YieldsAsTexture(false, false, 11, false));
 }
 
 TEST_CASE("The decode image for the BC encoder counts twice its size",

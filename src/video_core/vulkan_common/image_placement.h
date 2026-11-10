@@ -83,9 +83,15 @@ constexpr bool YieldsToRenderTargets(bool render_target, u64 heap_usage, u64 ima
 
 /// Whether an image can yield to render targets as a texture. Depth and stencil images never do:
 /// the GPU writes them, even those first made from a texture header (12 GB card: a 12288x12288 D16
-/// shadow map made from one went to host memory as a texture, 288 MiB).
-constexpr bool YieldsAsTexture(bool render_target, bool depth_or_stencil) {
-    return !render_target && !depth_or_stencil;
+/// shadow map made from one went to host memory as a texture, 288 MiB). Neither do single-level
+/// color images that are not block-compressed: those are the GPU's own output far more often
+/// than what a title loads (blur and bloom chains, compute results), and the GPU writes and reads
+/// them every frame. A texture header can make them first, before any render target does (4 GB
+/// card: two compute dispatches of a blur took 4.8 and 4.2 ms of a 45 ms frame over PCIe).
+constexpr bool YieldsAsTexture(bool render_target, bool depth_or_stencil, u32 levels,
+                               bool block_compressed) {
+    const bool gpu_output = levels == 1 && !block_compressed;
+    return !render_target && !depth_or_stencil && !gpu_output;
 }
 
 /// What an image counts for in YieldsToRenderTargets. The decode image for the BC encoder

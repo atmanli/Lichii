@@ -26,6 +26,9 @@ using namespace Common::Literals;
 
 static constexpr size_t VIRTUAL_SIZE = 1ULL << 39;
 static constexpr size_t BACKING_SIZE = 4_GiB;
+// The move tests hold two buffers at once; Windows commits each backing buffer in full.
+static constexpr size_t MOVE_VIRTUAL_SIZE = 1_GiB;
+static constexpr size_t MOVE_BACKING_SIZE = 64_MiB;
 static constexpr auto PERMS = Common::MemoryPermission::ReadWrite;
 static constexpr auto HEAP = false;
 
@@ -311,7 +314,7 @@ TEST_CASE("HostMemory: Trim zero pages keeps contents", "[common]") {
 }
 #endif
 TEST_CASE("HostMemory: Move construction transfers the buffer and its mappings", "[common][host_memory_move]") {
-    HostMemory source(BACKING_SIZE, VIRTUAL_SIZE);
+    HostMemory source(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
     u8* const backing = source.BackingBasePointer();
     u8* const view = source.VirtualBasePointer();
     REQUIRE(backing != nullptr);
@@ -320,7 +323,7 @@ TEST_CASE("HostMemory: Move construction transfers the buffer and its mappings",
     HostMemory moved(std::move(source));
     CHECK(moved.BackingBasePointer() == backing);
     CHECK(moved.VirtualBasePointer() == view);
-    CHECK(moved.VirtualSize() == VIRTUAL_SIZE);
+    CHECK(moved.VirtualSize() == MOVE_VIRTUAL_SIZE);
     CHECK(moved.BackingBasePointer()[0x1234] == 0x5a);
     // The moved-from object owns nothing, so destroying both releases the buffer once.
     CHECK(source.BackingBasePointer() == nullptr);
@@ -334,8 +337,8 @@ TEST_CASE("HostMemory: Move construction transfers the buffer and its mappings",
 }
 
 TEST_CASE("HostMemory: Move assignment releases the old buffer and keeps the new one", "[common][host_memory_move]") {
-    HostMemory target(BACKING_SIZE, VIRTUAL_SIZE);
-    HostMemory source(BACKING_SIZE, VIRTUAL_SIZE);
+    HostMemory target(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
+    HostMemory source(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
     u8* const backing = source.BackingBasePointer();
     REQUIRE(backing != nullptr);
     REQUIRE(target.BackingBasePointer() != backing);

@@ -405,8 +405,8 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
     // built as calls instead of being inlined at each call site
     // (video_core/spirv_inline_control.h).
     std::vector<u32> module_code(code.begin(), code.end());
-    if (const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(module_code);
-        marked != 0) {
+    const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(module_code);
+    if (marked != 0) {
         static std::atomic<u32> logged{};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
             LOG_INFO(Render_Vulkan,
@@ -421,6 +421,11 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
                                           module_code.size() * sizeof(u32));
     }
     device.SaveShader(code);
+    if (marked != 0) {
+        // Aftermath matches crash reports by the hash of the submitted module, so save that
+        // copy as well.
+        device.SaveShader(module_code);
+    }
     vk::ShaderModule module{BuildShader(device, module_code)};
 
     // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump

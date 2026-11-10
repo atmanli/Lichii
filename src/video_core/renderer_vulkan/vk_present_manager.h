@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <boost/container/deque.hpp>
@@ -53,6 +54,13 @@ public:
 
     /// Returns the last used presentation frame
     Frame* GetRenderFrame();
+
+    /// The time GetRenderFrame calls waited for a frame since the last call of this (the
+    /// present thread holding the renderer back).
+    [[nodiscard]] std::chrono::steady_clock::duration TakeBlockedTime() {
+        return std::chrono::steady_clock::duration{
+            blocked_time.exchange(0, std::memory_order_relaxed)};
+    }
 
     /// Pushes a frame for presentation
     void Present(Frame* frame);
@@ -109,6 +117,9 @@ private:
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
+    /// See TakeBlockedTime. Atomic: a composite can also run from a syncpoint action on
+    /// another thread (GPU::RequestComposite).
+    std::atomic<std::chrono::steady_clock::rep> blocked_time{};
 };
 
 } // namespace Vulkan

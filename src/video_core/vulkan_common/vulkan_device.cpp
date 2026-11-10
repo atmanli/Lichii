@@ -923,6 +923,8 @@ Device::~Device() {
     vmaDestroyAllocator(allocator);
 }
 
+// The pool of `kind` for `memory_type`, made on first use with that kind's block size and block
+// limit. Null when VMA can't make it: the caller then allocates from the default blocks.
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
     std::scoped_lock lk{separate_pools_mutex};
     VmaPool& pool = separate_pools[static_cast<u32>(kind)][memory_type];
@@ -930,9 +932,10 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
         const VmaPoolCreateInfo ci{
             .memoryTypeIndex = memory_type,
             .flags = 0,
-            .blockSize = SeparatePoolBlockSize,
+            .blockSize = kind == SeparatePool::MediumImages ? MediumImagePoolBlockSize
+                                                            : SeparatePoolBlockSize,
             .minBlockCount = 0,
-            .maxBlockCount = 0,
+            .maxBlockCount = kind == SeparatePool::MediumImages ? MediumImagePoolMaxBlocks : 0,
             .priority = 0.f,
             .minAllocationAlignment = 0,
             .pMemoryAllocateNext = nullptr,

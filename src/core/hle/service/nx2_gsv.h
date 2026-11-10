@@ -1953,8 +1953,12 @@ private:
     // rate (Settings::IsDockedForGame), and docked again once it keeps up.
     void UpdateAutoResolution(long long now_us, long long frame_us, u32 timing) {
         static const int forced = [] {
+            // "0" or "1" overrides the setting; anything else leaves it alone.
             const char* value = std::getenv("EDEN_NX2_AUTO_RES");
-            return value != nullptr ? std::atoi(value) : -1;
+            if (value == nullptr || (value[0] != '0' && value[0] != '1')) {
+                return -1;
+            }
+            return value[0] == '1' ? 1 : 0;
         }();
         const bool enabled = forced >= 0 ? forced != 0
                                          : Settings::values.nx2_auto_resolution.GetValue();

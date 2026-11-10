@@ -97,10 +97,7 @@ private:
                 }
                 return Change::None;
             }
-            docked_sum += is_slow ? median : 0;
-            if (!is_slow) {
-                docked_sum = 0;
-            }
+            docked_sum = is_slow ? docked_sum + median : 0;
             if (slow >= SlowWindows && now_us >= docked_hold_until_us) {
                 docked_median = docked_sum / slow;
                 checking = true;

@@ -80,6 +80,8 @@ void Proc(T& result, const DeviceDispatch& dld, const char* proc_name, VkDevice 
     result = reinterpret_cast<T>(dld.vkGetDeviceProcAddr(device, proc_name));
 }
 
+// Loads the device-level functions into `dld`, with the KHR or EXT name of those that are core
+// only in a later Vulkan version.
 void Load(VkDevice device, DeviceDispatch& dld) noexcept {
 #define X(name) Proc(dld.name, dld, #name, device)
     X(vkAcquireNextImageKHR);
@@ -221,6 +223,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkGetDeviceQueue);
     X(vkGetEventStatus);
     X(vkGetFenceStatus);
+    X(vkGetDeviceImageMemoryRequirements);
     X(vkGetImageMemoryRequirements);
     X(vkGetImageSparseMemoryRequirements);
     X(vkGetPipelineCacheData);
@@ -281,6 +284,12 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     }
     if (!dld.vkQueueSubmit2) {
         Proc(dld.vkQueueSubmit2, dld, "vkQueueSubmit2KHR", device);
+    }
+
+    // Core in Vulkan 1.3, otherwise requires VK_KHR_maintenance4
+    if (!dld.vkGetDeviceImageMemoryRequirements) {
+        Proc(dld.vkGetDeviceImageMemoryRequirements, dld, "vkGetDeviceImageMemoryRequirementsKHR",
+             device);
     }
 
     if (!dld.vkCreateRenderPass2) {

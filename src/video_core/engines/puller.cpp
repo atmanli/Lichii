@@ -280,6 +280,68 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
                     dma_pusher.memory_manager.Read<u32>((pending_acquire->address & ~GPUVAddr{0xf}) + 8),
                     dma_pusher.memory_manager.Read<u32>((pending_acquire->address & ~GPUVAddr{0xf}) + 12));
     }
+    if (static_cast<GpuSemaphoreOperation>(pending_acquire->operation) !=
+        GpuSemaphoreOperation::AcquireEqual) {
+        return false;
+    }
+    // A passed equality never returns: these semaphores only advance, and with the emulator's
+    // looser channel ordering the writers can already be past an AcquireEqual target when the
+    // waiting channel reaches it. A short grace covers a write racing the read; after that take
+    // the greater-or-equal reading the protocol implies. Gating this on the 2 s warning made
+    // boot advance one ring round per two seconds (Eglantine #712).
+    const auto waited = std::chrono::steady_clock::now() - pending_acquire->since;
+    if (waited >= std::chrono::milliseconds{10} && current > pending_acquire->value) {
+        VideoCommon::Count(stats.passage);
+        static std::atomic<u32> passage_logged{};
+        if (passage_logged.fetch_add(1) < 16) {
+            LOG_INFO(HW_GPU,
+                     "Channel {} acquire satisfied by passage: semaphore {:#x} wanted {:#x}, "
+                     "now {:#x}",
+                     dma_pusher.channel_state.bind_id, pending_acquire->address,
+                     pending_acquire->value, current);
+        }
+        return true;
+    }
+    // A ring round that never lands. The flip-counter semaphores around NVN2's queue regions
+    // advance as a ring of fence-carried releases, and a stuck wait's target is ahead of memory
+    // by less than a round: the value the next round writes, already committed by the game's
+    // protocol. When every carrier channel is itself parked behind such an acquire, the fence
+    // chain holds no future release and nothing recovers. After 100 ms (above normal frame
+    // pacing, far below a real stall), complete the round ourselves and notify the other waiters
+    // (Eglantine #712). Only words the mirror machinery tracks are completed: elsewhere a
+    // producer may simply be slower than 100 ms, and guest-visible progress must not be invented.
+    if (waited >= std::chrono::milliseconds{100} &&
+        Nx2InSemaphoreFirstPage(pending_acquire->address) && pending_acquire->value > current &&
+        pending_acquire->value - current <= 0x40) {
+        const u32 latest = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
+        if (latest >= pending_acquire->value) {
+            return true;
+        }
+        if (pending_acquire->value - latest <= 0x40) {
+            const auto device = dma_pusher.memory_manager.GpuToCpuAddress(pending_acquire->address);
+            if (device) {
+                auto& shadow = Nx2MirrorShadow::Get();
+                if (shadow.Diverts(*device)) {
+                    shadow.Set(*device, pending_acquire->value,
+                               dma_pusher.memory_manager.Read<u32>(pending_acquire->address));
+                } else {
+                    dma_pusher.memory_manager.Write<u32>(pending_acquire->address,
+                                                         pending_acquire->value);
+                }
+                Nx2SemaphoreWaiters::Get().OnWrite(*device, pending_acquire->value);
+                VideoCommon::Count(stats.rescued);
+                static std::atomic<u32> rescue_logged{};
+                if (rescue_logged.fetch_add(1) < 64) {
+                    LOG_INFO(HW_GPU,
+                             "Channel {} acquire satisfied by ring rescue: semaphore {:#x} "
+                             "advanced {:#x} -> {:#x}",
+                             dma_pusher.channel_state.bind_id, pending_acquire->address, latest,
+                             pending_acquire->value);
+                }
+                return true;
+            }
+        }
+    }
     return false;
 }
 

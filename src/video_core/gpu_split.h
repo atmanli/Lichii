@@ -60,6 +60,8 @@ struct AcquireStats {
     std::atomic<u64> passed{};    ///< Acquires and polls met without a drain
     std::atomic<u64> by_queued{}; ///< Of passed: met by a release the back had not run yet
     std::atomic<u64> latched{};   ///< Polls resumed by a release the back ran (no drain)
+    std::atomic<u64> passage{};   ///< Equal acquires satisfied by a passed value
+    std::atomic<u64> rescued{};   ///< Equal acquires completed by a ring rescue
     std::atomic<u64> drained{};   ///< Acquires and polls that drained the split
     std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire
     std::atomic<u64> drain_settings{};  ///< ...the split or the accuracy settings ask for it

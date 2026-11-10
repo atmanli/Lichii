@@ -18,6 +18,7 @@
 
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/evicted_pointer_slots.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
@@ -69,6 +70,7 @@ struct hash<Vulkan::GraphicsPipelineCacheKey> {
 namespace Vulkan {
 
 class Device;
+class PipelineBinaries;
 class PipelineStatistics;
 class RenderPassCache;
 class RescalingPushConstant;
@@ -104,10 +106,11 @@ class GraphicsPipeline {
 public:
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
-        vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
+        vk::PipelineCache& pipeline_cache, PipelineBinaries* binaries,
+        VideoCore::ShaderNotify* shader_notify,
         const Device& device, DescriptorPool& descriptor_pool,
         GuestDescriptorQueue& guest_descriptor_queue,
-        DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
+        DescriptorBufferRing& descriptor_buffer_ring, const PipelineBuildQueue& build_queue,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos,
@@ -249,6 +252,15 @@ public:
         return used;
     }
 
+    /// The constant buffer slots each program binds as storage buffer pointers
+    [[nodiscard]] const VideoCommon::EvictedPointerSlots::Slots& MappedPointers() const noexcept {
+        return mapped_pointers;
+    }
+
+    void SetMappedPointers(VideoCommon::EvictedPointerSlots::Slots slots) noexcept {
+        mapped_pointers = std::move(slots);
+    }
+
     /// Forgets the transitions, which may point to pipelines the cache evicted.
     void ClearTransitions() noexcept {
         transition_keys.clear();
@@ -266,6 +278,11 @@ public:
 
     [[nodiscard]] bool IsBuilt() const noexcept {
         return build->IsBuilt();
+    }
+
+    /// Builds it on this thread, for a pipeline made with PipelineBuildQueue::owner_builds
+    void Build() {
+        build->Build();
     }
 
     /// Waits up to `timeout` for the build; true when built.
@@ -319,6 +336,10 @@ public:
         return delta_mismatch;
     }
 
+    /// Whether an image the kept views sample has an upload pending or a newer alias to copy in:
+    /// ConfigureDelta prepares none, Configure does.
+    [[nodiscard]] bool DeltaImagesChange() const noexcept;
+
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
         return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };
@@ -332,6 +353,8 @@ public:
 private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
+
+    void KeepImageDescriptors(size_t stage, size_t first_entry);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
@@ -347,6 +370,7 @@ private:
     TextureCache& texture_cache;
     BufferCache& buffer_cache;
     vk::PipelineCache& pipeline_cache;
+    PipelineBinaries* const binaries; ///< Shader cache v2's driver layer, else null
     Scheduler& scheduler;
     GuestDescriptorQueue& guest_descriptor_queue;
     DescriptorBufferRing& descriptor_buffer_ring;
@@ -355,6 +379,7 @@ private:
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
+    VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
     u64 last_use_frame{};
     bool used{};
 
@@ -385,6 +410,14 @@ private:
     std::array<u32, NUM_STAGES> handle_constant_buffers{};
     std::vector<VideoCommon::ImageViewInOut> delta_views;
     std::vector<VideoCommon::SamplerId> delta_samplers;
+    /// Delta draws: the image descriptor entries (first entry and count per
+    /// stage) and rescaling words pushed for delta_views, which delta draws push again while no
+    /// image changed its scale (TextureCache::ScaleEpoch).
+    std::vector<DescriptorUpdateEntry> kept_image_entries;
+    std::array<std::pair<u32, u32>, NUM_STAGES> kept_image_ranges{};
+    std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> kept_rescaling{};
+    u64 kept_scale_epoch{};
+    bool kept_images_valid{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

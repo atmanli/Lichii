@@ -26,6 +26,7 @@
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/renderer_vulkan/upload_batch.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
@@ -111,7 +112,8 @@ void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
 Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     : device{device_}, state_tracker{state_tracker_},
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
-      command_pool{std::make_unique<CommandPool>(*master_semaphore, device)} {
+      command_pool{std::make_unique<CommandPool>(*master_semaphore, device)},
+      upload_batch{std::make_unique<UploadBatch>()} {
 
     if (Common::DkbFrameTrace::Enabled()) {
         const auto physical = device.GetPhysical();
@@ -254,6 +256,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Finish");
     }
     // When finishing, we need to wait for the submission to have executed on the device.
+    const VideoCommon::StutterTrace::SiteScope site{VideoCommon::StutterTrace::Site::SchedulerFinish};
     const u64 presubmit_tick = CurrentTick();
     const bool profile = VideoCommon::Nx2Profile::Enabled();
     const u64 start = profile ? VideoCommon::Nx2Profile::Now() : 0;
@@ -292,6 +295,10 @@ void Scheduler::DispatchWork() {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
+    if (uploads_pending) {
+        // The worker must receive everything recorded so far.
+        FlushUploads();
+    }
     if (chunk && !chunk->Empty()) {
         // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
         // draws): skip it while the worker is still busy, it pops the queue before waiting.
@@ -306,6 +313,32 @@ void Scheduler::DispatchWork() {
         }
         AcquireNewChunk();
     }
+}
+
+void Scheduler::RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies) {
+    if (VideoCommon::GpuSplit::check_owner) {
+        VideoCommon::GpuSplit::CheckOwner("Scheduler::RecordUpload");
+    }
+    // Check each region so even a single upload larger than the capacity stays bounded, and
+    // overlapping regions within that upload cannot enter the same batch.
+    for (const VkBufferCopy& copy : copies) {
+        const std::span<const VkBufferCopy> region{&copy, 1};
+        if (uploads_pending && !upload_batch->CanAdd(src, dst, region)) {
+            FlushUploads();
+        }
+        upload_batch->Add(src, dst, region);
+        uploads_pending = true;
+    }
+}
+
+void Scheduler::FlushUploads() {
+    // Copy the vectors so the recording thread retains their capacity while the worker uses them.
+    auto command = [copies = upload_batch->copies, groups = upload_batch->groups](
+                       vk::CommandBuffer cmdbuf) { UploadBatch::Record(cmdbuf, copies, groups); };
+    upload_batch->copies.clear();
+    upload_batch->groups.clear();
+    uploads_pending = false;
+    Record(std::move(command));
 }
 
 void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
@@ -517,6 +550,8 @@ bool Scheduler::UpdateDescriptorBufferChunk(u32 descriptor_chunk) {
 void Scheduler::WorkerThread(std::stop_token stop_token) {
     Common::SetCurrentThreadName("VulkanWorker");
     const Common::DkbCpuTrace::Registration trace_thread{Common::DkbCpuTrace::Role::VulkanWorker};
+    const VideoCommon::StutterTrace::ThreadScope stutter_thread{
+        VideoCommon::StutterTrace::Thread::Worker};
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
 
@@ -538,10 +573,13 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
-            event_cv.wait(lk, stop_token, [&] {
-                worker_waiting = !TryPopQueue(work);
-                return !worker_waiting;
-            });
+            {
+                const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::WorkerIdle};
+                event_cv.wait(lk, stop_token, [&] {
+                    worker_waiting = !TryPopQueue(work);
+                    return !worker_waiting;
+                });
+            }
             worker_waiting = false;
 
             // If we've been asked to stop, we're done.
@@ -571,6 +609,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             // Recycle the chunk back to the reserve.
             chunk_reserve.emplace_back(std::move(work));
         }
+        VideoCommon::Nx2Profile::Report("Vulkan worker");
     }
 }
 
@@ -911,6 +950,10 @@ void Scheduler::TraceGpuSubmission() {
 }
 
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+    if (uploads_pending) {
+        // Keep the copies in the tick that protects their staging regions and buffer lifetimes.
+        FlushUploads();
+    }
     if (VideoCommon::Nx2Profile::Enabled()) {
         g_profile_submits.fetch_add(1, std::memory_order_relaxed);
         ReportSubmitCounts();

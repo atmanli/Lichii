@@ -21,6 +21,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
@@ -34,6 +35,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"
 #include "video_core/texture_cache/conversion.h"
+#include "video_core/texture_cache/host_memory_limit.h"
 #include "video_core/texture_cache/host_mip_limits.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
@@ -140,6 +142,7 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 
 template <class P>
 void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
+    const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
     bool high_priority_mode = false;
     bool aggressive_mode = false;
     bool evict_old_costly = false;
@@ -349,9 +352,14 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     }
     expected_memory = (std::min)(expected_memory, critical_memory);
     if (log) {
-        LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
-                 expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
+        LogThresholds();
     }
+}
+
+template <class P>
+void TextureCache<P>::LogThresholds() const {
+    LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
+             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
 }
 
 template <class P>
@@ -408,7 +416,6 @@ void TextureCache<P>::TickFrame() {
             if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
                 if (budget > 2_GiB) {
-                    const u64 old_critical = critical_memory;
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
                     if constexpr (requires { runtime.GetDeviceMemorySlack(); }) {
                         // The usage counted here leaves out the unused part of the allocator's
@@ -424,18 +431,38 @@ void TextureCache<P>::TickFrame() {
                     }
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
+                    // The device's budget is not all the room there is: see HostCriticalMemory.
+                    // The usage is the driver's, which still counts images waiting to be freed.
+                    const std::optional<u64> commit_room = Common::GetSystemCommitRoom();
+                    const u64 host_critical =
+                        commit_room
+                            ? HostCriticalMemory(runtime.GetDeviceMemoryUsage(), *commit_room)
+                            : (std::numeric_limits<u64>::max)();
+                    critical_memory = (std::min)(critical_memory, host_critical);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    ApplyThresholdOverrides(false);
                     // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time).
-                    const u64 change = critical_memory > old_critical
-                                           ? critical_memory - old_critical
-                                           : old_critical - critical_memory;
+                    // the time). Compared after the cap: before it, every check differed from
+                    // the capped value by more than 256 MiB and logged twice a second. Compared
+                    // with the last values logged, so a threshold that host memory lowers a
+                    // little at each check is logged too.
+                    const u64 change = critical_memory > logged_critical_memory
+                                           ? critical_memory - logged_critical_memory
+                                           : logged_critical_memory - critical_memory;
                     const bool log = budget_check_frames == 1 || change >= 256_MiB;
-                    ApplyThresholdOverrides(log);
                     if (log) {
+                        logged_critical_memory = critical_memory;
+                        LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, block slack {} MiB",
                                  margin >> 20, pressure_margin >> 20, slack_margin >> 20);
+                        if (commit_room) {
+                            LOG_INFO(HW_GPU, "Host memory: {} MiB of commit left, {}",
+                                     *commit_room >> 20,
+                                     critical_memory == host_critical
+                                         ? "which bounds the thresholds"
+                                         : "the device budget bounds the thresholds");
+                        }
                     }
                 }
             }
@@ -458,6 +485,49 @@ void TextureCache<P>::TickFrame() {
             total_used_memory -= (std::min)(total_used_memory, bytes);
         }
         total_used_memory -= (std::min)(total_used_memory, gpu_sentenced_bytes);
+    }
+    // EDEN_NX2_MEM_TRACE=1: every 2 s, what the cache holds next to what the process and the
+    // driver report (memory climbs).
+    static const bool mem_trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
+    if (const auto now = std::chrono::steady_clock::now();
+        mem_trace && now - mem_trace_time >= std::chrono::seconds{2}) {
+        mem_trace_time = now;
+        u64 image_bytes{};
+        u64 gpu_written_bytes{};
+        size_t images{};
+        size_t unbacked{};
+        for (const auto [image_id, image] : slot_images) {
+            ++images;
+            if (True(image->flags & ImageFlagBits::Unbacked)) {
+                ++unbacked;
+                continue;
+            }
+            const u64 bytes = GetScaledImageSizeBytes(*image);
+            image_bytes += bytes;
+            if (True(image->flags & ImageFlagBits::GpuModified)) {
+                gpu_written_bytes += bytes;
+            }
+        }
+        u64 decode_bytes{};
+        for (const auto& decode : async_decodes) {
+            // The worker sizes the buffer before it publishes complete.
+            if (decode->complete.load(std::memory_order_acquire)) {
+                decode_bytes += decode->decoded_data.capacity();
+            }
+        }
+        const u64 sentenced = std::accumulate(sentenced_image_bytes.begin(),
+                                              sentenced_image_bytes.end(), gpu_sentenced_bytes);
+        LOG_INFO(HW_GPU,
+                 "Memory trace: texture cache {} images {} MiB ({} MiB GPU-written, {} unbacked), "
+                 "device usage {} MiB (expected {} MiB, critical {} MiB), sentenced {} MiB, {} "
+                 "async decodes {} MiB, scratch {} MiB",
+                 images, image_bytes >> 20, gpu_written_bytes >> 20, unbacked,
+                 total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20,
+                 sentenced >> 20, async_decodes.size(), decode_bytes >> 20,
+                 (swizzle_data_buffer.capacity() + unswizzle_data_buffer.capacity()) >> 20);
+        if constexpr (requires { runtime.LogMemoryTrace(); }) {
+            runtime.LogMemoryTrace();
+        }
     }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
@@ -1207,6 +1277,7 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
 
 template <class P>
 void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     boost::container::small_vector<ImageId, 16> images;
     ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
         if (!IsDownloadable(image)) {
@@ -1218,6 +1289,7 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
     if (images.empty()) {
         return;
     }
+    const StutterTrace::SiteScope site{StutterTrace::Site::TextureDownload};
     std::ranges::sort(images, [this](ImageId lhs, ImageId rhs) {
         return slot_images[lhs].modification_tick < slot_images[rhs].modification_tick;
     });
@@ -1331,6 +1403,7 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     // A deferred clear parked before this copy has to land before it: realizing it afterwards
     // starts its clear pass after the copy and wipes what the copy wrote. That is what made
     // Ocarina of Time draw its terrain layer over the scene (#101): the game clears the
@@ -1709,6 +1782,7 @@ bool TextureCache<P>::ShouldWaitAsyncFlushes() const noexcept {
 
 template <class P>
 void TextureCache<P>::CommitAsyncFlushes() {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     // This is intentionally passing the value by copy
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         auto& download_ids = uncommitted_downloads;
@@ -1772,6 +1846,7 @@ void TextureCache<P>::PopAsyncFlushes() {
     if (committed_downloads.empty()) {
         return;
     }
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         const auto& download_ids = committed_downloads.front();
         if (download_ids.empty()) {
@@ -2528,6 +2603,9 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
 
 template <class P>
 void TextureCache<P>::InvalidateScale(Image& image) {
+    // Its views are deleted: a fast draw delta draw keeping one must not follow.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+    ++scale_epoch;
     if (image.scale_tick <= frame_tick) {
         image.scale_tick = frame_tick + 1;
     }
@@ -2660,6 +2738,7 @@ void TextureCache<P>::QueueAsyncUnswizzle(Image& image, ImageId image_id) {
 
 template <class P>
 void TextureCache<P>::TickAsyncDecode() {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     bool has_uploads{};
     auto i = async_decodes.begin();
     while (i != async_decodes.end()) {
@@ -2819,6 +2898,7 @@ std::optional<DAddr> TextureCache<P>::ImageCpuAddress(GPUVAddr gpu_addr, size_t 
 template <class P>
 ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
+    const StutterTrace::SiteScope site{StutterTrace::Site::ImageCreate};
     std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
         const DAddr fake_addr = ~(1ULL << 40ULL) + virtual_invalid_space;
@@ -2850,6 +2930,7 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
 
 template <class P>
 ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DAddr cpu_addr) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     ImageInfo new_info = info;
     const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
     const bool broken_views = runtime.HasBrokenTextureViewFormats();
@@ -3137,6 +3218,25 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             copied_whole = true;
             break;
         }
+    }
+    // The copies from overlaps the GPU wrote can each write a part of it, together all of it:
+    // Mario Kart World renders each layer of its shadow map and colour arrays as a target of its
+    // own, then samples the array, and the upload under those copies took 13-31 ms an array.
+    if (!can_rescale && !copied_whole && new_info.num_samples == 1) {
+        std::vector<u8> written(
+            static_cast<size_t>(new_info.resources.levels * new_info.resources.layers));
+        for (const JoinCopy& copy : join_copies_to_do) {
+            const Image& overlap = slot_images[copy.id];
+            if (copy.is_alias || False(overlap.flags & ImageFlagBits::GpuModified) ||
+                overlap.info.num_samples != 1) {
+                continue;
+            }
+            const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
+            MarkSubresourcesWrittenWhole(new_image, overlap,
+                                         MakeShrinkImageCopies(new_info, overlap.info, base, 1, 0),
+                                         written);
+        }
+        copied_whole = std::ranges::all_of(written, [](u8 whole) { return whole != 0; });
     }
     if (overwritten_by_clear()) {
         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
@@ -3849,6 +3949,7 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
+    const StutterTrace::SiteScope site{StutterTrace::Site::ImageDelete};
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
@@ -4077,6 +4178,12 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
 
 template <class P>
 void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
+    if (prepare_log != nullptr) {
+        prepare_log->push_back(image_id);
+        if (prepare_log_dry) {
+            return;
+        }
+    }
     Image& image = slot_images[image_id];
     if (invalidate) {
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
@@ -4132,14 +4239,10 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
 template <class P>
 void TextureCache<P>::PrepareImageView(ImageViewId image_view_id, bool is_modification,
                                        bool invalidate) {
-    if (!image_view_id) {
+    if (!PreparesImage(slot_image_views, image_view_id)) {
         return;
     }
-    const ImageViewBase& image_view = slot_image_views[image_view_id];
-    if (image_view.IsBuffer()) {
-        return;
-    }
-    PrepareImage(image_view.image_id, is_modification, invalidate);
+    PrepareImage(slot_image_views[image_view_id].image_id, is_modification, invalidate);
 }
 
 template <class P>

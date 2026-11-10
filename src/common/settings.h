@@ -687,6 +687,23 @@ struct Values {
                                                          true,
                                                          true};
 
+    // Graphics pipeline libraries (VK_EXT_graphics_pipeline_library): pipelines linked from
+    // per-stage shader libraries.
+    SwitchableSetting<bool> use_graphics_pipeline_library{
+        linkage, false, "use_graphics_pipeline_library", Category::RendererAdvanced};
+
+    // Threads of the shader precache on the loading screen, 0 for every CPU thread that fits
+    // the free commit memory (Windows).
+    SwitchableSetting<u32, true> shader_warm_threads{linkage,
+                                                     0,
+                                                     0,
+                                                     64,
+                                                     "shader_warm_threads",
+                                                     Category::RendererAdvanced,
+                                                     Specialization::Countable,
+                                                     true,
+                                                     true};
+
     // Precache shaders before the game starts: the compute programs in the game files and the
     // cached graphics pipelines the boot leaves for later are built on the loading screen, so the
     // driver's cache holds them before the game first uses them.

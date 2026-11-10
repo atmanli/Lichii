@@ -7,9 +7,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <utility>
 #include <boost/container/deque.hpp>
 
 #include "common/common_types.h"
@@ -56,9 +56,10 @@ public:
     Frame* GetRenderFrame();
 
     /// The time GetRenderFrame calls waited for a frame since the last call of this (the
-    /// present thread holding the renderer back). For the thread that calls GetRenderFrame.
+    /// present thread holding the renderer back).
     [[nodiscard]] std::chrono::steady_clock::duration TakeBlockedTime() {
-        return std::exchange(blocked_time, {});
+        return std::chrono::steady_clock::duration{
+            blocked_time.exchange(0, std::memory_order_relaxed)};
     }
 
     /// Pushes a frame for presentation
@@ -116,7 +117,9 @@ private:
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
-    std::chrono::steady_clock::duration blocked_time{}; ///< See TakeBlockedTime
+    /// See TakeBlockedTime. Atomic: a composite can also run from a syncpoint action on
+    /// another thread (GPU::RequestComposite).
+    std::atomic<std::chrono::steady_clock::rep> blocked_time{};
 };
 
 } // namespace Vulkan

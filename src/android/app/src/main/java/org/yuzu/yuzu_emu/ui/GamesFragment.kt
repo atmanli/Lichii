@@ -407,6 +407,9 @@ class GamesFragment : Fragment() {
 
             R.id.filter_recently_added -> popup.menu.findItem(R.id.filter_recently_added).isChecked =
                 true
+
+            R.id.filter_switch2 -> popup.menu.findItem(R.id.filter_switch2).isChecked = true
+            R.id.filter_switch1 -> popup.menu.findItem(R.id.filter_switch1).isChecked = true
         }
 
         popup.setOnMenuItemClickListener { item ->
@@ -437,6 +440,8 @@ class GamesFragment : Fragment() {
                     addedTime > (System.currentTimeMillis() - 24 * 60 * 60 * 1000)
                 }.sortedByDescending { preferences.getLong(it.keyAddedToLibraryTime, 0L) }
             }
+            R.id.filter_switch2 -> baseList.filter { it.isSwitch2 }.sortedBy { it.title }
+            R.id.filter_switch1 -> baseList.filter { it.isSwitch1 }.sortedBy { it.title }
             else -> baseList
         }
 

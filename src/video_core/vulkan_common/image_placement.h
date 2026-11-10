@@ -46,8 +46,9 @@ constexpr bool ImagesInVideoMemoryEnabled(const char* value) {
 /// The reserve when EDEN_NX2_RT_RESERVE_MIB is unset: 1536 MiB, at most half the budget. What it
 /// holds (render targets, depth buffers, device-local buffers) grows with the title's resolution,
 /// not with the card. On a 4 GB GTX 1650 (budget 3695 MiB), 512 left 6 targets in system memory
-/// with the card full; 1536 and 2048 fit them all at the same frame rate. A 12 GB card with a
-/// budget of 7388 MiB reaches it in the same load: 16 textures yielded, at the same frame rate.
+/// with the card full; 1536 and 2048 fit them all at the same frame rate. A 12 GB card reaches it
+/// in the same load only while another program holds video memory (budget about 7.3 GiB): 265 to
+/// 568 images yielded, 1.4 to 1.9 GiB, at the same frame rate. With the card to itself none does.
 constexpr u64 DefaultRenderTargetReserve(u64 heap_budget) {
     constexpr u64 Reserve = u64{1536} << 20;
     return heap_budget / 2 < Reserve ? heap_budget / 2 : Reserve;

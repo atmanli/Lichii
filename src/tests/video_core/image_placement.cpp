@@ -95,7 +95,8 @@ TEST_CASE("The default reserve is 1536 MiB, at most half the budget",
     // GTX 1650 (4 GB, budget 3695 MiB): 512 left 6 targets in system memory with video memory at
     // 3691 of 3695 MiB; from 1536 on all fit.
     REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 3695 * MiB) == 1536 * MiB);
-    // 12 GB card (budget 7388 MiB): the same 1536; in the same load 16 textures yielded to it.
+    // 12 GB card (budget 7388 MiB): the same 1536; in the same load 265 to 568 images yielded
+    // to it.
     REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 7388 * MiB) == 1536 * MiB);
     // A 2 GB card keeps half its budget for textures.
     REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 1900 * MiB) == 950 * MiB);

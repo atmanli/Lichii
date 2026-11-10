@@ -240,18 +240,21 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             .priority = 0.f,
     };
 
-    VkImage handle{};
-    VmaAllocation allocation{};
-    VmaAllocationInfo alloc_info{};
     // An image of the same create info released before is taken from the recycler instead
     // (vk::ImageRecycler).
     const u64 recycle_key = vk::ImageRecycler::KeyOf(ci, dedicated);
-    if (recycle_key != 0 && vk::ImageRecycler::Take(recycle_key, allocator, handle, allocation)) {
-        image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
-                          device.GetDispatchLoader());
-        image.SetRecycleKey(recycle_key);
-        return VK_SUCCESS;
+    if (VkImage kept{}; recycle_key != 0) {
+        VmaAllocation kept_allocation{};
+        if (vk::ImageRecycler::Take(recycle_key, allocator, kept, kept_allocation)) {
+            image = vk::Image(kept, ci.usage, *device.GetLogical(), allocator, kept_allocation,
+                              device.GetDispatchLoader());
+            image.SetRecycleKey(recycle_key);
+            return VK_SUCCESS;
+        }
     }
+    VkImage handle{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo alloc_info{};
     // Images this large (title 1's sparse texture arrays reach 4.5G texels, ~23 GB) are never
     // backed: VMA would quietly place them in system memory once VRAM is full. They take the
     // unbacked sparse fallback below.

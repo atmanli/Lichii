@@ -386,10 +386,12 @@ TEST_CASE("Global fallback backends address sparse guest slots through compact b
 
 TEST_CASE("SPIR-V global memory helpers are DontInline in compute only",
           "[video_core][spirv][global_memory]") {
+    for (const bool inline_compute : {false, true})
     for (const Stage stage : {Stage::Compute, Stage::VertexB, Stage::Fragment, Stage::Mesh}) {
-        CAPTURE(stage);
+        CAPTURE(inline_compute, stage);
         Program fixture;
         fixture.program.stage = stage;
+        fixture.profile.inline_compute_global_helpers = inline_compute;
         if (stage == Stage::Mesh) {
             fixture.program.mesh.max_vertices = 32;
             fixture.program.mesh.max_primitives = 1;
@@ -431,7 +433,7 @@ TEST_CASE("SPIR-V global memory helpers are DontInline in compute only",
             callees.insert(op[2]);
         }
         REQUIRE(callees.size() == 2);
-        const u32 expected = stage == Stage::Compute ? DontInline : 0;
+        const u32 expected = stage == Stage::Compute && !inline_compute ? DontInline : 0;
         for (const u32 callee : callees) {
             CAPTURE(callee);
             REQUIRE(controls.contains(callee));

@@ -4,133 +4,137 @@
 // SPDX-FileCopyrightText: 2018 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono>
-#include <string>
+#include <utility>
 
-#include <QEventLoop>
-#include <boost/algorithm/string/replace.hpp>
-#include "common/httplib.h"
-
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QRegularExpression>
+#include <QString>
+#include <QUrl>
 #include <discord_rpc.h>
 #include <fmt/format.h>
 
-#include "common/common_types.h"
-#include "common/string_util.h"
+#include "common/scm_rev.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
-
 #include "discord_impl.h"
 
-#ifdef YUZU_BUNDLED_OPENSSL
-#include <openssl/cert.h>
-#endif
-
 namespace DiscordRPC {
+namespace {
+
+constexpr char DEFAULT_DISCORD_TEXT[] = "Lichii is an emulator for the Nintendo Switch";
+constexpr char DEFAULT_DISCORD_IMAGE[] =
+    "https://raw.githubusercontent.com/zortos293/Lichii/nx2/dist/"
+    "lichii.png";
+
+QString GetCoverSlug(const std::string& title) {
+    static const QRegularExpression invalid_characters(QStringLiteral("[^a-z0-9-]"));
+    static const QRegularExpression repeated_dashes(QStringLiteral("-{2,}"));
+    static const QRegularExpression outer_dashes(QStringLiteral("^-|-$"));
+
+    return QString::fromStdString(title)
+        .normalized(QString::NormalizationForm_D)
+        .toLower()
+        .replace(QLatin1Char(' '), QLatin1Char('-'))
+        .remove(invalid_characters)
+        .replace(repeated_dashes, QStringLiteral("-"))
+        .remove(outer_dashes);
+}
+
+} // namespace
 
 DiscordImpl::DiscordImpl(Core::System& system_) : system{system_} {
     DiscordEventHandlers handlers{};
-    // The number is the client ID for Eden, it's used for images and the
-    // application name
     Discord_Initialize("1397286652128264252", &handlers, 1, nullptr);
 }
 
 DiscordImpl::~DiscordImpl() {
-    Discord_ClearPresence();
+    Pause();
     Discord_Shutdown();
 }
 
 void DiscordImpl::Pause() {
+    CancelCoverRequest();
+    game_start = 0;
+    game_title.clear();
+    cover_url.clear();
     Discord_ClearPresence();
 }
 
-std::string DiscordImpl::GetGameString(const std::string& title) {
-    // Convert to lowercase
-    std::string icon_name = Common::ToLower(title);
-
-    // Replace spaces with dashes
-    std::replace(icon_name.begin(), icon_name.end(), ' ', '-');
-    boost::replace_all(icon_name, "é", "e");
-
-    // Remove non-alphanumeric characters but keep dashes
-    std::erase_if(icon_name, [](char c) { return !std::isalnum(c) && c != '-'; });
-
-    // Remove dashes from the start and end of the string
-    icon_name.erase(icon_name.begin(), std::find_if(icon_name.begin(), icon_name.end(),
-                                                    [](int ch) { return ch != '-'; }));
-    icon_name.erase(
-        std::find_if(icon_name.rbegin(), icon_name.rend(), [](int ch) { return ch != '-'; }).base(),
-        icon_name.end());
-
-    // Remove double dashes
-    icon_name.erase(std::unique(icon_name.begin(), icon_name.end(),
-                                [](char a, char b) { return a == '-' && b == '-'; }),
-                    icon_name.end());
-
-    return icon_name;
+void DiscordImpl::CancelCoverRequest() {
+    if (auto* reply = std::exchange(cover_reply, nullptr)) {
+        QObject::disconnect(reply, nullptr, &network, nullptr);
+        reply->abort();
+        reply->deleteLater();
+    }
 }
 
-static constexpr char DEFAULT_DISCORD_TEXT[] = "Lichii is an emulator for the Nintendo Switch";
-static constexpr char DEFAULT_DISCORD_IMAGE[] =
-    "https://git.eden-emu.dev/eden-emu/eden/raw/branch/master/dist/qt_themes/default/icons/256x256/"
-    "eden.png";
+void DiscordImpl::RequestCover() {
+    const auto slug = GetCoverSlug(game_title);
+    if (slug.isEmpty()) {
+        return;
+    }
 
-void DiscordImpl::UpdateGameStatus(std::string_view game_url, bool has_boxart) {
-    const std::string url = std::string{has_boxart ? game_url : DEFAULT_DISCORD_IMAGE};
-    s64 start_time = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
+    const QUrl url(QStringLiteral(
+                       "https://raw.githubusercontent.com/eden-emulator/boxart/refs/heads/master/"
+                       "img/%1.png")
+                       .arg(slug));
+    QNetworkRequest request(url);
+    request.setTransferTimeout(3000);
+    cover_reply = network.head(request);
+    auto* const reply = cover_reply;
+
+    QObject::connect(reply, &QNetworkReply::finished, &network, [this, reply, url] {
+        if (cover_reply != reply) {
+            return;
+        }
+        cover_reply = nullptr;
+        if (reply->error() == QNetworkReply::NoError &&
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200) {
+            cover_url = url.toString().toStdString();
+            UpdateGameStatus();
+        }
+        reply->deleteLater();
+    });
+}
+
+void DiscordImpl::UpdateGameStatus() {
+    static const auto build = fmt::format("{} {}", Common::g_build_name, Common::g_build_version);
     DiscordRichPresence presence{};
 
-    presence.largeImageKey = url.c_str();
+    presence.largeImageKey = cover_url.empty() ? DEFAULT_DISCORD_IMAGE : cover_url.c_str();
     presence.largeImageText = game_title.c_str();
     presence.smallImageKey = DEFAULT_DISCORD_IMAGE;
     presence.smallImageText = DEFAULT_DISCORD_TEXT;
     presence.state = game_title.c_str();
     presence.status_display_type = DiscordStatusDisplayType_State;
-    presence.details = "Currently in game";
-    presence.startTimestamp = start_time;
+    presence.details = build.c_str();
+    presence.startTimestamp = game_start;
     Discord_UpdatePresence(&presence);
 }
 
-void DiscordImpl::Update() {
-    if (system.IsPoweredOn()) {
-        system.GetAppLoader().ReadTitle(game_title);
-
-        // Used to format Icon URL for yuzu website game compatibility page
-        std::string icon_name = GetGameString(game_title);
-        auto const game_url = fmt::format(
-            "https://raw.githubusercontent.com/eden-emulator/boxart/refs/heads/master/img/{}.png",
-            icon_name);
-
-        httplib::SSLClient client(game_url);
-        client.set_connection_timeout(3);
-        client.set_read_timeout(3);
-        client.set_follow_location(true);
-
-#ifdef YUZU_BUNDLED_OPENSSL
-        client.load_ca_cert_store(kCert, sizeof(kCert));
-#endif
-
-        httplib::Request request{
-            .method = "HEAD",
-            .path = game_url,
-        };
-
-        auto res = client.send(request);
-        UpdateGameStatus(game_url, res && res->status == 200);
-
+void DiscordImpl::Update(s64 session_start) {
+    if (session_start == 0 || !system.IsPoweredOn()) {
+        Pause();
         return;
     }
 
-    s64 start_time = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
-    DiscordRichPresence presence{};
-    presence.largeImageKey = DEFAULT_DISCORD_IMAGE;
-    presence.largeImageText = DEFAULT_DISCORD_TEXT;
-    presence.status_display_type = DiscordStatusDisplayType_Name;
-    presence.details = "Currently not in game";
-    presence.startTimestamp = start_time;
-    Discord_UpdatePresence(&presence);
+    std::string title;
+    if (system.GetAppLoader().ReadTitle(title) != Loader::ResultStatus::Success || title.empty()) {
+        title = fmt::format("Nintendo Switch game ({:016X})",
+                            system.GetApplicationProcessProgramID());
+    }
+    if (game_start == session_start && game_title == title) {
+        return;
+    }
+
+    CancelCoverRequest();
+    game_start = session_start;
+    game_title = std::move(title);
+    cover_url.clear();
+
+    UpdateGameStatus();
+    RequestCover();
 }
+
 } // namespace DiscordRPC

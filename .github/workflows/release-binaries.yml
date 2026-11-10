@@ -9,7 +9,7 @@ on:
         default: true
   push:
     branches:
-      - nx2-experimental
+      - win-max-pgo2
     # A binary only changes when build inputs change; docs-only pushes skip the build.
     paths:
       - "src/**"
@@ -49,7 +49,7 @@ jobs:
       contents: write
     steps:
       - name: Prepare release tag
-        if: github.event_name == 'push' || inputs.publish_release
+        if: inputs.publish_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,30 +80,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: linux-x86_64
-            runner: ubuntu-24.04
-          # The Linux -pgo builds are the same programs compiled by clang against the repo's
-          # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
-          # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
-          # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
-          # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
-          # docs/CI.md). MSVC still builds for development.
-          - platform: linux-x86_64-pgo
-            runner: ubuntu-24.04
-            pgo: true
-          - platform: windows-x86_64
-            runner: windows-2022
+          # Windows x64 PGO variant: clang-cl ThinLTO + lichii-windows.profdata (OoT-trained).
           - platform: windows-x86_64-pgo
             runner: windows-2022
             pgo: true
             profile: lichii-windows.profdata
-          - platform: linux-aarch64
-            runner: ubuntu-24.04-arm
-          - platform: linux-aarch64-pgo
-            runner: ubuntu-24.04-arm
-            pgo: true
-          - platform: macos-arm64
-            runner: macos-15
 
     steps:
       - name: Check out source
@@ -215,11 +196,9 @@ jobs:
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
-          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
-          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
-          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
-          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          # sccache is only a compiler cache; on a clean CI build it gives no benefit and its
+          # GitHub-release download is a flaky single point of failure. Skip it.
+          Write-Host "sccache disabled for this build (compiler cache not required)."
 
       - name: Install Vulkan SDK on Windows
         if: startsWith(matrix.platform, 'windows')
@@ -321,8 +300,6 @@ jobs:
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
@@ -364,16 +341,16 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          if command -v ccache > /dev/null; then ccache --zero-stats; else sccache --zero-stats; fi
+          if command -v ccache > /dev/null; then ccache --zero-stats; elif command -v sccache > /dev/null; then sccache --zero-stats; fi
           targets="yuzu yuzu-cmd"
           if [[ "${{ matrix.platform }}" == windows* ]]; then targets="$targets lichii-updater"; fi
           cmake --build build/release --target $targets --parallel
-          if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
+          if command -v ccache > /dev/null; then ccache --show-stats; elif command -v sccache > /dev/null; then sccache --show-stats; fi
 
       - name: Stop sccache on Windows
         if: always() && startsWith(matrix.platform, 'windows') && steps.compiler-cache.outcome == 'success'
         shell: pwsh
-        run: sccache --stop-server
+        run: if (Get-Command sccache -ErrorAction SilentlyContinue) { sccache --stop-server }
 
       - name: Save compiler objects
         if: always() && steps.compiler-cache.outcome == 'success'
@@ -615,7 +592,7 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.event_name == 'push' || inputs.publish_release
+    if: inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
       contents: write

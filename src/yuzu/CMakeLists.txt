@@ -251,6 +251,8 @@ add_executable(yuzu
     configuration/system/profile_avatar_dialog.h configuration/system/profile_avatar_dialog.cpp
     configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
 
+    render/adventure_notes.h render/adventure_notes.cpp
+    render/adventure_script.h render/adventure_script.cpp
     render/performance_overlay.h render/performance_overlay.cpp render/performance_overlay.ui
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
     game/common.h
@@ -425,7 +427,7 @@ endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
+target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network Qt6::Qml)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(yuzu PRIVATE ZLIB::ZLIB)
 if (WIN32)
@@ -455,7 +457,10 @@ if (YUZU_USE_QT_WEB_ENGINE)
 endif ()
 
 if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
     install(TARGETS yuzu)
+    # The shipped Adventure Notes modules, next to the program (ShippedDir).
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/dist/notes DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if (WIN32 AND NOT YUZU_USE_BUNDLED_QT)
@@ -530,3 +535,7 @@ if (LICHII_NXFORMAT_RUNTIME)
 endif()
 
 create_target_directory_groups(yuzu)
+
+# Adventure Notes modules shipped next to the program (render/adventure_notes.cpp, ShippedDir).
+add_custom_command(TARGET yuzu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/dist/notes $<TARGET_FILE_DIR:yuzu>/notes)

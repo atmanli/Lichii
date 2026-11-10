@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <utility>
 #include <boost/container/deque.hpp>
 
 #include "common/common_types.h"
@@ -53,6 +54,12 @@ public:
 
     /// Returns the last used presentation frame
     Frame* GetRenderFrame();
+
+    /// The time GetRenderFrame calls waited for a frame since the last call of this (the
+    /// present thread holding the renderer back). For the thread that calls GetRenderFrame.
+    [[nodiscard]] std::chrono::steady_clock::duration TakeBlockedTime() {
+        return std::exchange(blocked_time, {});
+    }
 
     /// Pushes a frame for presentation
     void Present(Frame* frame);
@@ -109,6 +116,7 @@ private:
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
+    std::chrono::steady_clock::duration blocked_time{}; ///< See TakeBlockedTime
 };
 
 } // namespace Vulkan

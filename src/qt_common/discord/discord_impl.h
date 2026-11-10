@@ -6,9 +6,11 @@
 
 #pragma once
 
-#include "discord.h"
-
 #include <string>
+
+#include <QNetworkAccessManager>
+
+#include "discord.h"
 
 namespace Core {
 class System;
@@ -22,14 +24,19 @@ public:
     ~DiscordImpl() override;
 
     void Pause() override;
-    void Update() override;
+    void Update(s64 session_start) override;
 
 private:
-    std::string GetGameString(const std::string& title);
-    void UpdateGameStatus(std::string_view game_url, bool use_default);
+    void CancelCoverRequest();
+    void RequestCover();
+    void UpdateGameStatus();
 
-    std::string game_title{};
     Core::System& system;
+    QNetworkAccessManager network;
+    QNetworkReply* cover_reply{};
+    std::string game_title;
+    std::string cover_url;
+    s64 game_start{};
 };
 
 } // namespace DiscordRPC

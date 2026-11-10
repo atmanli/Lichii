@@ -597,6 +597,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out source (for the PR list in the release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download binaries
         uses: actions/download-artifact@v7
         with:
@@ -679,10 +684,28 @@ jobs:
             pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
           fi
 
+          # Build the "included pull requests" section from the merge commits since upstream nx2.
+          git remote add upstream https://github.com/zortos293/Lichii.git 2>/dev/null || true
+          git fetch --no-tags -q upstream nx2 2>/dev/null || true
+          pr_base=$(git merge-base upstream/nx2 HEAD 2>/dev/null || true)
+          if [[ -n "$pr_base" ]]; then
+            pr_nums=$(git log --format='%s' "${pr_base}..HEAD" | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq)
+          else
+            pr_nums=$(git log --format='%s' | grep -oiE 'Merge PR #[0-9]+' | grep -oE '[0-9]+' | sort -n | uniq)
+          fi
+          pr_section=""
+          if [[ -n "$pr_nums" ]]; then
+            pr_count=$(echo "$pr_nums" | grep -c .)
+            pr_lines=$(echo "$pr_nums" | while read -r n; do echo "- [#${n}](https://github.com/zortos293/Lichii/pull/${n})"; done)
+            pr_section=$(printf '## Included pull requests (%s)\n\nOpen PRs from the upstream repo (zortos293/Lichii) merged into this build:\n\n%s\n' "$pr_count" "$pr_lines")
+          fi
+
           cat > notes.md <<EOF
           Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
 
           Verify a downloaded package with the [SHA-256 checksums](https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/SHA256SUMS). On Linux, run \`sha256sum -c SHA256SUMS\` from the folder containing the package and manifest.
+
+          ${pr_section}
 
           ## Linux
 

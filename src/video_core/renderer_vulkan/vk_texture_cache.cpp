@@ -534,7 +534,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
                                   std::optional<VkFormat> format_override = {},
                                   bool unbacked = false, bool aliased = false,
                                   bool may_fail = false) {
-    // Not a render target: near the video memory budget it yields to them (EDEN_NX2_RT_RESERVE_MIB).
+    // Not a render target: near the video memory budget it yields to them.
     // Depth and stencil images count as render targets even when a texture header made them, and
     // so do single-level color images that are not block-compressed (YieldsAsTexture).
     const bool texture = YieldsAsTexture(

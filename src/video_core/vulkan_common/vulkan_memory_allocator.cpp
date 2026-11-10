@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -87,21 +86,6 @@ namespace {
                 return {};
         }
         return {};
-    }
-
-    // EDEN_NX2_IMAGES_IN_VRAM=0 turns it off. Images only preferred device-local memory, so with
-    // the device-local heap at its budget VMA moved them to the system memory type without a
-    // word: on a GTX 1650 (4 GB, no ReBAR) a title's load left 805 MiB of images there (VMA type
-    // 0: 297 allocations), 2 GB/s over PCIe each way at 6 fps, and lower texture cache thresholds
-    // did not help. Now host memory is only the last, logged fallback.
-    [[nodiscard]] bool KeepImagesInVideoMemory() {
-        static const bool enabled = [] {
-            const bool on = ImagesInVideoMemoryEnabled(std::getenv("EDEN_NX2_IMAGES_IN_VRAM"));
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_IMAGES_IN_VRAM: images {} device-local memory",
-                     on ? "require" : "only prefer");
-            return on;
-        }();
-        return enabled;
     }
 
     [[nodiscard]] VmaMemoryUsage MemoryUsageVma(MemoryUsage usage) {
@@ -262,9 +246,14 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                         bool texture, bool scratch, vk::Image &image) const {
+    // Images require device-local memory. When they only preferred it, with the device-local heap
+    // at its budget VMA moved them to the system memory type without a word: on a GTX 1650 (4 GB,
+    // no ReBAR) a title's load left 805 MiB of images there (VMA type 0: 297 allocations), 2 GB/s
+    // over PCIe each way at 6 fps, and lower texture cache thresholds did not help. Host memory
+    // is only the last, logged fallback.
     // Only where host memory is a separate type: on an integrated GPU every type is device-local.
     const bool separate = HasHostMemoryApartFromVideo();
-    const auto steps = ImagePlacementSteps(KeepImagesInVideoMemory() && separate);
+    const auto steps = ImagePlacementSteps(separate);
     const auto step_ci = [dedicated](const ImagePlacementStep& step) {
         return VmaAllocationCreateInfo{
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
@@ -297,7 +286,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     VmaAllocationInfo alloc_info{};
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
     const bool huge = texels > MaxBackedImageTexels;
-    // A texture with the device-local heap within EDEN_NX2_RT_RESERVE_MIB of its budget goes to
+    // A texture with the device-local heap within RenderTargetReserveBytes of its budget goes to
     // host memory now, so the render targets made after it still fit: on a 4 GB GTX 1650 the
     // textures of a title's load filled the heap and its depth buffer and targets went to system
     // memory. Not a pressure event: those made the texture cache collect ever harder (1923 images
@@ -318,7 +307,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             vmaGetHeapBudgets(allocator, budgets.data());
             heap_usage = budgets[heap].usage;
             heap_budget = budgets[heap].budget;
-            if (const u64 reserve = RenderTargetReserve(heap_budget); reserve != 0) {
+            if (const u64 reserve = RenderTargetReserveBytes(heap_budget); reserve != 0) {
                 image_bytes = ImageBytes(ci);
                 yielded = YieldsToRenderTargets(false, heap_usage,
                                                 PlacementBytes(scratch, image_bytes), heap_budget,
@@ -351,7 +340,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         result = vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     }
     // No device-local memory type takes this image at all: straight to the host fallback, as
-    // before EDEN_NX2_IMAGES_IN_VRAM required one.
+    // before images required one.
     const bool no_device_type = result == VK_ERROR_FEATURE_NOT_PRESENT && steps[0].require_device_local;
     if (no_device_type) {
         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -452,22 +441,6 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
                       device.GetDispatchLoader());
     return VK_SUCCESS;
-}
-
-// EDEN_NX2_RT_RESERVE_MIB=<MiB> (0 turns it off): the end of the device-local heap's budget that
-// textures leave to render targets and depth buffers. Unset: 1536 MiB, at most half the budget
-// (DefaultRenderTargetReserve).
-u64 MemoryAllocator::RenderTargetReserve(u64 heap_budget) const {
-    static const char* const value = std::getenv("EDEN_NX2_RT_RESERVE_MIB");
-    const u64 bytes = RenderTargetReserveBytes(value, heap_budget);
-    static const bool logged = [bytes] {
-        LOG_INFO(Render_Vulkan, "EDEN_NX2_RT_RESERVE_MIB: {} MiB of video memory kept for render "
-                 "targets{}", bytes >> 20,
-                 value == nullptr ? " (unset: 1536 MiB, at most half the budget)" : "");
-        return true;
-    }();
-    static_cast<void>(logged);
-    return bytes;
 }
 
 u64 MemoryAllocator::ImageBytes(const VkImageCreateInfo &ci) const {
@@ -957,16 +930,14 @@ void MemoryAllocator::LogOutsideVideoMemory() const {
     if (const u32 heap = MainDeviceLocalHeap(); heap != ~0U) {
         std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
         vmaGetHeapBudgets(allocator, budgets.data());
-        reserve = RenderTargetReserve(budgets[heap].budget);
+        reserve = RenderTargetReserveBytes(budgets[heap].budget);
     }
     LOG_INFO(Render_Vulkan,
              "Outside video memory since start: {} images ({} MiB), {} device-local buffers ({} "
-             "MiB); now {} allocations ({} MiB) in system memory the CPU cannot map; "
-             "EDEN_NX2_IMAGES_IN_VRAM {}; of those images, {} textures ({} MiB) left the last {} "
-             "MiB to render targets",
+             "MiB); now {} allocations ({} MiB) in system memory the CPU cannot map; of those "
+             "images, {} textures ({} MiB) left the last {} MiB to render targets",
              images, image_bytes >> 20, buffers, buffer_bytes >> 20, live_allocations,
-             live_bytes >> 20, KeepImagesInVideoMemory() ? "on" : "off", yielded,
-             yielded_bytes >> 20, reserve >> 20);
+             live_bytes >> 20, yielded, yielded_bytes >> 20, reserve >> 20);
 }
 
 void LogMemoryStatistics(const Device& device) {

@@ -38,33 +38,15 @@ constexpr bool HasHostMemoryApartFromVideo(const u32* type_flags, u32 count) {
     return false;
 }
 
-/// EDEN_NX2_IMAGES_IN_VRAM: on unless set to a value starting with '0'.
-constexpr bool ImagesInVideoMemoryEnabled(const char* value) {
-    return value == nullptr || value[0] != '0';
-}
-
-/// The reserve when EDEN_NX2_RT_RESERVE_MIB is unset: 1536 MiB, at most half the budget. What it
-/// holds (render targets, depth buffers, device-local buffers) grows with the title's resolution,
-/// not with the card. On a 4 GB GTX 1650 (budget 3695 MiB), 512 left 6 targets in system memory
+/// Video memory kept for render targets and depth buffers: 1536 MiB, at most half the budget.
+/// What it holds (render targets, depth buffers, device-local buffers) grows with the title's
+/// resolution, not with the card. On a 4 GB GTX 1650 (budget 3695 MiB), 512 left 6 targets in system memory
 /// with the card full; 1536 and 2048 fit them all at the same frame rate. A 12 GB card reaches it
 /// in the same load only while another program holds video memory (budget about 7.3 GiB): 265 to
 /// 568 images yielded, 1.4 to 1.9 GiB, at the same frame rate. With the card to itself none does.
-constexpr u64 DefaultRenderTargetReserve(u64 heap_budget) {
+constexpr u64 RenderTargetReserveBytes(u64 heap_budget) {
     constexpr u64 Reserve = u64{1536} << 20;
     return heap_budget / 2 < Reserve ? heap_budget / 2 : Reserve;
-}
-
-/// EDEN_NX2_RT_RESERVE_MIB: video memory kept for render targets and depth buffers, in MiB.
-/// DefaultRenderTargetReserve when unset or not a number; 0 turns it off.
-constexpr u64 RenderTargetReserveBytes(const char* value, u64 heap_budget) {
-    if (value == nullptr || *value < '0' || *value > '9') {
-        return DefaultRenderTargetReserve(heap_budget);
-    }
-    u64 mib = 0;
-    for (; *value >= '0' && *value <= '9'; ++value) {
-        mib = mib * 10 + static_cast<u64>(*value - '0');
-    }
-    return mib << 20;
 }
 
 /// Whether the stream buffer (staging uploads, uniform, index and storage buffers the CPU fills
@@ -75,15 +57,11 @@ constexpr u64 RenderTargetReserveBytes(const char* value, u64 heap_budget) {
 /// `host_memory_apart`: HasHostMemoryApartFromVideo; `window_bytes`: the largest device-local
 /// host-visible heap (0 if none). An integrated GPU keeps the old placement even when it reports
 /// host memory apart and a heap that small: its CPU writes that heap at host memory speed, so
-/// there is no slow window to avoid. EDEN_NX2_STREAM_IN_HOST: '0' keeps it in video memory, '1'
-/// sends it to host memory where there is host memory apart and the device is not integrated.
-constexpr bool StreamBufferInHostMemory(const char* value, bool host_memory_apart,
-                                        u64 window_bytes, bool integrated) {
+/// there is no slow window to avoid.
+constexpr bool StreamBufferInHostMemory(bool host_memory_apart, u64 window_bytes,
+                                        bool integrated) {
     if (!host_memory_apart || integrated) {
         return false;
-    }
-    if (value != nullptr && (value[0] == '0' || value[0] == '1')) {
-        return value[0] == '1';
     }
     constexpr u64 SmallWindow = u64{256} << 20;
     return window_bytes != 0 && window_bytes <= SmallWindow;

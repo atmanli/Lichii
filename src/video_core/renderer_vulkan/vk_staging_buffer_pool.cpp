@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -113,7 +112,7 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         stream_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     // Without resizable BAR the CPU writes video memory slowly: the stream buffer goes to host
-    // memory there (StreamBufferInHostMemory, EDEN_NX2_STREAM_IN_HOST).
+    // memory there (StreamBufferInHostMemory).
     VkDeviceSize window_bytes = 0;
     ForEachDeviceLocalHostVisibleHeap(device, [&window_bytes](size_t, VkMemoryHeap& heap) {
         window_bytes = (std::max)(window_bytes, heap.size);
@@ -124,7 +123,6 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         type_flags[type] = memory_props.memoryTypes[type].propertyFlags;
     }
     const bool in_host = StreamBufferInHostMemory(
-        std::getenv("EDEN_NX2_STREAM_IN_HOST"),
         HasHostMemoryApartFromVideo(type_flags.data(), memory_props.memoryTypeCount),
         window_bytes, device.IsIntegrated());
     stream_buffer = memory_allocator.CreateBuffer(

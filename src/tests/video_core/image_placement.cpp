@@ -20,7 +20,7 @@ TEST_CASE("Images stay in device-local memory until the host fallback",
     REQUIRE(steps[2].prefer_host);
 }
 
-TEST_CASE("Without the switch, images only prefer device-local memory",
+TEST_CASE("Where host memory is not a separate type, images only prefer device-local memory",
           "[video_core][vulkan][image_placement]") {
     constexpr auto steps = Vulkan::ImagePlacementSteps(false);
     REQUIRE(steps[0].within_budget);
@@ -33,13 +33,6 @@ TEST_CASE("Without the switch, images only prefer device-local memory",
     REQUIRE(steps[2].prefer_host);
 }
 
-TEST_CASE("EDEN_NX2_IMAGES_IN_VRAM is on unless set to 0", "[video_core][vulkan][image_placement]") {
-    REQUIRE(Vulkan::ImagesInVideoMemoryEnabled(nullptr));
-    REQUIRE(Vulkan::ImagesInVideoMemoryEnabled("1"));
-    REQUIRE(Vulkan::ImagesInVideoMemoryEnabled(""));
-    REQUIRE_FALSE(Vulkan::ImagesInVideoMemoryEnabled("0"));
-}
-
 namespace {
 constexpr u64 MiB = u64{1} << 20;
 } // namespace
@@ -48,8 +41,7 @@ TEST_CASE("Textures leave the last 512 MiB of video memory to render targets",
           "[video_core][vulkan][image_placement]") {
     // GTX 1650 (4 GB): the device-local heap's budget is 3696 MiB. The textures of a title's load
     // filled it, and the depth buffer and render targets made after them went to system memory.
-    constexpr u64 reserve = Vulkan::RenderTargetReserveBytes("512", 3696 * MiB);
-    REQUIRE(reserve == 512 * MiB);
+    constexpr u64 reserve = 512 * MiB;
     REQUIRE(Vulkan::YieldsToRenderTargets(false, 3200 * MiB, 0, 3696 * MiB, reserve));
     REQUIRE_FALSE(Vulkan::YieldsToRenderTargets(true, 3200 * MiB, 0, 3696 * MiB, reserve));
     REQUIRE_FALSE(Vulkan::YieldsToRenderTargets(false, 1045 * MiB, 0, 3696 * MiB, reserve));
@@ -78,29 +70,28 @@ TEST_CASE("A texture that would end inside the reserve goes to host memory",
 TEST_CASE("The decode image for the BC encoder follows the textures' rule",
           "[video_core][vulkan][image_placement]") {
     // GTX 1650 (4 GB), reserve 512: the two 914 MiB decodes of a 1365x1365x90 array came with
-    // video memory at 2526 and 2915 of 3704 MiB; with the default reserve they still go to host
+    // video memory at 2526 and 2915 of 3704 MiB; with the reserve at 1536 they still go to host
     // memory.
-    constexpr u64 reserve = Vulkan::RenderTargetReserveBytes(nullptr, 3704 * MiB);
+    constexpr u64 reserve = Vulkan::RenderTargetReserveBytes(3704 * MiB);
     REQUIRE(Vulkan::YieldsToRenderTargets(false, 2526 * MiB, 914 * MiB, 3704 * MiB, reserve));
     // 12 GB card (budget 7388 MiB): at 2818 and 3207 MiB they fit, even with the first one alive.
-    constexpr u64 twelve_gb = Vulkan::RenderTargetReserveBytes(nullptr, 7388 * MiB);
+    constexpr u64 twelve_gb = Vulkan::RenderTargetReserveBytes(7388 * MiB);
     REQUIRE_FALSE(
         Vulkan::YieldsToRenderTargets(false, 2818 * MiB, 914 * MiB, 7388 * MiB, twelve_gb));
     REQUIRE_FALSE(Vulkan::YieldsToRenderTargets(false, (3207 + 914) * MiB, 914 * MiB, 7388 * MiB,
                                                 twelve_gb));
 }
 
-TEST_CASE("The default reserve is 1536 MiB, at most half the budget",
+TEST_CASE("The reserve is 1536 MiB, at most half the budget",
           "[video_core][vulkan][image_placement]") {
     // GTX 1650 (4 GB, budget 3695 MiB): 512 left 6 targets in system memory with video memory at
     // 3691 of 3695 MiB; from 1536 on all fit.
-    REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 3695 * MiB) == 1536 * MiB);
+    REQUIRE(Vulkan::RenderTargetReserveBytes(3695 * MiB) == 1536 * MiB);
     // 12 GB card (budget 7388 MiB): the same 1536; in the same load 265 to 568 images yielded
     // to it.
-    REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 7388 * MiB) == 1536 * MiB);
+    REQUIRE(Vulkan::RenderTargetReserveBytes(7388 * MiB) == 1536 * MiB);
     // A 2 GB card keeps half its budget for textures.
-    REQUIRE(Vulkan::RenderTargetReserveBytes(nullptr, 1900 * MiB) == 950 * MiB);
-    REQUIRE(Vulkan::RenderTargetReserveBytes("abc", 3695 * MiB) == 1536 * MiB);
+    REQUIRE(Vulkan::RenderTargetReserveBytes(1900 * MiB) == 950 * MiB);
 }
 
 TEST_CASE("Image sizes come from the device without a probe image from Vulkan 1.3 on",
@@ -142,7 +133,7 @@ TEST_CASE("The decode image for the BC encoder counts twice its size",
     REQUIRE(Vulkan::PlacementBytes(true, 914 * MiB) == 1828 * MiB);
     // 12 GB card (budget 7388 MiB, reserve 1536): the first decode (video memory at 2818 MiB)
     // still fits; the second, with the first alive (3207 + 914), goes to host memory.
-    constexpr u64 twelve_gb = Vulkan::RenderTargetReserveBytes(nullptr, 7388 * MiB);
+    constexpr u64 twelve_gb = Vulkan::RenderTargetReserveBytes(7388 * MiB);
     REQUIRE_FALSE(Vulkan::YieldsToRenderTargets(
         false, 2818 * MiB, Vulkan::PlacementBytes(true, 914 * MiB), 7388 * MiB, twelve_gb));
     REQUIRE(Vulkan::YieldsToRenderTargets(
@@ -156,7 +147,7 @@ TEST_CASE("The decode image for the BC encoder counts twice its size",
                                                 7373 * MiB, twelve_gb));
     // GTX 1650 (4 GB, budget 3702 MiB): the decodes came at 2186 and 2442 MiB and went to host
     // memory counted once already; counted twice they still do.
-    constexpr u64 four_gb = Vulkan::RenderTargetReserveBytes(nullptr, 3702 * MiB);
+    constexpr u64 four_gb = Vulkan::RenderTargetReserveBytes(3702 * MiB);
     REQUIRE(Vulkan::YieldsToRenderTargets(false, 2186 * MiB, 914 * MiB, 3702 * MiB, four_gb));
     REQUIRE(Vulkan::YieldsToRenderTargets(
         false, 2186 * MiB, Vulkan::PlacementBytes(true, 914 * MiB), 3702 * MiB, four_gb));
@@ -180,11 +171,10 @@ TEST_CASE("Only the decode images that are not kept count twice",
     REQUIRE(Vulkan::DecodeImageCountsTwice(256 * MiB + 1));
 }
 
-TEST_CASE("EDEN_NX2_RT_RESERVE_MIB sets the reserve; 0 turns it off",
+TEST_CASE("Without a reserve nothing yields; over the budget only textures do",
           "[video_core][vulkan][image_placement]") {
-    REQUIRE(Vulkan::RenderTargetReserveBytes("256", 3695 * MiB) == 256 * MiB);
-    REQUIRE(Vulkan::RenderTargetReserveBytes("0", 3695 * MiB) == 0);
-    REQUIRE(Vulkan::RenderTargetReserveBytes("2048", 3695 * MiB) == 2048 * MiB);
+    // A heap with no budget reported has no reserve.
+    REQUIRE(Vulkan::RenderTargetReserveBytes(0) == 0);
     REQUIRE_FALSE(Vulkan::YieldsToRenderTargets(false, 3600 * MiB, 0, 3696 * MiB, 0));
     // Over the budget already: textures still go to host memory, render targets do not.
     REQUIRE(Vulkan::YieldsToRenderTargets(false, 3800 * MiB, 0, 3696 * MiB, 512 * MiB));
@@ -207,20 +197,15 @@ TEST_CASE("Images require video memory only where host memory is a separate type
 TEST_CASE("The stream buffer goes to host memory where the CPU writes video memory through a small window",
           "[video_core][vulkan][image_placement]") {
     // A 4 GB GTX 1650 without resizable BAR: the device-local host-visible heap is 246 MiB.
-    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 246 * MiB, false));
-    REQUIRE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB, false));
+    REQUIRE(Vulkan::StreamBufferInHostMemory(true, 246 * MiB, false));
+    REQUIRE(Vulkan::StreamBufferInHostMemory(true, 256 * MiB, false));
     // With resizable BAR the whole of video memory is host visible: keep it there.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 12 * 1024 * MiB, false));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(true, 12 * 1024 * MiB, false));
     // No device-local host-visible heap at all: the allocator falls back to host memory anyway.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 0, false));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(true, 0, false));
     // An integrated GPU has no host memory apart from video memory.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, false, 246 * MiB, false));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(false, 246 * MiB, false));
     // An integrated GPU that does report host memory apart and a 256 MiB device-local heap: the
     // CPU already writes that heap at host memory speed.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(nullptr, true, 256 * MiB, true));
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", true, 256 * MiB, true));
-    // EDEN_NX2_STREAM_IN_HOST: 0 keeps it in video memory, 1 sends it to host memory.
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("0", true, 246 * MiB, false));
-    REQUIRE(Vulkan::StreamBufferInHostMemory("1", true, 12 * 1024 * MiB, false));
-    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory("1", false, 246 * MiB, false));
+    REQUIRE_FALSE(Vulkan::StreamBufferInHostMemory(true, 256 * MiB, true));
 }

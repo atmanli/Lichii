@@ -110,7 +110,7 @@ namespace Vulkan {
         /// `dedicated`: own device memory, returned to the driver on destruction (short-lived
         /// images would otherwise leave holes in the shared blocks).
         /// texture: not a render target; near the video memory budget it goes to host memory, so
-        /// render targets keep EDEN_NX2_RT_RESERVE_MIB of it.
+        /// render targets keep RenderTargetReserveBytes of it.
         vk::Image CreateImage(const VkImageCreateInfo &ci, bool dedicated = false,
                               bool texture = false) const;
 
@@ -202,9 +202,6 @@ namespace Vulkan {
         /// The memory an image made from `ci` needs: from vkGetDeviceImageMemoryRequirements, or
         /// before Vulkan 1.3 from a probe image with nothing bound; 0 when the probe can't be made.
         u64 ImageBytes(const VkImageCreateInfo &ci) const;
-
-        /// The device's EDEN_NX2_RT_RESERVE_MIB for a device-local heap budget of `heap_budget`.
-        u64 RenderTargetReserve(u64 heap_budget) const;
 
         const Device &device;                              ///< Device handle.
         VmaAllocator allocator;                           ///< VMA allocator.

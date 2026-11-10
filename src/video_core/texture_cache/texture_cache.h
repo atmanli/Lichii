@@ -1221,6 +1221,11 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+            RemoveImageViewReferences(image.image_view_ids);
+            for (size_t c : active_channel_ids) {
+                channel_storage[c].graphics_image_table.Invalidate();
+                channel_storage[c].compute_image_table.Invalidate();
+            }
             return;
         }
         if (True(image.flags & ImageFlagBits::SparseTiles)) {
@@ -1373,10 +1378,18 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
             }
         }
         image.dirty_layers.clear(); // all of it
+        image.dirty_ranges.clear();
         if (True(image.flags & ImageFlagBits::Remapped)) {
             continue;
         }
         image.flags |= ImageFlagBits::Remapped;
+        if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
+            RemoveImageViewReferences(image.image_view_ids);
+            for (size_t c : active_channel_ids) {
+                channel_storage[c].graphics_image_table.Invalidate();
+                channel_storage[c].compute_image_table.Invalidate();
+            }
+        }
     }
 }
 
@@ -2048,7 +2061,8 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
         False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
-                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
+                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked |
+                             ImageFlagBits::Remapped)) &&
         stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
         if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
             ++tc_stale_skips;
@@ -4210,6 +4224,11 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
                         image.gpu_addr);
             Tegra::Nx2SparseMarkWritten(image.gpu_addr, image.guest_size_bytes);
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+            RemoveImageViewReferences(image.image_view_ids);
+            for (size_t c : active_channel_ids) {
+                channel_storage[c].graphics_image_table.Invalidate();
+                channel_storage[c].compute_image_table.Invalidate();
+            }
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         }
         MarkModification(image);

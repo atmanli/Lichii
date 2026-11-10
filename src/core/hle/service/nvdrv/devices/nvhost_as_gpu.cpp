@@ -143,11 +143,30 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
                   gpu_address, size);
         return;
     }
-    // The same CPU range is often mapped twice (at its own address and in a sparse region), so
-    // reuse its SMMU mapping.
+    // The same CPU range is often mapped twice (at its own address and in a sparse region), or a
+    // sub-range of a 101 memory pool is mapped via 211/216, so reuse its SMMU mapping.
     Nx2DeviceRange range{};
+    bool subrange_of_existing = false;
     if (const auto it = nx2_device_ranges.find({cpu_address, size}); it != nx2_device_ranges.end()) {
         range = it->second;
+    } else {
+        auto upper = nx2_device_ranges.upper_bound({cpu_address, ~u64{0}});
+        while (upper != nx2_device_ranges.begin()) {
+            --upper;
+            const auto [base_cpu, base_size] = upper->first;
+            if (base_cpu + base_size <= cpu_address) {
+                break;
+            }
+            if (size <= base_size && cpu_address - base_cpu <= base_size - size) {
+                range = upper->second;
+                range.address += cpu_address - base_cpu;
+                subrange_of_existing = true;
+                break;
+            }
+        }
+    }
+    if (range.address != 0) {
+        // Reused an exact or containing range in this address space.
     } else if (session->has_preallocated_area && session->mapper->IsInBounds(cpu_address, size)) {
         range = {session->mapper->Map(cpu_address, size), true};
     } else {
@@ -175,8 +194,10 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
         }
     }
     const DAddr device_address = range.address;
-    nx2_device_ranges[{cpu_address, size}] = range;
-    Nx2GpuMemoryRegistry::Get().RecordDeviceRange(cpu_address, size, device_address);
+    if (!subrange_of_existing) {
+        nx2_device_ranges[{cpu_address, size}] = range;
+        Nx2GpuMemoryRegistry::Get().RecordDeviceRange(cpu_address, size, device_address);
+    }
     // On the GPU thread, like unmaps: a GMMU map takes the texture cache lock, and the callers hold
     // nx2:gpu locks that the GPU thread takes under that lock (sparse blocks backed on write).
     system.GPU().MapInOrder(

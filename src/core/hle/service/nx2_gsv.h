@@ -556,7 +556,7 @@ private:
         } else {
             LOG_WARNING(Service, "nx2:gpu 211 map of unknown handle {}", handle);
         }
-        EventFor(slot)->Signal(system.Kernel());
+        SignalAfterGpu(slot);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -677,7 +677,7 @@ private:
         } else {
             LOG_WARNING(Service, "nx2:gpu 214 unexpected region [{:#x}, {:#x}]", start, last);
         }
-        EventFor(slot)->Signal(system.Kernel());
+        SignalAfterGpu(slot);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -1242,7 +1242,7 @@ private:
             return;
         }
         ++m_tile_maps;
-        if (m_sparse_regions.contains(region)) {
+        if (m_sparse_regions.contains(region) && !m_gpu_only_ranges.contains(region)) {
             ++m_tile_kept;
             return;
         }
@@ -1273,7 +1273,11 @@ private:
             return;
         }
         DropGpuOnlyTiles(gpu_address, size, false);
-        registry.MapAt(gpu_address, memory->second.address + request.offset, size);
+        if (const auto sparse = m_sparse_regions.find(region); sparse != m_sparse_regions.end()) {
+            sparse->second.tiles = true;
+        }
+        registry.MapAt(request.memory_handle, request.offset, gpu_address,
+                       memory->second.address + request.offset, size);
         m_gpu_only_tiles[gpu_address] = {size, region, request.memory_handle, request.offset};
         m_gpu_only_memory[{request.memory_handle, request.offset}] = {request.offset + size, region};
         m_gpu_only_tile_max = (std::max)(m_gpu_only_tile_max, size);
@@ -1331,6 +1335,10 @@ private:
             if (restore) {
                 if (const auto backing = OwnBackingOf(tile_address, tile.size)) {
                     registry.MapAt(tile_address, *backing, tile.size);
+                } else if (const auto sparse = m_sparse_regions.find(tile.region);
+                           sparse != m_sparse_regions.end()) {
+                    sparse->second.tiles = false;
+                    registry.CreateSparse(tile_address, tile.size);
                 } else {
                     registry.Unmap(tile_address, tile.size);
                 }

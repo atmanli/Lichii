@@ -218,6 +218,10 @@ public:
     // Device (SMMU) address of a CPU range an address space mapped; used to present images.
     void RecordDeviceRange(u64 cpu_address, u64 size, u64 device_address) {
         std::scoped_lock lk{device_mutex};
+        if (const auto it = device_ranges.find(cpu_address);
+            it != device_ranges.end() && it->second.first >= size) {
+            return;
+        }
         device_ranges[cpu_address] = {size, device_address};
     }
 

@@ -936,8 +936,10 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             int budget = 4096;
             g_handle_failure = IR::Opcode::Void;
             if (!g_handle_programs || !BuildHandleProgram(inst.Arg(0), code, budget, block)) {
-                // Not computable for a whole draw (a handle that changes in a loop): keep the
-                // earlier search through loads, which at least gives the shader a texture.
+                // Not computable for a whole draw (a handle that changes in a loop): verify the
+                // load still traces back to a constant buffer, then bind the null handle (~0U)
+                // via a constant handle program rather than reading an address/offset cbuf word
+                // as a random TIC/TSC texture handle.
                 const std::optional<ConstBufferAddr> legacy{IR::BreadthFirstSearch(inst.Arg(0),
                     [&env, &host_info, block](const IR::Inst* candidate) {
                         return TryGetConstBuffer(candidate, env, host_info, block);
@@ -946,7 +948,10 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                     throw NotImplementedException("Failed to track bindless texture constant buffer (stopped at {}, budget {})",
                                                   g_handle_failure, budget);
                 }
-                return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block};
+                if (!g_handle_programs) {
+                    return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block};
+                }
+                code = {static_cast<u32>(HandleOp::Immediate), ~0U};
             }
             auto& programs{*g_handle_programs};
             auto it{std::ranges::find(programs, code)};
@@ -1479,22 +1484,38 @@ void LimitSampledTextureArrays(IR::Program& program, const HostTranslateInfo& ho
 
 void JoinTextureInfo(Info& base, Info& source) {
     base.requires_coherent_image_memory |= source.requires_coherent_image_memory;
+    const auto rebase_program = [&](u32& handle_program) {
+        if (handle_program == ~0U || handle_program >= source.handle_programs.size()) {
+            return;
+        }
+        const auto& code = source.handle_programs[handle_program];
+        auto it = std::ranges::find(base.handle_programs, code);
+        if (it == base.handle_programs.end()) {
+            base.handle_programs.push_back(code);
+            it = base.handle_programs.end() - 1;
+        }
+        handle_program = static_cast<u32>(it - base.handle_programs.begin());
+    };
     Descriptors descriptors{
         base.texture_buffer_descriptors,
         base.image_buffer_descriptors,
         base.texture_descriptors,
         base.image_descriptors,
     };
-    for (auto& desc : source.texture_buffer_descriptors) {
+    for (auto desc : source.texture_buffer_descriptors) {
+        rebase_program(desc.handle_program);
         descriptors.Add(desc);
     }
-    for (auto& desc : source.image_buffer_descriptors) {
+    for (auto desc : source.image_buffer_descriptors) {
+        rebase_program(desc.handle_program);
         descriptors.Add(desc);
     }
-    for (auto& desc : source.texture_descriptors) {
+    for (auto desc : source.texture_descriptors) {
+        rebase_program(desc.handle_program);
         descriptors.Add(desc);
     }
-    for (auto& desc : source.image_descriptors) {
+    for (auto desc : source.image_descriptors) {
+        rebase_program(desc.handle_program);
         descriptors.Add(desc);
     }
 }

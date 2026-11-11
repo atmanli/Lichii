@@ -1558,15 +1558,19 @@ bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 fir
     }
     const u32 width = rect.extent.width;
     const u32 height = rect.extent.height;
-    const size_t slice_bytes =
-        size_t{width} * height * VideoCore::Surface::BytesPerBlock(view.format);
+    // The host image can use a wider format than the guest's (B10G11R11 falls back to
+    // R16G16B16A16): size the zeros for the widest color texel, 16 bytes.
+    constexpr size_t WidestTexelBytes = 16;
+    const size_t slice_bytes = size_t{width} * height * WidestTexelBytes;
     const auto zeros = staging_pool.Request(slice_bytes, MemoryUsage::Upload);
     std::memset(zeros.mapped_span.data(), 0, slice_bytes);
     const u32 count = std::min(slice_count, depth - first_slice);
     const VkImage image = view.ImageHandle();
     const u32 level = view.range.base.level;
+    // The clear's slices count from the view's first slice.
+    const u32 base_slice = static_cast<u32>(view.range.base.layer);
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image, level, rect, width, height, first_slice, count,
+    scheduler.Record([image, level, base_slice, rect, width, height, first_slice, count,
                       buffer = zeros.buffer, offset = zeros.offset](vk::CommandBuffer cmdbuf) {
         // Earlier passes may still be reading or writing the volume.
         constexpr VkMemoryBarrier clear_waits{
@@ -1583,7 +1587,7 @@ bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 fir
                 .bufferRowLength = 0,
                 .bufferImageHeight = 0,
                 .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
-                .imageOffset = {rect.offset.x, rect.offset.y, static_cast<s32>(slice)},
+                .imageOffset = {rect.offset.x, rect.offset.y, static_cast<s32>(base_slice + slice)},
                 .imageExtent = {width, height, 1},
             };
             cmdbuf.CopyBufferToImage(buffer, image, VK_IMAGE_LAYOUT_GENERAL, zero_slice);

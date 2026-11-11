@@ -1568,6 +1568,15 @@ bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 fir
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([image, level, rect, width, height, first_slice, count,
                       buffer = zeros.buffer, offset = zeros.offset](vk::CommandBuffer cmdbuf) {
+        // Earlier passes may still be reading or writing the volume.
+        constexpr VkMemoryBarrier clear_waits{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               0, clear_waits);
         for (u32 slice = first_slice; slice < first_slice + count; ++slice) {
             const VkBufferImageCopy zero_slice{
                 .bufferOffset = offset,

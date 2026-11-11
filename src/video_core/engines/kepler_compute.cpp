@@ -775,16 +775,18 @@ constexpr u32 DLSS_NETWORK_BAD_CHECKS = 10;
 constexpr u32 DLSS_CHECK_MISMATCH_PERCENT = 3;
 } // Anonymous namespace
 
+/// Track captured network passes and return whether native dispatch should be skipped.
+/// Spatial-only chains still dispatch natively and replace the display output afterward.
 bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
     using namespace VideoCommon::FireEmblemUpscale;
     const auto passes = CapturedPasses(program_id);
     if (!passes) {
         return false;
     }
-    if (passes->spatial_only && (native_key == passes->prepass || native_key == passes->output)) {
+    if (passes->spatial_only && (passes->IsPrepass(native_key) || native_key == passes->output)) {
         TraceDlssContract(native_key, false);
     }
-    if (native_key == passes->prepass) {
+    if (passes->IsPrepass(native_key)) {
         dlss_chain.spatial_only = passes->spatial_only;
         CaptureFireEmblemJitter();
         dlss_chain.active = true;
@@ -806,7 +808,7 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
         return replacement && FinishDlssEvaluation();
     }
     return dlss_chain.failure != VideoCore::GameDlssReason::None &&
-           native_key != passes->prepass &&
+           !passes->IsPrepass(native_key) &&
            dlss_chain.programs.contains(native_key);
 }
 

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -529,6 +530,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background) {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
+    if (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY) {
+        // The driver's disk cache is the only one kept on NVIDIA (DriverCachesPipelines).
+        const char* const limit = std::getenv("__GL_SHADER_DISK_CACHE_SIZE");
+        LOG_INFO(Render_Vulkan, "NVIDIA shader disk cache limit: {}",
+                 limit != nullptr ? limit : "driver default");
+    }
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
     const auto subgroup_stage_bit{[subgroup_stages](VkShaderStageFlags flag, Shader::Stage stage) {
         return (subgroup_stages & flag) != 0 ? (1u << static_cast<u32>(stage)) : 0u;

@@ -364,7 +364,14 @@ std::optional<s64> CoreTiming::Advance() {
             } else {
                 basic_lock.unlock();
 
-                const auto new_schedule_time{event_type->callback(evt_time, late)};
+                // Time spent paused is not lateness: a callback that makes up for being late (the
+                // sysmix pump) would otherwise wait out the pause again after it.
+                const std::chrono::nanoseconds late_since_pause{
+                    evt_time < pause_end_time
+                        ? (std::min)(late.count(),
+                                     GetGlobalTimeNs().count() - static_cast<s64>(pause_end_time))
+                        : late.count()};
+                const auto new_schedule_time{event_type->callback(evt_time, late_since_pause)};
 
                 basic_lock.lock();
 
@@ -378,12 +385,10 @@ std::optional<s64> CoreTiming::Advance() {
                                                   : evt.reschedule_time};
 
                 // If this event was scheduled into a pause, its time now is going to be way
-                // behind: continue no earlier than the end of the pause. Adding the delay to the
-                // pause end instead would hold back a callback whose delay already makes up for
-                // its lateness (the sysmix pump) for as long as the pause lasted.
+                // behind. Re-set this event to continue from the end of the pause.
                 auto next_time{evt.time + next_schedule_time};
                 if (evt.time < pause_end_time) {
-                    next_time = (std::max)(next_time, static_cast<s64>(pause_end_time));
+                    next_time = pause_end_time + next_schedule_time;
                 }
 
                 event_queue.update(evt.handle, Event{next_time, event_fifo_id++, evt.type,

@@ -3,8 +3,10 @@
 
 #ifdef EGLANTINE_STREAMLINE
 
+#include "common/settings.h"
 #include "common/httplib.h"
 
+#include <array>
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
@@ -53,6 +55,10 @@ constexpr const char* ZIP_PATH =
     "/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip";
 constexpr const char* INTERPOSER_ENTRY = "bin/x64/sl.interposer.dll";
 constexpr const char* MODEL_ENTRY = "bin/x64/nvngx_dlss.dll";
+/// DLSS Frame Generation (and the Reflex and PCL it needs); the model first.
+constexpr std::array<const char*, 5> FRAME_GEN_ENTRIES{
+    "bin/x64/nvngx_dlssg.dll", "bin/x64/sl.dlss_g.dll", "bin/x64/sl.reflex.dll",
+    "bin/x64/sl.pcl.dll", "bin/x64/NvLowLatencyVk.dll"};
 constexpr const char* STREAMLINE_LICENSE_ENTRY = "license.txt";
 constexpr const char* DLSS_LICENSE_ENTRY = "bin/x64/nvngx_dlss.license.txt";
 
@@ -391,7 +397,20 @@ void NvidiaDlssPanel::Refresh() {
                     "(sl.interposer.dll and nvngx_dlss.dll). Until then, games use AMD FSR 3.1.");
         button = Tr("Download from NVIDIA (32 MB)");
     }
-    const bool ready = has_loader && has_model;
+    bool has_frame_gen = true;
+    if (Settings::values.nvidia_dlss_frame_gen.GetValue()) {
+        for (const char* entry : FRAME_GEN_ENTRIES) {
+            std::error_code fg_ec;
+            has_frame_gen &= std::filesystem::is_regular_file(
+                files.folder / std::filesystem::path{entry}.filename(), fg_ec);
+        }
+        if (has_loader && has_model && !has_frame_gen) {
+            status += Tr("<br><b>DLSS Frame Generation needs</b> nvngx_dlssg.dll, sl.dlss_g.dll, "
+                         "sl.reflex.dll, sl.pcl.dll and NvLowLatencyVk.dll.");
+            button = Tr("Download Frame Generation from NVIDIA (9 MB)");
+        }
+    }
+    const bool ready = has_loader && has_model && has_frame_gen;
     icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
                               : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
     status_label->setText(status);
@@ -408,6 +427,16 @@ void NvidiaDlssPanel::Download() {
     }
     if (files.model.empty() && files.app_model.empty()) {
         wanted.emplace_back(MODEL_ENTRY);
+    }
+    // DLSS Frame Generation's files (with Reflex), when it is on and they are missing.
+    if (Settings::values.nvidia_dlss_frame_gen.GetValue()) {
+        for (const char* entry : FRAME_GEN_ENTRIES) {
+            std::error_code exists_ec;
+            if (!std::filesystem::is_regular_file(
+                    files.folder / std::filesystem::path{entry}.filename(), exists_ec)) {
+                wanted.emplace_back(entry);
+            }
+        }
     }
     if (wanted.empty()) {
         return;
@@ -437,7 +466,8 @@ void NvidiaDlssPanel::Download() {
         }
         std::vector<std::pair<QString, const char*>> texts{
             {Tr("NVIDIA Streamline"), STREAMLINE_LICENSE_ENTRY}};
-        if (std::ranges::find(wanted, MODEL_ENTRY) != wanted.end()) {
+        if (std::ranges::find(wanted, MODEL_ENTRY) != wanted.end() ||
+            std::ranges::find(wanted, FRAME_GEN_ENTRIES[0]) != wanted.end()) {
             texts.emplace_back(Tr("NVIDIA DLSS"), DLSS_LICENSE_ENTRY);
         }
         for (const auto& [title, entry_name] : texts) {
@@ -536,8 +566,11 @@ void NvidiaDlssPanel::Download() {
                 return;
             }
         }
-        const bool signed_ok = wanted[i] == INTERPOSER_ENTRY ? Streamline::IsStreamlineModule(partial)
-                                                             : Streamline::IsSignedByNvidia(partial);
+        // Streamline's own modules (sl.*.dll) carry Streamline's signature.
+        const bool streamline_module =
+            std::filesystem::path{wanted[i]}.filename().string().starts_with("sl.");
+        const bool signed_ok = streamline_module ? Streamline::IsStreamlineModule(partial)
+                                                 : Streamline::IsSignedByNvidia(partial);
         if (!signed_ok) {
             std::filesystem::remove(partial, ec);
             progress.close();

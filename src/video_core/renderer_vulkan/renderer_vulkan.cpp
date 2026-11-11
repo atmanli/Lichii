@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include <memory>
@@ -14,6 +16,7 @@
 
 #include <fmt/ranges.h>
 
+#include "common/frame_gen_stats.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
@@ -113,6 +116,23 @@ std::string BuildCommaSeparatedExtensions(
     return fmt::format("{}", fmt::join(available_extensions, ","));
 }
 
+
+/// DLSS Frame Generation finds the swapchain's window through the surface it saw created, and
+/// its surface proxy needs the device Streamline was given: once the device exists, the surface is
+/// made again through it, before the swapchain. Returns the device for the next member.
+const Device& RebindSurfaceForFrameGen(
+    const vk::Instance& instance, vk::SurfaceKHR& surface,
+    const Core::Frontend::EmuWindow::WindowSystemInfo& window_info, const Device& device) {
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsFrameGenAvailable()) {
+        surface = vk::SurfaceKHR{};
+        surface = CreateSurface(instance, window_info);
+        LOG_INFO(Render_Vulkan, "DLSS Frame Generation: window surface made through Streamline");
+    }
+#endif
+    return device;
+}
+
 } // Anonymous namespace
 
 Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dld, VkSurfaceKHR surface) {
@@ -151,7 +171,8 @@ try
     // Create surface
     , surface(CreateSurface(instance, render_window.GetWindowInfo()))
     , device(CreateDevice(instance, dld, *surface))
-    , memory_allocator(device)
+    , memory_allocator(RebindSurfaceForFrameGen(instance, surface, render_window.GetWindowInfo(),
+                                                device))
     , state_tracker()
     , scheduler(device, state_tracker)
     , swapchain(*surface,
@@ -245,12 +266,25 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                                 : std::chrono::steady_clock::time_point{};
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
-                               render_window.GetFramebufferLayout(),
+    const auto frame_layout = render_window.GetFramebufferLayout();
+    // Where the game image lands in the frame (DLSS Frame Generation's backbuffer subrect).
+    frame->game_left = frame_layout.screen.left;
+    frame->game_top = frame_layout.screen.top;
+    frame->game_right = frame_layout.screen.right;
+    frame->game_bottom = frame_layout.screen.bottom;
+    blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers, frame_layout,
                                present_manager.SwapchainImageCount(),
                                swapchain.GetImageViewFormat());
 
 #ifdef HAS_LSFG
+#ifdef EGLANTINE_STREAMLINE
+    // DLSS Frame Generation generates at the present: the built-in one would double it.
+    const bool dlss_frame_gen = Streamline::IsFrameGenAvailable() &&
+                                Common::FrameGenStats::user_enabled.load(std::memory_order_relaxed);
+#else
+    constexpr bool dlss_frame_gen = false;
+#endif
+    if (!dlss_frame_gen) {
     void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
 
     frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(),
@@ -263,6 +297,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         frame_gen.GenerateInto(device, generated, generation);
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
+    }
     }
 #endif
 

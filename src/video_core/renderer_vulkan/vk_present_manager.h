@@ -38,6 +38,10 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+    u64 render_tick{}; ///< Scheduler tick that renders the frame
+    void* frame_gen_token{}; ///< DLSS Frame Generation: the frame's Streamline token, if any
+    /// Where the game image is in the frame (and the swapchain image), for DLSS Frame Generation.
+    u32 game_left{}, game_top{}, game_right{}, game_bottom{};
 };
 
 class PresentManager {
@@ -109,6 +113,15 @@ private:
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
+
+    /// DLSS Frame Generation for frames without the game's own motion and depth: constant zero
+    /// motion and far depth at the game rectangle's size (present thread only).
+    void TagGenericFrameGen(Frame* frame, vk::CommandBuffer cmdbuf);
+    vk::Image fg_generic_depth;
+    vk::ImageView fg_generic_depth_view;
+    vk::Image fg_generic_motion;
+    vk::ImageView fg_generic_motion_view;
+    VkExtent2D fg_generic_extent{};
 };
 
 } // namespace Vulkan

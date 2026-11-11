@@ -427,6 +427,30 @@ struct Values {
                                                            Specialization::Default,
                                                            true,
                                                            true};
+    // NVIDIA DLSS Frame Generation (DLSS-G, through NVIDIA Streamline), with Reflex. RTX 40 and
+    // newer; 3x and 4x (Multi Frame Generation) need an RTX 50.
+    SwitchableSetting<bool> nvidia_dlss_frame_gen{linkage, false, "nvidia_dlss_frame_gen",
+                                                  Category::Renderer};
+    SwitchableSetting<u32, true> nvidia_dlss_frame_gen_multiplier{linkage,
+                                                                  2,
+                                                                  2,
+                                                                  4,
+                                                                  "nvidia_dlss_frame_gen_multiplier",
+                                                                  Category::Renderer,
+                                                                  Specialization::Countable,
+                                                                  true,
+                                                                  true,
+                                                                  &nvidia_dlss_frame_gen};
+    // Games without their own DLSS (no motion vectors or depth to hand over): DLSS-G runs on its
+    // optical flow alone, from zero motion and a flat depth.
+    SwitchableSetting<bool> nvidia_dlss_frame_gen_all_games{linkage,
+                                                            true,
+                                                            "nvidia_dlss_frame_gen_all_games",
+                                                            Category::Renderer,
+                                                            Specialization::Default,
+                                                            true,
+                                                            true,
+                                                            &nvidia_dlss_frame_gen};
     SwitchableSetting<bool> ocarina_fsr{linkage, false, "ocarina_fsr", Category::Renderer};
     // AMD FSR 4 in place of FSR 3.1 where FSR replaces a game's upscaler (Windows, AMD's driver).
     SwitchableSetting<bool> amd_fsr4{linkage, false, "amd_fsr4", Category::Renderer};

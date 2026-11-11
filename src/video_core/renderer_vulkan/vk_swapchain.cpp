@@ -18,6 +18,9 @@
 #include "common/settings_enums.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -43,6 +46,18 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats)
 
 static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
                                               bool has_fifo_relaxed) {
+#ifdef EGLANTINE_STREAMLINE
+    // DLSS Frame Generation in Vulkan has no VSync (NVIDIA: VSync with frame generation is D3D12
+    // only): with Mailbox the generated frame, presented just before the real one, was replaced
+    // before it was shown (FrameView saw only the real ~50 per second). Immediate presents both.
+    // LICHII_DLSS_FG_VSYNC=1 keeps the setting's mode. Here so NeedsPresentModeUpdate agrees.
+    if (Streamline::IsFrameGenAvailable() && has_imm) {
+        const char* const keep = std::getenv("LICHII_DLSS_FG_VSYNC");
+        if (!keep || keep[0] != '1') {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+#endif
     // Mailbox doesn't lock the application like FIFO (vsync)
     // FIFO present mode locks the framerate to the monitor's refresh rate
     Settings::VSyncMode setting = [has_imm, has_mailbox]() {
@@ -231,7 +246,7 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
-    const auto present_queue{device.GetPresentQueue()};
+    const auto present_queue{device.GetSwapchainQueue()};
     const VkPresentInfoKHR present_info{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = nullptr,
@@ -242,7 +257,13 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         .pImageIndices = &image_index,
         .pResults = nullptr,
     };
-    std::scoped_lock lock{scheduler.submit_mutex};
+    // The renderer's queue is shared with the Vulkan worker; a queue of its own (DLSS Frame
+    // Generation) is only used here. DLSS-G's present blocks for a while: under the lock it held
+    // the worker's submits and halved the real frame rate.
+    std::unique_lock lock{scheduler.submit_mutex, std::defer_lock};
+    if (!device.HasSwapchainQueue()) {
+        lock.lock();
+    }
     switch (const VkResult result = present_queue.Present(present_info)) {
     case VK_SUCCESS:
         break;
@@ -280,6 +301,11 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     const VkCompositeAlphaFlagBitsKHR alpha_flags{ChooseAlphaFlags(capabilities)};
     surface_format = ChooseSwapSurfaceFormat(formats);
     present_mode = ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed);
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsFrameGenAvailable() && present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+        LOG_INFO(Render_Vulkan, "DLSS Frame Generation: presenting without VSync (Immediate)");
+    }
+#endif
 
     u32 requested_image_count{capabilities.minImageCount + 1};
     // Ensure Triple buffering if possible.
@@ -293,6 +319,17 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     } else {
         requested_image_count = (std::max)(requested_image_count, 3U);
     }
+#ifdef EGLANTINE_STREAMLINE
+    // DLSS Frame Generation paces two presents per frame: more images in flight (test).
+    if (const u32 fg_images = Streamline::FrameGenSwapchainImages(); fg_images != 0) {
+        requested_image_count = (std::max)(requested_image_count, fg_images);
+        if (capabilities.maxImageCount > 0) {
+            requested_image_count = (std::min)(requested_image_count, capabilities.maxImageCount);
+        }
+        LOG_INFO(Render_Vulkan, "DLSS Frame Generation: asking for {} swapchain images",
+                 requested_image_count);
+    }
+#endif
     VkSwapchainCreateInfoKHR swapchain_ci{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .pNext = nullptr,

@@ -316,6 +316,17 @@ public:
         return present_queue;
     }
 
+    /// The queue the swapchain copy and present go to: a queue of their own with DLSS Frame
+    /// Generation (it holds its presenting queue), else the present queue.
+    vk::Queue GetSwapchainQueue() const {
+        return has_swapchain_queue ? swapchain_queue : present_queue;
+    }
+
+    /// Whether the swapchain copy and present have a queue of their own.
+    bool HasSwapchainQueue() const {
+        return has_swapchain_queue;
+    }
+
     /// Returns main graphics queue family index.
     u32 GetGraphicsFamily() const {
         return graphics_family;
@@ -1309,11 +1320,15 @@ private:
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
     vk::Queue present_queue;     ///< Main present queue.
+    vk::Queue swapchain_queue;   ///< DLSS Frame Generation: swapchain copy and present.
+    bool has_swapchain_queue{};
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};
     u32 instance_version{};      ///< Vulkan instance version.
     u32 graphics_family{};       ///< Main graphics queue family index.
     u32 present_family{};        ///< Main present queue family index.
+    /// A queue family with optical flow (VK_QUEUE_OPTICAL_FLOW_BIT_NV), for DLSS Frame Generation.
+    std::optional<u32> optical_flow_family;
     bool graphics_family_sparse_binding{};
 
     struct Extensions {
@@ -1415,6 +1430,7 @@ private:
     std::set<std::string, std::less<>> supported_extensions; ///< Reported Vulkan extensions.
     std::set<std::string, std::less<>> loaded_extensions;    ///< Loaded Vulkan extensions.
     bool streamline_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
+    bool streamline_optical_flow{}; ///< DLSS Frame Generation needs the optical flow feature.
     bool streamline_attached{};   ///< Streamline has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.

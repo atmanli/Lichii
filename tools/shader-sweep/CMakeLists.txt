@@ -59,7 +59,7 @@ if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
             "-Wno-conversion;-Wno-unused-variable;-Wno-unused-parameter;-Wno-missing-field-initializers;-Wno-nullability-completeness")
     endif()
     # core needs frontend_common's play time manager, so it links after core
-    target_link_libraries(shader-sweep PRIVATE video_core core frontend_common)
+    target_link_libraries(shader-sweep PRIVATE video_core core frontend_common ${PLATFORM_LIBRARIES})
     target_compile_definitions(shader-sweep PRIVATE SHADER_SWEEP_V2)
     if(YUZU_TESTS)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)

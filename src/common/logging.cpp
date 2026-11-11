@@ -247,19 +247,30 @@ struct ColorConsoleBackend final : public Backend {
 /// @brief Backend that writes to a file passed into the constructor
 struct FileBackend final : public Backend {
     explicit FileBackend(const std::filesystem::path filename) noexcept {
-        auto old_filename = filename;
-        old_filename += ".old.txt";
-        // Replace the old log only if the current one can take its place (rename overwrites the
-        // destination atomically). If it can't (e.g. the file is open elsewhere), append to the
-        // current log so that no previous session is lost.
-        auto mode = FS::FileAccessMode::Write;
-        if (FS::Exists(filename)) {
+        // Move a log over its ".old.txt" copy. The rename replaces the copy atomically, and fails
+        // if the log is still open elsewhere (e.g. in a Lichii process that hasn't exited yet).
+        const auto rotate = [](const std::filesystem::path& path) {
+            if (!FS::Exists(path))
+                return true;
+            auto old_path = path;
+            old_path += ".old.txt";
             std::error_code ec;
-            std::filesystem::rename(filename, old_filename, ec);
-            if (ec)
+            std::filesystem::rename(path, old_path, ec);
+            return !ec;
+        };
+        // If the log can't be moved, write this session to a second log (eden_log_2.txt) so that
+        // the previous session is kept and this one still gets the full size limit. If that one
+        // can't be moved either, append to it.
+        auto path = filename;
+        auto mode = FS::FileAccessMode::Write;
+        if (!rotate(path)) {
+            path = filename.parent_path() / filename.stem();
+            path += "_2";
+            path += filename.extension();
+            if (!rotate(path))
                 mode = FS::FileAccessMode::Append;
         }
-        file.emplace(filename, mode, FS::FileType::TextFile);
+        file.emplace(path, mode, FS::FileType::TextFile);
         // Count what is already there so the size limit still applies when appending.
         if (mode == FS::FileAccessMode::Append)
             bytes_written = file->GetSize();

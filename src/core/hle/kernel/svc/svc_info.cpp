@@ -18,6 +18,15 @@
 
 namespace Kernel::Svc {
 
+namespace {
+// The application's memory totals leave out the Switch 2 remote memory its pool also backs; other
+// processes, and totals smaller than the allowance, are reported as they are.
+u64 WithoutRemoteMemory(const KProcess& process, u64 total) {
+    const u64 remote = KSystemControl::Nx2RemoteMemorySize();
+    return process.IsApplication() && total >= remote ? total - remote : total;
+}
+} // Anonymous namespace
+
 /// Gets system/memory information for the current process
 Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle handle, u64 info_sub_id) {
     LOG_TRACE(Kernel_SVC, "called info_id={:#x}, info_sub_id={:#x}, handle={:#08x}", info_id_type, info_sub_id, handle);
@@ -118,8 +127,8 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             *result = process->GetPageTable().GetStackRegionSize();
             R_SUCCEED();
         case InfoType::TotalMemorySize:
-            *result = process->GetTotalUserPhysicalMemorySize(system.Kernel()) -
-                      KSystemControl::Nx2RemoteMemorySize();
+            *result = WithoutRemoteMemory(*process,
+                                          process->GetTotalUserPhysicalMemorySize(system.Kernel()));
             R_SUCCEED();
         case InfoType::UsedMemorySize:
             *result = process->GetUsedUserPhysicalMemorySize(system.Kernel());
@@ -137,8 +146,8 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             *result = GetInteger(process->GetProcessLocalRegionAddress());
             R_SUCCEED();
         case InfoType::TotalNonSystemMemorySize:
-            *result = process->GetTotalNonSystemUserPhysicalMemorySize(system.Kernel()) -
-                      KSystemControl::Nx2RemoteMemorySize();
+            *result = WithoutRemoteMemory(
+                *process, process->GetTotalNonSystemUserPhysicalMemorySize(system.Kernel()));
             R_SUCCEED();
         case InfoType::UsedNonSystemMemorySize:
             *result = process->GetUsedNonSystemUserPhysicalMemorySize(system.Kernel());

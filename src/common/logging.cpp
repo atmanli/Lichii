@@ -249,12 +249,13 @@ struct FileBackend final : public Backend {
     explicit FileBackend(const std::filesystem::path filename) noexcept {
         // Move a log over its ".old.txt" copy. The rename replaces the copy atomically, and fails
         // if the log is still open elsewhere (e.g. in a Lichii process that hasn't exited yet).
+        // A log that can't even be checked counts as a failure, so it is never truncated.
         const auto rotate = [](const std::filesystem::path& path) {
-            if (!FS::Exists(path))
-                return true;
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec))
+                return !ec;
             auto old_path = path;
             old_path += ".old.txt";
-            std::error_code ec;
             std::filesystem::rename(path, old_path, ec);
             return !ec;
         };

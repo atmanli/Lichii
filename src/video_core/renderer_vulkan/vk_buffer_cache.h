@@ -304,6 +304,45 @@ public:
         return max_dynamic_storage_buffers;
     }
 
+    // List draws (nx2_list_draw.h): the arguments of an array draw whose vertex count and first vertex
+    // are two GPU-written words (Nx2ListDraw). The rasterizer asks for them before it prepares
+    // the draw, the pipeline records their copy before it requests the render pass, and the draw
+    // takes them.
+    struct ListDrawArgs {
+        VkBuffer buffer{};
+        VkDeviceSize offset{};
+        bool mesh{}; ///< A task/mesh draw command (group counts)
+    };
+    /// `keep_id`: the id the copy of the words is kept as (KeepListWords), 0 for none.
+    void RequestListDrawArgs(u64 keep_id = 0) noexcept {
+        list_draw_requested = true;
+        list_draw_args = {};
+        list_draw_keep_id = keep_id;
+    }
+    [[nodiscard]] bool ListDrawArgsRequested() const noexcept {
+        return list_draw_requested;
+    }
+    /// Records the copy of the words at `offset` of `source`, outside the render pass, into a
+    /// vertex draw command or (`mesh`) a task/mesh one.
+    void RecordListDrawArgs(VkBuffer source, VkDeviceSize offset, bool mesh);
+    /// The arguments recorded since the request (no buffer if none were), ending the request.
+    [[nodiscard]] ListDrawArgs TakeListDrawArgs() noexcept {
+        list_draw_requested = false;
+        list_draw_keep_id = 0;
+        return std::exchange(list_draw_args, {});
+    }
+
+    // List draws and list dispatches: copies of list words kept for the front, which reads them
+    // back when it needs their values after all (RasterizerInterface::Nx2ReadKeptListWords).
+    /// Records, outside the render pass, a copy of `count` (up to 3) words at `offset` of
+    /// `source` as `keep_id`.
+    void KeepListWords(u64 keep_id, VkBuffer source, VkDeviceSize offset, u32 count);
+    /// Keeps words the host read itself as `keep_id`.
+    void KeepListWordsRead(u64 keep_id, std::span<const u32> words);
+    /// The words kept as `keep_id`, waiting for the host GPU to copy them if it must. False if
+    /// none are (a later copy took the slot).
+    [[nodiscard]] bool ReadKeptListWords(u64 keep_id, std::span<u32> words);
+
 private:
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
@@ -329,6 +368,31 @@ private:
     std::shared_ptr<QuadStripIndexBuffer> quad_strip_index_buffer;
 
     vk::Buffer null_buffer;
+
+    /// Slots of two draw commands each, a vertex one (count, 1 instance, first, instance 0) and a
+    /// task/mesh one (count, 1, 1): the host GPU copies the list words over the count and the
+    /// first vertex, the other words are written once.
+    static constexpr u32 LIST_DRAW_SLOTS = 1024;
+    static constexpr u32 LIST_DRAW_SLOT_BYTES = 32;
+    vk::Buffer list_draw_buffer;
+    u32 list_draw_cursor{};
+    bool list_draw_requested{};
+    ListDrawArgs list_draw_args{};
+    u64 list_draw_keep_id{};
+
+    /// Kept list words, by keep id: a host-readable slot of 16 bytes each.
+    static constexpr u32 LIST_KEEP_SLOTS = 1024;
+    static constexpr u32 LIST_KEEP_SLOT_BYTES = 16;
+    struct ListKeep {
+        u64 keep_id{};
+        u64 tick{};   ///< The submission that copies them, if on_gpu
+        bool on_gpu{};
+        u32 count{};
+        std::array<u32, 3> words{}; ///< If not on_gpu
+    };
+    void EnsureListKeepBuffer();
+    vk::Buffer list_keep_buffer;
+    std::array<ListKeep, LIST_KEEP_SLOTS> list_keeps{};
 
     std::unique_ptr<Uint8Pass> uint8_pass;
     std::unique_ptr<VertexRepackPass> vertex_repack_pass;

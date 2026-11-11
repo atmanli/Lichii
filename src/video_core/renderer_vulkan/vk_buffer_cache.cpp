@@ -620,6 +620,168 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     });
 }
 
+void BufferCacheRuntime::RecordListDrawArgs(VkBuffer source, VkDeviceSize offset, bool mesh) {
+    if (source == VK_NULL_HANDLE) {
+        return;
+    }
+    if (!list_draw_buffer) {
+        const VkBufferCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = VkDeviceSize{LIST_DRAW_SLOTS} * LIST_DRAW_SLOT_BYTES,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        };
+        list_draw_buffer = memory_allocator.CreateBuffer(create_info, MemoryUsage::Upload);
+        if (device.HasDebuggingToolAttached()) {
+            list_draw_buffer.SetObjectNameEXT("List draw arguments");
+        }
+        // Written once: the host GPU only ever copies over words 0 and 2 of the vertex command
+        // and word 0 of the task/mesh command.
+        const std::span<u8> mapped = list_draw_buffer.Mapped();
+        constexpr std::array<u32, LIST_DRAW_SLOT_BYTES / sizeof(u32)> slot{0, 1, 0, 0, 0, 1, 1, 0};
+        for (u32 i = 0; i < LIST_DRAW_SLOTS; ++i) {
+            std::memcpy(mapped.data() + size_t{i} * LIST_DRAW_SLOT_BYTES, slot.data(),
+                        LIST_DRAW_SLOT_BYTES);
+        }
+        list_draw_buffer.Flush();
+    }
+    // The copies and the draws that read them run in the order they are recorded: a slot is
+    // free again as soon as the next copy into it is recorded after its draw.
+    const VkDeviceSize slot = VkDeviceSize{list_draw_cursor} * LIST_DRAW_SLOT_BYTES;
+    list_draw_cursor = (list_draw_cursor + 1) % LIST_DRAW_SLOTS;
+    const VkDeviceSize args = slot + (mesh ? 16 : 0);
+    scheduler.RequestOutsideRenderPassOperationContext();
+    // The front's copy of the words, with the same barriers.
+    VkBuffer keep_buffer = VK_NULL_HANDLE;
+    VkDeviceSize keep_offset = 0;
+    if (const u64 keep_id = list_draw_keep_id; keep_id != 0) {
+        EnsureListKeepBuffer();
+        const u32 keep_slot = static_cast<u32>(keep_id % LIST_KEEP_SLOTS);
+        keep_buffer = *list_keep_buffer;
+        keep_offset = VkDeviceSize{keep_slot} * LIST_KEEP_SLOT_BYTES;
+        list_keeps[keep_slot] = {keep_id, scheduler.CurrentTick(), true, 2, {}};
+    }
+    scheduler.Record([source, offset, destination = *list_draw_buffer, args, mesh, keep_buffer,
+                      keep_offset](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier READ_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        static constexpr VkMemoryBarrier WRITE_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_HOST_READ_BIT,
+        };
+        // (count, first) -> word 0 and, for vertex draws, word 2.
+        const std::array<VkBufferCopy, 2> copies{{
+            {.srcOffset = offset, .dstOffset = args, .size = sizeof(u32)},
+            {.srcOffset = offset + sizeof(u32), .dstOffset = args + 2 * sizeof(u32),
+             .size = sizeof(u32)},
+        }};
+        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, READ_BARRIER);
+        cmdbuf.CopyBuffer(source, destination,
+                          std::span<const VkBufferCopy>{copies.data(), mesh ? 1U : 2U});
+        if (keep_buffer != VK_NULL_HANDLE) {
+            const VkBufferCopy keep{
+                .srcOffset = offset, .dstOffset = keep_offset, .size = 2 * sizeof(u32)};
+            cmdbuf.CopyBuffer(source, keep_buffer, keep);
+        }
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               keep_buffer != VK_NULL_HANDLE
+                                   ? VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_HOST_BIT
+                                   : VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                               0, WRITE_BARRIER);
+    });
+    list_draw_args = {*list_draw_buffer, args, mesh};
+}
+
+void BufferCacheRuntime::EnsureListKeepBuffer() {
+    if (list_keep_buffer) {
+        return;
+    }
+    const VkBufferCreateInfo create_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = VkDeviceSize{LIST_KEEP_SLOTS} * LIST_KEEP_SLOT_BYTES,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    list_keep_buffer = memory_allocator.CreateBuffer(create_info, MemoryUsage::Download);
+    if (device.HasDebuggingToolAttached()) {
+        list_keep_buffer.SetObjectNameEXT("Kept list words");
+    }
+}
+
+void BufferCacheRuntime::KeepListWords(u64 keep_id, VkBuffer source, VkDeviceSize offset,
+                                       u32 count) {
+    if (keep_id == 0 || source == VK_NULL_HANDLE || count == 0 || count > 3) {
+        return;
+    }
+    EnsureListKeepBuffer();
+    const u32 slot = static_cast<u32>(keep_id % LIST_KEEP_SLOTS);
+    const VkDeviceSize keep_offset = VkDeviceSize{slot} * LIST_KEEP_SLOT_BYTES;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    list_keeps[slot] = {keep_id, scheduler.CurrentTick(), true, count, {}};
+    scheduler.Record([source, offset, destination = *list_keep_buffer, keep_offset,
+                      count](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier READ_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        };
+        static constexpr VkMemoryBarrier HOST_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        };
+        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, READ_BARRIER);
+        const VkBufferCopy copy{
+            .srcOffset = offset, .dstOffset = keep_offset, .size = VkDeviceSize{count} * 4};
+        cmdbuf.CopyBuffer(source, destination, copy);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                               HOST_BARRIER);
+    });
+}
+
+void BufferCacheRuntime::KeepListWordsRead(u64 keep_id, std::span<const u32> words) {
+    if (keep_id == 0 || words.empty() || words.size() > 3) {
+        return;
+    }
+    ListKeep& keep = list_keeps[keep_id % LIST_KEEP_SLOTS];
+    keep = {keep_id, 0, false, static_cast<u32>(words.size()), {}};
+    std::ranges::copy(words, keep.words.begin());
+}
+
+bool BufferCacheRuntime::ReadKeptListWords(u64 keep_id, std::span<u32> words) {
+    const ListKeep& keep = list_keeps[keep_id % LIST_KEEP_SLOTS];
+    if (keep_id == 0 || keep.keep_id != keep_id || words.size() > keep.count) {
+        return false;
+    }
+    if (!keep.on_gpu) {
+        std::copy_n(keep.words.begin(), words.size(), words.begin());
+        return true;
+    }
+    scheduler.Wait(keep.tick);
+    list_keep_buffer.Invalidate();
+    const VkDeviceSize keep_offset = VkDeviceSize{keep_id % LIST_KEEP_SLOTS} * LIST_KEEP_SLOT_BYTES;
+    std::memcpy(words.data(), list_keep_buffer.Mapped().data() + keep_offset, words.size_bytes());
+    return true;
+}
+
 void BufferCacheRuntime::PreCopyBarrier() {
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,

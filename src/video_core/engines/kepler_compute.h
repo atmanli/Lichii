@@ -23,6 +23,8 @@
 #include "video_core/game_dlss_status.h"
 #include "video_core/macro.h"
 #include "video_core/native_qmd.h"
+#include "video_core/nx2_list_dispatch.h"
+#include "video_core/nx2_list_reader.h"
 #include "video_core/textures/texture.h"
 
 namespace Core {
@@ -263,6 +265,17 @@ public:
     /// the front instead of CallMethod for native compute engines: runs their macros and macro
     /// uploads against a copy of the registers and sends the register writes to the back.
     bool FrontRunsMacros() const { return native_mode; }
+    /// List dispatches (nx2_list_dispatch.h): the call of macro `method` whose three parameters are the
+    /// GPU-written words at `address`. If the macro only stores a dispatch's grid, the front
+    /// stores a marker instead and the dispatch that carries it takes its grid from `address` on
+    /// the host GPU. False when the words have to be read.
+    bool FrontTakeListDispatch(VideoCommon::GpuSplit& split, u32 method, GPUVAddr address,
+                               const Nx2ListDispatch::ListReader& reader);
+    /// List guard (nx2_list_dispatch.h): where the channel keeps the list of the grid the data RAM's
+    /// marker stands for (the 3D engine's, which shares the data RAM).
+    void SetGridMarker(Nx2ListDispatch::GridMarker* marker) {
+        grid_marker = marker;
+    }
     void FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
                          u32 argument, bool is_last_call, const GPUVAddr* segment);
     void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -392,6 +405,14 @@ private:
     };
     std::vector<UploadInfo> uploads;
     std::optional<GPUVAddr> indirect_compute{};
+    Nx2ListDispatch::GridMarker* grid_marker{};
+    /// List dispatches, back: the lists taken last, by keep id (the low bits of a marker's x
+    /// carry it), and where each one's grid is.
+    struct ListDispatchEntry {
+        u64 keep_id{};
+        GPUVAddr address{};
+    };
+    std::array<ListDispatchEntry, 1024> list_dispatches{};
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

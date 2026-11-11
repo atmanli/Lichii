@@ -84,7 +84,24 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #endif
 }
 
+#if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
+// On NVIDIA, Lichii keeps no driver pipeline cache of its own (DriverCachesPipelines) and relies on
+// the driver's disk cache, whose default limit is 1 GiB. A large Ocarina of Time cache (~20,000
+// pipelines) fills it, and every boot then compiles the pipelines that no longer fit again. Raise
+// the limit before anything loads the driver, unless the user set one. Other drivers ignore it.
+static void RaiseNvidiaShaderDiskCacheLimit() {
+    constexpr const char* name = "__GL_SHADER_DISK_CACHE_SIZE";
+    constexpr const char* ten_gib = "10737418240";
+    if (std::getenv(name) == nullptr) {
+        setenv(name, ten_gib, 0);
+    }
+}
+#endif
+
 int main(int argc, char* argv[]) {
+#if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
+    RaiseNvidiaShaderDiskCacheLimit();
+#endif
     LoadNx2Switches(argv[0]);
 #if LICHII_ROOM
     bool launch_room = false;

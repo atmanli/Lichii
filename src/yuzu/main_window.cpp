@@ -79,6 +79,7 @@
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -410,7 +411,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     UpdateUITheme();
 
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
-    discord_rpc->Update();
 
     play_time_manager = std::make_unique<PlayTime::PlayTimeManager>();
 
@@ -2360,6 +2360,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         }
 #endif
     }
+    discord_session_start = QDateTime::currentSecsSinceEpoch();
     OnStartGame();
 }
 
@@ -2484,6 +2485,7 @@ void MainWindow::OnEmulationStopped() {
     }
 
     emulation_running = false;
+    discord_session_start = 0;
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);
 
@@ -3368,7 +3370,7 @@ void MainWindow::OnStartGame() {
     play_time_manager->SetProgramId(QtCommon::system->GetApplicationProcessProgramID());
     play_time_manager->Start();
 
-    discord_rpc->Update();
+    discord_rpc->Update(discord_session_start);
     Common::FeralGamemode::Start();
 }
 
@@ -5838,7 +5840,7 @@ void MainWindow::SetDiscordEnabled([[maybe_unused]] bool state) {
 #else
     discord_rpc = std::make_unique<DiscordRPC::NullImpl>();
 #endif
-    discord_rpc->Update();
+    discord_rpc->Update(discord_session_start);
 }
 
 void MainWindow::SetGamemodeEnabled(bool state) {

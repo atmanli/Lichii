@@ -319,14 +319,18 @@ private:
         u32 good_checks{};
         u32 bad_checks{};
         VideoCore::GameDlssReason failure{};
-        /// Programs of evaluations that reached their output pass; they are skipped only after
-        /// the network fails its health checks.
+        /// Programs of evaluations that reached their output pass; they are skipped after the
+        /// network fails its health checks, and while the replacement keeps drawing (see below).
         std::unordered_set<u64> programs;
         /// This evaluation's programs and dispatches so far. Its programs join `programs` only
         /// at its output pass, so compute work after a look-alike first pass keeps running.
         std::unordered_set<u64> pending;
         u32 dispatches{};
         u32 evaluations{};
+        /// Whether the replacement upscale drew the last evaluation's output. While it does, and
+        /// this evaluation's jitter was captured, the network's other passes are skipped: their
+        /// results only feed the output pass the replacement draws over.
+        bool replacement_drew{};
         /// What the Graphics tab was last told.
         VideoCore::GameDlssStatus status{};
     } dlss_chain;

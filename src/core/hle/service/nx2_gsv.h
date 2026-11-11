@@ -49,6 +49,7 @@
 #include "core/hle/kernel/k_system_control.h"
 #include "core/hle/kernel/k_page_group.h"
 #include "core/hle/kernel/k_resource_limit.h"
+#include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -665,6 +666,13 @@ private:
                                       "({} MiB of GPU-only memory in use, peak {} MiB)",
                              start, last, *address, m_gpu_only_bytes >> 20, m_gpu_only_peak >> 20);
                 } else {
+                    if (back_whole && KeepsConstantsInGpuOnlyRegions()) {
+                        // This title writes constants into some of its GPU-only regions from the
+                        // CPU; if this is one of them, those writes read back as zero.
+                        LOG_WARNING(Service, "nx2:gpu 214 GPU-only region [{:#x}, {:#x}] could not be "
+                                             "backed whole; CPU writes before a GPU write read zero",
+                                    start, last);
+                    }
                     // The rest is written by the host GPU, not through guest memory (title 1's and
                     // title 4's render targets, 285-300 MB regions): like a sparse region it gets a
                     // device range of its own and memory per block only when something writes guest
@@ -831,6 +839,7 @@ private:
                 return true; // still mapped: keep its pages
             }
             region.pages->Close(system.Kernel());
+            ReleaseReservation(region.reserved);
             m_gpu_only_bytes -= region.size;
             return true;
         });
@@ -840,6 +849,7 @@ private:
         u64 address;
         u64 size;
         std::unique_ptr<Kernel::KPageGroup> pages;
+        u64 reserved; ///< Application memory reserved for pages taken from its pool
     };
 
     // Allocates kernel memory and maps it in the alias code region. Touches no region state, so
@@ -868,12 +878,22 @@ private:
                 Kernel::KMemoryManager::EncodeOption(pool,
                                                      Kernel::KMemoryManager::Direction::FromBack));
         };
-        if (R_FAILED(allocate(Kernel::KMemoryManager::Pool::SystemNonSecure)) &&
-            (!application_fallback || R_FAILED(allocate(Kernel::KMemoryManager::Pool::Application)))) {
-            if (log_failure) {
-                LOG_ERROR(Service, "nx2:gpu 214 could not allocate {:#x} bytes", size);
+        // Pages from the application pool count against the application's memory limit, so the
+        // totals the game reads leave them out and its own allocations cannot overrun the pool.
+        u64 reserved = 0;
+        if (R_FAILED(allocate(Kernel::KMemoryManager::Pool::SystemNonSecure))) {
+            Kernel::KScopedResourceReservation reservation(
+                kernel_core, process, Kernel::LimitableResource::PhysicalMemoryMax,
+                static_cast<s64>(size));
+            if (!application_fallback || !reservation.Succeeded() ||
+                R_FAILED(allocate(Kernel::KMemoryManager::Pool::Application))) {
+                if (log_failure) {
+                    LOG_ERROR(Service, "nx2:gpu 214 could not allocate {:#x} bytes", size);
+                }
+                return std::nullopt;
             }
-            return std::nullopt;
+            reservation.Commit();
+            reserved = size;
         }
         if (clear) {
             // Cheap for memory that's still zero (most of it): only reused pages get cleared.
@@ -898,13 +918,24 @@ private:
                                                     Kernel::KMemoryPermission::UserReadWrite))) {
                 m_alias_hint.store((offset + Common::AlignUp(size, Alignment)) / Alignment,
                                    std::memory_order_relaxed);
-                return MappedBacking{GetInteger(address), size, std::move(pg)};
+                return MappedBacking{GetInteger(address), size, std::move(pg), reserved};
             }
         }
         LOG_ERROR(Service, "nx2:gpu 214 no room for {:#x} bytes in the alias code region "
                            "[{:#x}, +{:#x})", size, region_start, region_size);
         pg->Close(kernel_core);
+        ReleaseReservation(reserved);
         return std::nullopt;
+    }
+
+    // Gives back application memory reserved for a GPU-only backing from the application pool.
+    void ReleaseReservation(u64 reserved) {
+        auto* const process = system.ApplicationProcess();
+        if (reserved != 0 && process != nullptr && process->GetResourceLimit() != nullptr) {
+            process->GetResourceLimit()->Release(system.Kernel(),
+                                                 Kernel::LimitableResource::PhysicalMemoryMax,
+                                                 static_cast<s64>(reserved));
+        }
     }
 
     // Records a mapped backing for the region at gpu_address. Needs m_region_mutex.
@@ -925,7 +956,8 @@ private:
             m_released_regions.push_back({std::move(it->second), done});
             m_gpu_only_regions.erase(it);
         }
-        m_gpu_only_regions[gpu_address] = {backing.address, backing.size, std::move(backing.pages)};
+        m_gpu_only_regions[gpu_address] = {backing.address, backing.size, std::move(backing.pages),
+                                           backing.reserved};
         m_gpu_only_bytes += backing.size;
         m_gpu_only_peak = (std::max)(m_gpu_only_peak, m_gpu_only_bytes);
     }
@@ -1066,6 +1098,7 @@ private:
                                                            Kernel::KMemoryState::IoMemory);
                 }
                 backing->pages->Close(system.Kernel());
+                ReleaseReservation(backing->reserved);
             }
         }
         if (waits_for_other) {
@@ -1433,6 +1466,7 @@ private:
         u64 cpu_address;
         u64 size;
         std::unique_ptr<Kernel::KPageGroup> pages;
+        u64 reserved; ///< Application memory reserved for pages taken from its pool
     };
     struct ReleasedRegion {
         GpuOnlyRegion region;

@@ -3299,8 +3299,15 @@ public:
     static bool IsFastDrawParameter(u32 method);
     /// Methods fast draw records as light changes (constant buffer data and binds).
     static bool IsFastDrawDeltaMethod(u32 method);
-    /// A vertex stream's address, size or limit (not its stride or enable).
+    /// A vertex stream's address, size or limit, and its stride and enable word where the host
+    /// binds strides as dynamic state (Nx2FastDraw::g_dynamic_strides).
     static bool IsFastDrawVertexBuffer(u32 method);
+    /// Executable methods whose work leaves what a draw resolves to alone (counter resets, the
+    /// render enable condition): fast draw records nothing for them.
+    static bool IsFastDrawNeutralMethod(u32 method);
+    /// Registers only a report, the render enable condition or a macro memory read takes as
+    /// operands.
+    static bool IsFastDrawReportOperand(u32 method);
     void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
 
     /// Handles a write to the CB_DATA[i] register.

@@ -359,6 +359,8 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     case MAXWELL3D_REG_INDEX(const_buffer.offset):
     case MAXWELL3D_REG_INDEX(global_base_vertex_index):
     case MAXWELL3D_REG_INDEX(global_base_instance_index):
+    // Written with the first vertex before each draw; nothing a draw resolves reads it.
+    case MAXWELL3D_REG_INDEX(vertex_id_base):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
     case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
     case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
@@ -367,7 +369,46 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
         return true;
     default:
         return DrawManager::IsInstanceLoopMethod(method) || IsFastDrawDeltaMethod(method) ||
-               IsFastDrawVertexBuffer(method);
+               IsFastDrawVertexBuffer(method) || IsFastDrawNeutralMethod(method) ||
+               IsFastDrawReportOperand(method);
+    }
+}
+
+bool Maxwell3D::IsFastDrawNeutralMethod(u32 method) {
+    switch (method) {
+    // A counter reset only touches the query cache. The render enable condition decides whether
+    // the next draws run (ShouldExecute, or host conditional rendering), not what they bind; a
+    // render pass either one ends is caught by the reusable draw's render pass check.
+    case MAXWELL3D_REG_INDEX(clear_report_value):
+    case MAXWELL3D_REG_INDEX(render_enable.mode):
+    // A report or semaphore release writes guest memory, which ProcessQueryGet notes as constant
+    // data: a delta draw that reads texture handles there takes the full path.
+    case MAXWELL3D_REG_INDEX(report_semaphore.query):
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool Maxwell3D::IsFastDrawReportOperand(u32 method) {
+    // SET_MME_MEM_ADDRESS_A/B and the data RAM address: only the macro engine's memory reads use
+    // them, and what a macro does with the words reaches the engine as writes of its own.
+    constexpr u32 MmeMemAddressA = 0x154;
+    constexpr u32 MmeDataRamAddress = 0x156;
+    if (method >= MmeMemAddressA && method <= MmeDataRamAddress) {
+        return true;
+    }
+    switch (method) {
+    // Only the report_semaphore.query method reads them.
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_high):
+    case MAXWELL3D_REG_INDEX(report_semaphore.address_low):
+    case MAXWELL3D_REG_INDEX(report_semaphore.payload):
+    // Only the render_enable.mode method reads them.
+    case MAXWELL3D_REG_INDEX(render_enable.address_high):
+    case MAXWELL3D_REG_INDEX(render_enable.address_low):
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -376,6 +417,12 @@ bool Maxwell3D::IsFastDrawVertexBuffer(u32 method) {
     constexpr u32 stream_words = sizeof(Regs::VertexStream) / sizeof(u32);
     if (method >= streams && method < streams + Regs::NumVertexArrays * stream_words) {
         const u32 word = (method - streams) % stream_words;
+        // Word 0, the stride and the enable bit, where the host binds strides dynamically: the
+        // buffers are bound again with their strides on both paths (UpdateGraphicsBuffers), and
+        // the pipeline key holds strides only without extended dynamic state.
+        if (word == 0) {
+            return VideoCommon::Nx2FastDraw::g_dynamic_strides.load(std::memory_order_relaxed);
+        }
         return word == 1 || word == 2; // address_high, address_low
     }
     constexpr u32 sizes = 0x600 / sizeof(u32); // SET_VERTEX_STREAM_SIZE_A/B (NativeVertexStreamSize)
@@ -404,7 +451,15 @@ bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
     if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
+        // A fence-flagged release signals a fence: never neutral for the fast draw path.
+        const bool neutral =
+            IsFastDrawNeutralMethod(method) &&
+            !(method == MAXWELL3D_REG_INDEX(report_semaphore.query) &&
+              regs.report_semaphore.query.operation == Regs::ReportSemaphore::Operation::Release &&
+              regs.report_semaphore.query.short_query != 0);
+        if (!neutral) {
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
+        }
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
         LOG_DEBUG(HW_GPU, "Native GPU surface clear: value={:#x}", argument);
@@ -862,6 +917,12 @@ void Maxwell3D::ProcessQueryGet() {
         static_cast<VideoCommon::QueryType>(regs.report_semaphore.query.report.Value());
     const u32 payload = regs.report_semaphore.payload;
     const u32 subreport = regs.report_semaphore.query.sub_report;
+    if (VideoCommon::Nx2FastDraw::Enabled()) {
+        // The release lands in guest memory: a short one writes the payload, a long one the
+        // 16-byte report.
+        const u64 bytes = regs.report_semaphore.query.short_query != 0 ? 4 : 16;
+        NoteFastDrawConstantData(sequence_address, sequence_address + bytes);
+    }
     switch (regs.report_semaphore.query.operation) {
     case Regs::ReportSemaphore::Operation::Release:
         if (regs.report_semaphore.query.short_query != 0) {
@@ -1978,7 +2039,10 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
                 AsyncReadback::MaybeReport();
             }
         },
-        fs.parameters);
+        // The call itself does not end the fast draw path: the methods the macro calls end it
+        // or not, as any method does.
+        fs.parameters, VideoCommon::GpuSplit::Writes::Anywhere,
+        VideoCommon::GpuSplit::FastDrawNeutral);
     const u64 position = split.Position();
     fs.back_last = position;
     const bool tracked = fs.control == Regs::ShadowRamControl::Track ||

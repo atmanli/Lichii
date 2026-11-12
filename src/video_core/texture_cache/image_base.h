@@ -134,6 +134,10 @@ struct ImageBase {
     /// At least the newest modification_tick among aliased_images (raised when an alias's tick is
     /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
     u64 newest_alias_tick = 0;
+    /// The cache's modification counter when the image took its contents from guest memory or
+    /// other images (made, or uploaded again): write-backs noted after it are bytes it holds older
+    /// copies of, unless it rendered over them itself.
+    u64 load_tick = 0;
     size_t lru_index = SIZE_MAX;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};

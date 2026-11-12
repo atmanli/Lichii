@@ -25,6 +25,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_back_idle_trace.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
@@ -189,6 +190,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     Tegra::DmaPusher::WaitForSnapshotCopies();
                 }
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                    // The guest may have written pages the caches don't watch since the lists
+                    // before it: uniform keeps end here, in order on the back.
+                    split.Defer([] { VideoCommon::Nx2FastDraw::NoteSync(); },
+                                VideoCommon::GpuSplit::FastDrawNeutral);
                     Profile::Scope scope{Profile::Zone::Push};
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
@@ -225,6 +230,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 Tegra::DmaPusher::WaitForSnapshotCopies();
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                VideoCommon::Nx2FastDraw::NoteSync();
                 Profile::Scope scope{Profile::Zone::Push};
                 scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {

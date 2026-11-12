@@ -505,4 +505,16 @@ if (TARGET nxformat::static_nozstd)
     target_link_libraries(yuzu PRIVATE nxformat::static_nozstd)
     target_compile_definitions(yuzu PRIVATE LICHII_NX_TOOLS)
 endif()
+
+# The Hypervisor CPU backend needs the hypervisor entitlement; an ad-hoc signature is enough.
+if (HAS_HYPERVISOR AND NOT CMAKE_GENERATOR MATCHES "Xcode")
+    add_custom_command(TARGET yuzu POST_BUILD
+        # --deep: the bundle also holds files that aren't code (nx2_switches.txt in MacOS).
+        COMMAND codesign --force --deep --sign - --entitlements
+                "${CMAKE_SOURCE_DIR}/dist/eglantine.entitlements" "$<TARGET_BUNDLE_DIR:yuzu>")
+elseif (HAS_HYPERVISOR)
+    set_target_properties(yuzu PROPERTIES
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_SOURCE_DIR}/dist/eglantine.entitlements")
+endif()
+
 create_target_directory_groups(yuzu)

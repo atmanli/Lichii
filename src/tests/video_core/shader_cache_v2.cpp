@@ -997,14 +997,46 @@ TEST_CASE("Shader cache v2: graphics records move to the vertex attributes their
     for (const V2::LogRecord& record : log.live) {
         records.push_back(&record);
     }
-    const auto appends = Vulkan::MaskPipelineAttributeTypes(records, masks);
-    REQUIRE(appends ==
+    // The masked key already has its own record, which is kept
+    const auto masked = Vulkan::MaskPipelineAttributeTypes(records, masks);
+    REQUIRE(masked.appends ==
+            std::vector<V2::LogAppend>{{RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key),
+                                        V2::TombstonePayload(RecordKind::Graphics)}});
+    REQUIRE(masked.moves ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key), {}}});
+    REQUIRE(
+        Vulkan::MaskPipelineAttributeTypes(records, masks, [] { return true; }).appends.empty());
+    REQUIRE(Vulkan::MaskPipelineAttributeTypes(records, {}).appends.empty());
+
+    // Two records that differ only in unread attribute types move to one record
+    auto other_unread = key;
+    other_unread.state.attribute_types = 0b011110;
+    std::vector<u8> merged_bytes(header.begin(), header.end());
+    for (const auto& record_key : {key, other_unread}) {
+        V2::EncodeRecord(merged_bytes, RecordKind::Graphics, Vulkan::GraphicsRecordKey(record_key),
+                         payload(record_key));
+    }
+    const V2::ParsedLog merged_log = V2::ParseLog(merged_bytes);
+    std::vector<const V2::LogRecord*> merged_records;
+    for (const V2::LogRecord& record : merged_log.live) {
+        merged_records.push_back(&record);
+    }
+    const auto merged = Vulkan::MaskPipelineAttributeTypes(merged_records, masks);
+    REQUIRE(merged.appends ==
             std::vector<V2::LogAppend>{
                 {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), payload(masked_key)},
                 {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key),
+                 V2::TombstonePayload(RecordKind::Graphics)},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(other_unread),
                  V2::TombstonePayload(RecordKind::Graphics)}});
-    REQUIRE(Vulkan::MaskPipelineAttributeTypes(records, masks, [] { return true; }).empty());
-    REQUIRE(Vulkan::MaskPipelineAttributeTypes(records, {}).empty());
+    REQUIRE(merged.moves ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key), {}},
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(other_unread), {}}});
 
     // A record moved by a relink and then by its mask in one boot
     V2::EncodeRecord(bytes, RecordKind::Used, 100,

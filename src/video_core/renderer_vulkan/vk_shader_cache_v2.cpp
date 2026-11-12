@@ -7,6 +7,7 @@
 #include <istream>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -328,12 +329,18 @@ std::unordered_map<u64, u64> ProgramAttributeMasks(std::span<const ShaderCacheV2
     return masks;
 }
 
-std::vector<ShaderCacheV2::LogAppend> MaskPipelineAttributeTypes(
+MaskedPipelineRecords MaskPipelineAttributeTypes(
     std::span<const ShaderCacheV2::LogRecord* const> records,
     const std::unordered_map<u64, u64>& masks, const std::function<bool()>& stop) {
-    std::vector<ShaderCacheV2::LogAppend> appends;
+    MaskedPipelineRecords result;
     if (masks.empty()) {
-        return appends;
+        return result;
+    }
+    std::unordered_set<u64> graphics_keys;
+    for (const ShaderCacheV2::LogRecord* const record : records) {
+        if (record->kind == RecordKind::Graphics) {
+            graphics_keys.insert(record->key);
+        }
     }
     for (const ShaderCacheV2::LogRecord* const record : records) {
         if (stop && stop()) {
@@ -368,14 +375,19 @@ std::vector<ShaderCacheV2::LogAppend> MaskPipelineAttributeTypes(
             continue;
         }
         key->state.attribute_types = attribute_types;
-        std::vector<u8> payload(record->payload.begin(), record->payload.end());
-        std::memcpy(payload.data() + payload.size() - sizeof(*key), &*key, sizeof(*key));
         const u64 new_key = GraphicsRecordKey(*key);
-        appends.push_back({RecordKind::Graphics, new_key, std::move(payload)});
-        appends.push_back({RecordKind::Tombstone, record->key,
-                           ShaderCacheV2::TombstonePayload(record->kind)});
+        // Records that differed only in unread attribute types share the masked key
+        if (graphics_keys.insert(new_key).second) {
+            std::vector<u8> payload(record->payload.begin(), record->payload.end());
+            std::memcpy(payload.data() + payload.size() - sizeof(*key), &*key, sizeof(*key));
+            result.appends.push_back({RecordKind::Graphics, new_key, std::move(payload)});
+        }
+        result.appends.push_back({RecordKind::Tombstone, record->key,
+                                  ShaderCacheV2::TombstonePayload(record->kind)});
+        result.moves.push_back({RecordKind::Graphics, new_key, {}});
+        result.moves.push_back({RecordKind::Tombstone, record->key, {}});
     }
-    return appends;
+    return result;
 }
 
 namespace {

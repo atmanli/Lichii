@@ -109,11 +109,20 @@ struct RekeyedRecord {
 [[nodiscard]] std::unordered_map<u64, u64> ProgramAttributeMasks(
     std::span<const VideoCommon::ShaderCacheV2::LogRecord> live);
 
-/// The records that move the graphics records among `records` keyed with vertex attribute types
-/// their programs never read to the key the pipeline cache looks them up with (KeyedAttributeTypes):
-/// each one's new record, then a tombstone for its old key. A record with a program missing from
-/// `masks` (task and mesh pipelines, whose keys mix in the mesh state) is left alone.
-[[nodiscard]] std::vector<VideoCommon::ShaderCacheV2::LogAppend> MaskPipelineAttributeTypes(
+struct MaskedPipelineRecords {
+    /// Each moved record's new record, unless a graphics record already holds its key, then a
+    /// tombstone for its old key
+    std::vector<VideoCommon::ShaderCacheV2::LogAppend> appends;
+    /// Each move as its new key's graphics record and its old key's tombstone, without payloads
+    /// (for RelinkUsedPipelines)
+    std::vector<VideoCommon::ShaderCacheV2::LogAppend> moves;
+};
+
+/// Moves the graphics records among `records` keyed with vertex attribute types their programs
+/// never read to the key the pipeline cache looks them up with (KeyedAttributeTypes). A record with
+/// a program missing from `masks` (task and mesh pipelines, whose keys mix in the mesh state) is
+/// left alone.
+[[nodiscard]] MaskedPipelineRecords MaskPipelineAttributeTypes(
     std::span<const VideoCommon::ShaderCacheV2::LogRecord* const> records,
     const std::unordered_map<u64, u64>& masks, const std::function<bool()>& stop = {});
 

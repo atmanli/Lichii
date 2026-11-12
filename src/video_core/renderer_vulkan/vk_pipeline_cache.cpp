@@ -1439,15 +1439,15 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         plan.push_back(&record);
     }
     // Records keyed with every attribute type move to the keys of the attributes their programs read
-    std::vector<CacheV2::LogAppend> masked_appends;
+    MaskedPipelineRecords masked;
     std::vector<CacheV2::LogRecord> masked_records;
     if (build_at_boot && !stop_loading.stop_requested()) {
-        masked_appends = MaskPipelineAttributeTypes(
+        masked = MaskPipelineAttributeTypes(
             plan, attribute_masks, [&stop_loading] { return stop_loading.stop_requested(); });
     }
-    if (!masked_appends.empty() && !stop_loading.stop_requested()) {
+    if (!masked.appends.empty() && !stop_loading.stop_requested()) {
         std::unordered_set<u64> masked_away;
-        for (const CacheV2::LogAppend& append : masked_appends) {
+        for (const CacheV2::LogAppend& append : masked.appends) {
             cache_v2->Writer().Append(append.kind, append.key, append.payload);
             if (append.kind == RecordKind::Tombstone) {
                 masked_away.insert(append.key);
@@ -1467,19 +1467,18 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         }
         LOG_INFO(Render_Vulkan,
                  "Shader cache v2: {} pipeline records moved to the vertex attributes they read",
-                 masked_records.size());
+                 masked_away.size());
     } else {
-        masked_appends.clear();
+        masked.moves.clear();
     }
     // Moves already written are relinked even when loading stops, or the used lists would keep
     // the keys of tombstoned records
-    if (!relinked_appends.empty() || !masked_appends.empty()) {
+    if (!relinked_appends.empty() || !masked.moves.empty()) {
         std::vector<CacheV2::LogAppend> moves;
-        for (const auto* appends : {&relinked_appends, &masked_appends}) {
-            for (const CacheV2::LogAppend& append : *appends) {
-                moves.push_back({append.kind, append.key, {}});
-            }
+        for (const CacheV2::LogAppend& append : relinked_appends) {
+            moves.push_back({append.kind, append.key, {}});
         }
+        moves.insert(moves.end(), masked.moves.begin(), masked.moves.end());
         for (const CacheV2::LogAppend& append : RelinkUsedPipelines(
                  log->parsed.live, moves, MaxUsedPipelineAge(device), used_pipelines)) {
             cache_v2->Writer().Append(append.kind, append.key, append.payload);

@@ -255,6 +255,13 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         VAddr virtual_address; ///< 0: no CPU mapping known
         u64 size;
     };
+    // Images at GPU addresses without memory get placeholder addresses past the device address
+    // space, which has no pages to look up.
+    constexpr DAddr address_space_end = DAddr{1} << AS_BITS;
+    if (address >= address_space_end) {
+        return;
+    }
+    size = (std::min)(size, address_space_end - address);
     std::vector<Run> runs;
     const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {

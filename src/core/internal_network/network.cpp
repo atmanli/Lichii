@@ -33,6 +33,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/network_interface.h"
 #include "core/internal_network/sockets.h"
@@ -791,6 +792,9 @@ u32 IPv4AddressToInteger(IPv4Address ip_addr) {
 
 std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
     const std::string& host, const std::optional<std::string>& service) {
+    if (auto redirected = LocalRedirect::Resolve(host, service)) {
+        return std::move(*redirected);
+    }
     addrinfo hints{};
     hints.ai_family = AF_INET; // Switch only supports IPv4.
     addrinfo* addrinfo;
@@ -816,6 +820,13 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
         }
     }
     freeaddrinfo(addrinfo);
+    if (LocalRedirect::LoopbackOnly()) {
+        std::erase_if(ret, [](const AddrInfo& info) { return !LocalRedirect::Allowed(info.addr); });
+        if (ret.empty()) {
+            LOG_DEBUG(Network, "Local redirect: lookup of {} blocked (loopback only)", host);
+            return GetAddrInfoError::NONAME;
+        }
+    }
     return ret;
 }
 
@@ -882,6 +893,7 @@ Socket::~Socket() {
 
 Socket::Socket(Socket&& rhs) noexcept {
     fd = std::exchange(rhs.fd, INVALID_SOCKET);
+    socket_type = rhs.socket_type;
 }
 
 template <typename T>
@@ -911,6 +923,7 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int level, int option, T value) {
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
     if (fd != INVALID_SOCKET) {
+        socket_type = type;
         return Errno::SUCCESS;
     }
 
@@ -956,6 +969,16 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
 }
 
 Errno Socket::Connect(SockAddrIn addr_in) {
+    // The guest's own address decides; the configured server it may then go to is the user's.
+    if (!LocalRedirect::Allowed(addr_in)) {
+        LOG_DEBUG(Network, "Local redirect: connection to {}.{}.{}.{}:{} refused (loopback only)",
+                  addr_in.ip[0], addr_in.ip[1], addr_in.ip[2], addr_in.ip[3], addr_in.portno);
+        return Errno::CONNREFUSED;
+    }
+    // EDEN_NX2_ONLINE_SERVER stands in for TCP servers only.
+    if (socket_type == Type::STREAM) {
+        addr_in = LocalRedirect::ConnectTarget(addr_in);
+    }
     const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
     if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
         return Errno::SUCCESS;
@@ -1204,6 +1227,9 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
     sockaddr host_addr_in;
 
     if (addr) {
+        if (!LocalRedirect::Allowed(*addr)) {
+            return {-1, Errno::NETUNREACH};
+        }
         host_addr_in = TranslateFromSockAddrIn(*addr);
         to = &host_addr_in;
     }

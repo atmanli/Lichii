@@ -18,6 +18,7 @@
 
 #include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/ssl/ssl_backend.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
 
@@ -117,15 +118,47 @@ inline void LoadCaCertStore(SSL_CTX* ctx, const char* ca_cert, std::size_t size)
 }
 #endif
 
+/// The roots a connection verifies against while the custom servers' CA (EDEN_NX2_ONLINE_CA) is
+/// trusted: the usual ones plus that CA. Built once, the first time it is wanted. Connections
+/// get it through SSL_set1_verify_cert_store, so the CA follows the setting each time a game
+/// starts and is never added to the context's own store. Null when the CA can't be loaded
+/// (logged once): connections then verify against the context's store alone.
+X509_STORE* TestCaStore() {
+    static std::once_flag once;
+    static X509_STORE* store = nullptr;
+    std::call_once(once, [] {
+        // The same roots as the context's store (OneTimeInit).
+#ifdef YUZU_BUNDLED_OPENSSL
+        X509_STORE* roots = CreateCaCertStore(kCert, sizeof(kCert));
+#else
+        X509_STORE* roots = X509_STORE_new();
+#endif
+        if (roots != nullptr && X509_STORE_set_default_paths(roots) != 1) {
+            X509_STORE_free(roots);
+            roots = nullptr;
+        }
+        const auto der_data = Network::LocalRedirect::TestCa();
+        const unsigned char* der = der_data.data();
+        X509* const ca = d2i_X509(nullptr, &der, static_cast<long>(der_data.size()));
+        if (roots != nullptr && ca != nullptr && X509_STORE_add_cert(roots, ca) == 1) {
+            store = roots;
+            LOG_INFO(Service_SSL, "Trusting the custom servers' CA (EDEN_NX2_ONLINE_CA)");
+        } else {
+            X509_STORE_free(roots);
+            LOG_ERROR(Service_SSL,
+                      "The custom servers' CA (EDEN_NX2_ONLINE_CA) could not be loaded; ignored");
+            CheckOpenSSLErrors();
+        }
+        X509_free(ca);
+    });
+    return store;
+}
+
 } // namespace
 
 class SSLConnectionBackendOpenSSL final : public SSLConnectionBackend {
 public:
     Result Init() {
-        // on bundled OpenSSL, load ca cert store
-#ifdef YUZU_BUNDLED_OPENSSL
-        LoadCaCertStore(ssl_ctx, kCert, sizeof(kCert));
-#endif
         std::call_once(one_time_init_flag, OneTimeInit);
 
         if (!one_time_init_success) {
@@ -138,6 +171,16 @@ public:
         if (!ssl) {
             LOG_ERROR(Service_SSL, "SSL_new failed");
             return CheckOpenSSLErrors();
+        }
+
+        // Empty unless "Redirect online services to custom servers" is ticked. A CA that can't
+        // be loaded is ignored: the context's store then verifies the connection.
+        if (!Network::LocalRedirect::TestCa().empty()) {
+            X509_STORE* const store = TestCaStore();
+            if (store != nullptr && SSL_set1_verify_cert_store(ssl, store) != 1) {
+                LOG_ERROR(Service_SSL, "SSL_set1_verify_cert_store failed");
+                return CheckOpenSSLErrors();
+            }
         }
 
         SSL_set_connect_state(ssl);
@@ -470,6 +513,12 @@ void OneTimeInit() {
         CheckOpenSSLErrors();
         return;
     }
+
+    // Bundled OpenSSL: the bundled CA certificates, before the default verify paths are added
+    // to the same store.
+#ifdef YUZU_BUNDLED_OPENSSL
+    LoadCaCertStore(ssl_ctx, kCert, sizeof(kCert));
+#endif
 
     SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
 

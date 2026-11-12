@@ -907,7 +907,24 @@ void KeplerCompute::CheckDlssNetwork() {
     if (!input || !output) {
         return;
     }
-    const auto probe = rasterizer->ProbeGameDlssOutput(*input, *output);
+    // A dynamic resolution network renders a region of its input and upscales that region to the
+    // whole output: compare only the region (all of the input would mismatch the output wherever
+    // the region leaves stale pixels, and drop a working network).
+    std::optional<std::array<u32, 2>> input_region;
+    if (dlss_chain.render_region) {
+        using namespace VideoCommon::FireEmblemUpscale;
+        if (cbuf.size.Value() < RenderLastColumnOffset + 4 ||
+            !memory_manager.IsFullyMappedRange(cbuf_address, RenderLastColumnOffset + 4)) {
+            return;
+        }
+        const u32 width = memory_manager.Read<u32>(cbuf_address + RenderLastColumnOffset) + 1;
+        const u32 height = memory_manager.Read<u32>(cbuf_address + RenderLastRowOffset) + 1;
+        if (width == 0 || height == 0 || width > input->width || height > input->height) {
+            return;
+        }
+        input_region = std::array{width, height};
+    }
+    const auto probe = rasterizer->ProbeGameDlssOutput(*input, *output, input_region);
     if (!probe) {
         return;
     }
@@ -926,9 +943,11 @@ void KeplerCompute::CheckDlssNetwork() {
                                  : VideoCore::GameDlssReason::OutputMismatch;
     LOG_WARNING(HW_GPU,
                 "Game DLSS network: {} in {} checks in a row (last: {}/{} blocks mismatched, worst "
-                "{:.3f}, {} invalid samples); the replacement upscale draws the output from now on",
+                "{:.3f}, gain {:.3f}, {} invalid samples); the replacement upscale draws the output "
+                "from now on",
                 VideoCore::GameDlssReasonText(dlss_chain.failure), dlss_chain.bad_checks,
-                probe->mismatched, probe->blocks, probe->worst, probe->invalid_samples);
+                probe->mismatched, probe->blocks, probe->worst, probe->gain,
+                probe->invalid_samples);
 }
 
 // Logs what draws the game's DLSS evaluation, when that changes.

@@ -1,0 +1,8 @@
+# Switch 2 Emulator Diagnostics MCP Server
+# Core functionality requires only Python 3.9+ standard library.
+# The following dependencies are OPTIONAL but recommended:
+
+psutil>=5.9.0                           # Accurate CPU/RAM process introspection and thread count
+pillow>=10.0.0                          # Viewport screenshot capture for multimodal AI models
+pywin32>=306; sys_platform == "win32"   # Direct Windows window detection and frame grabbing
+xxhash>=3.0.0                           # Fast native XXH3-64 verification of shader records

@@ -10,7 +10,15 @@ $version = '22.1.8'
 $sha256 = '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
 
 $installer = Join-Path $env:RUNNER_TEMP 'llvm.exe'
-Invoke-WebRequest -OutFile $installer "https://github.com/llvm/llvm-project/releases/download/llvmorg-$version/LLVM-$version-win64.exe"
+$llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$version/LLVM-$version-win64.exe"
+for ($i = 1; $i -le 5; $i++) {
+    try { Invoke-WebRequest -OutFile $installer $llvmUrl; break }
+    catch {
+        if ($i -eq 5) { throw }
+        Write-Host "LLVM download attempt $i failed, retrying in 5s..."
+        Start-Sleep -Seconds 5
+    }
+}
 if ((Get-FileHash -Algorithm SHA256 $installer).Hash -ne $sha256) {
     throw 'LLVM installer checksum mismatch'
 }

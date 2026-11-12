@@ -1421,6 +1421,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                      "Shader cache v2: {} programs of another build lowered again, {} to other "
                      "code or texture bound buffer, {} pipeline records moved to it",
                      stale_count, revalidated.relinked.size(), relinked_records.size());
+        } else {
+            relinked_appends.clear();
         }
     }
     std::vector<const CacheV2::LogRecord*> plan;
@@ -1469,7 +1471,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     } else {
         masked_appends.clear();
     }
-    if (!stop_loading.stop_requested() && (!relinked_appends.empty() || !masked_appends.empty())) {
+    // Moves already written are relinked even when loading stops, or the used lists would keep
+    // the keys of tombstoned records
+    if (!relinked_appends.empty() || !masked_appends.empty()) {
         std::vector<CacheV2::LogAppend> moves;
         for (const auto* appends : {&relinked_appends, &masked_appends}) {
             for (const CacheV2::LogAppend& append : *appends) {

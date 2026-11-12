@@ -1429,16 +1429,19 @@ void MainWindow::InitializeHotkeys() {
     connect_shortcut(QStringLiteral("Audio Volume Up"), &MainWindow::OnIncreaseVolume);
 
     connect_shortcut(QStringLiteral("Toggle Framerate Limit"), [this] {
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleStandardMode();
         SetFPSSuffix();
     });
 
     connect_shortcut(QStringLiteral("Toggle Turbo Speed"), [this] {
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleTurboMode();
         SetFPSSuffix();
     });
 
     connect_shortcut(QStringLiteral("Toggle Slow Speed"), [this] {
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleSlowMode();
         SetFPSSuffix();
     });
@@ -2176,6 +2179,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
 
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
+    speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -2458,6 +2462,28 @@ void MainWindow::BootGameFromList(const QString& filename, StartGameType with_co
     BootGame(filename, ApplicationAppletParameters(), with_config);
 }
 
+void MainWindow::RememberSpeedLimitBeforeHotkey() {
+    if (!speed_limit_before_hotkeys) {
+        speed_limit_before_hotkeys = SessionSpeedLimit{
+            .value = Settings::values.use_speed_limit.GetValue(),
+            .using_global = Settings::values.use_speed_limit.UsingGlobal(),
+        };
+    }
+}
+
+void MainWindow::UndoSessionSpeedChanges() {
+    // Undo the session's frame rate limit hotkey and turbo/slow modes. Only what the hotkeys
+    // changed is put back, in the scope (global or per-game) it was changed in: forcing the
+    // limit on here saved "Limit Speed Percent" as checked after every game, whatever the user
+    // had chosen.
+    if (speed_limit_before_hotkeys && Settings::values.use_speed_limit.UsingGlobal() ==
+                                          speed_limit_before_hotkeys->using_global) {
+        Settings::values.use_speed_limit.SetValue(speed_limit_before_hotkeys->value);
+    }
+    speed_limit_before_hotkeys.reset();
+    Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
+}
+
 bool MainWindow::OnShutdownBegin() {
     if (!emulation_running) {
         return false;
@@ -2469,9 +2495,7 @@ bool MainWindow::OnShutdownBegin() {
 
     AllowOSSleep();
 
-    // Disable unlimited frame rate and turbo/slow modes
-    Settings::values.use_speed_limit.SetValue(true);
-    Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
+    UndoSessionSpeedChanges();
 
     if (QtCommon::system->IsShuttingDown()) {
         status_bar_update_timer.stop();
@@ -2560,6 +2584,7 @@ void MainWindow::OnEmulationStopped() {
     if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
         return;
     }
+    UndoSessionSpeedChanges();
     shutdown_timer.stop();
     emu_terminate_timer.stop();
     if (QtCommon::emu_thread) {
@@ -3939,6 +3964,7 @@ void MainWindow::OnConfigure() {
         // This is here to avoid applying changes if the user hit Apply, made some changes, then hit
         // Cancel
         configure_dialog.ApplyConfiguration();
+        speed_limit_before_hotkeys.reset();
     } else if (UISettings::values.reset_to_defaults) {
         LOG_INFO(Frontend, "Resetting all settings to defaults");
         if (!Common::FS::RemoveFile(config->GetConfigFilePath())) {
@@ -4232,6 +4258,7 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
         return;
     } else if (result == QDialog::Accepted) {
         dialog.ApplyConfiguration();
+        speed_limit_before_hotkeys.reset();
     }
 
     const auto reload = UISettings::values.is_game_list_reload_pending.exchange(false);

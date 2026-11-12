@@ -64,6 +64,9 @@ struct Runtime {
     bool CanReportMemoryUsage() const {
         return false;
     }
+    u64 GetBufferAllocationTail() const {
+        return 0;
+    }
     u64 GetDeviceLocalMemory() const {
         return 0;
     }

@@ -24,6 +24,7 @@ public:
     bool native{};
     std::vector<u32> scalar_offsets;
     TestEnvironment() { stage = Shader::Stage::Compute; }
+    void SetStage(Shader::Stage stage_) { stage = stage_; }
     bool IsNativeProgram() const override { return native; }
     bool IsCbufStorageBufferPointer(u32 index, u32 offset) override {
         return index == 0 && std::ranges::find(scalar_offsets, offset) == scalar_offsets.end();
@@ -626,4 +627,180 @@ TEST_CASE("NVN fallback descriptors use guest slots rather than compact binding 
     auto reversed = descriptors;
     std::ranges::reverse(reversed);
     CHECK(selected(reversed) == std::vector<u32>{0x400, 0x340});
+}
+
+namespace {
+/// Native reads of records at a pointer loaded from *c0[0x30] plus a per-invocation offset, as
+/// The Duskbloods' tile-based lighting reads its light records.
+struct LoadedPointerRecords {
+    KernelProgram fixture;
+    IR::Block body{fixture.pool};
+    IR::Block exit{fixture.pool};
+
+    IR::U32 LoadedLow(IR::IREmitter& ir, IR::U32& high) {
+        fixture.env.native = true;
+        const IR::Value loaded{ir.LoadGlobal64(Address(ir, Word(ir, 0x30), Word(ir, 0x34)))};
+        high = IR::U32{ir.CompositeExtract(loaded, 1)};
+        return IR::U32{ir.CompositeExtract(loaded, 0)};
+    }
+
+    static IR::U32 RecordOffset(IR::IREmitter& ir) {
+        return ir.IAdd(ir.ShiftLeftLogical(ir.LocalInvocationIdX(), ir.Imm32(6)), ir.Imm32(60));
+    }
+
+    std::ptrdiff_t Count(IR::Opcode opcode) const {
+        std::ptrdiff_t total{};
+        for (const IR::Block* const block : fixture.program.blocks) {
+            total += std::ranges::count_if(block->Instructions(), [=](const IR::Inst& inst) {
+                return inst.GetOpcode() == opcode;
+            });
+        }
+        return total;
+    }
+
+    const IR::Inst* Find(IR::Opcode opcode) const {
+        for (const IR::Block* const block : fixture.program.blocks) {
+            for (const IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() == opcode) {
+                    return &inst;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    void SetBlocks(std::initializer_list<IR::Block*> blocks) {
+        fixture.program.blocks.assign(blocks.begin(), blocks.end());
+        fixture.program.post_order_blocks.assign(fixture.program.blocks.rbegin(),
+                                                 fixture.program.blocks.rend());
+        for (u32 index = 0; index < fixture.program.blocks.size(); ++index) {
+            fixture.program.blocks[index]->SetOrder(index);
+        }
+    }
+};
+} // Anonymous namespace
+
+TEST_CASE("Native reads through one loaded pointer read its binding directly",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    records.fixture.TrackedOffsets();
+
+    // Read from the loaded pointer's own binding, not searched for among the buffers.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    const IR::Inst* const read{records.Find(IR::Opcode::LoadStorage32)};
+    REQUIRE(read != nullptr);
+    const auto& descriptors{records.fixture.program.info.storage_buffers_descriptors};
+    REQUIRE(read->Arg(0).IsImmediate());
+    REQUIRE(read->Arg(0).U32() < descriptors.size());
+    const auto& binding{descriptors[read->Arg(0).U32()]};
+    CHECK(binding.cbuf_offset == 0x30);
+    CHECK(binding.indirect_offset == 0);
+    // The offset is taken from the loaded pointer, aligned down as the binding is.
+    const IR::Inst* const offset{read->Arg(1).InstRecursive()};
+    REQUIRE(offset->GetOpcode() == IR::Opcode::ISub32);
+    const IR::Inst* const base{offset->Arg(1).InstRecursive()};
+    REQUIRE(base->GetOpcode() == IR::Opcode::BitwiseAnd32);
+    CHECK(base->Arg(0).InstRecursive() == low.InstRecursive());
+    CHECK(base->Arg(1).U32() == ~15U);
+    // The holder stays bound for anything still routed at run time.
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == ~0U;
+    }));
+}
+
+TEST_CASE("Native reads through a pointer a loop carries read its binding directly",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    records.fixture.entry.AddBranch(&records.body);
+    records.body.AddBranch(&records.body);
+    records.body.AddBranch(&records.exit);
+    records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    records.body.AppendNewInst(IR::Opcode::Phi, {});
+    IR::Inst* const carried{&records.body.back()};
+    carried->SetFlags(IR::Type::U32);
+    carried->AddPhiOperand(&records.fixture.entry, low);
+    carried->AddPhiOperand(&records.body, IR::Value{carried});
+    IR::IREmitter loop{records.body};
+    const IR::U32 address_low{
+        loop.IAdd(IR::U32{IR::Value{carried}}, LoadedPointerRecords::RecordOffset(loop))};
+    loop.SetReg(IR::Reg::R0, loop.LoadGlobal32(Address(loop, address_low, high)));
+    records.fixture.TrackedOffsets();
+
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 1);
+}
+
+TEST_CASE("Native reads through a pointer or null stay global", "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    records.fixture.entry.AddBranch(&records.body);
+    records.fixture.entry.AddBranch(&records.exit);
+    records.body.AddBranch(&records.exit);
+    records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    IR::IREmitter body{records.body};
+    const IR::U32 record_low{body.IAdd(low, LoadedPointerRecords::RecordOffset(body))};
+    records.exit.AppendNewInst(IR::Opcode::Phi, {});
+    IR::Inst* const either{&records.exit.back()};
+    either->SetFlags(IR::Type::U32);
+    either->AddPhiOperand(&records.body, record_low);
+    either->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+    IR::IREmitter exit{records.exit};
+    exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, IR::U32{IR::Value{either}}, high)));
+    records.fixture.TrackedOffsets();
+
+    // A direct read of the null path would land on the pointer's records instead of reading 0.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 0);
+}
+
+TEST_CASE("Native reads through a pointer or null outside compute read zero on the null path",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    records.fixture.env.SetStage(Shader::Stage::Fragment);
+    records.fixture.entry.AddBranch(&records.body);
+    records.fixture.entry.AddBranch(&records.exit);
+    records.body.AddBranch(&records.exit);
+    records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    IR::IREmitter body{records.body};
+    const IR::U32 record_low{body.IAdd(low, LoadedPointerRecords::RecordOffset(body))};
+    records.exit.AppendNewInst(IR::Opcode::Phi, {});
+    IR::Inst* const either{&records.exit.back()};
+    either->SetFlags(IR::Type::U32);
+    either->AddPhiOperand(&records.body, record_low);
+    either->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+    IR::IREmitter exit{records.exit};
+    exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, IR::U32{IR::Value{either}}, high)));
+    records.fixture.TrackedOffsets();
+
+    // Read from the pointer's binding, and zero where the null path was taken.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 1);
+    const IR::Inst* const select{records.Find(IR::Opcode::SelectU32)};
+    REQUIRE(select != nullptr);
+    CHECK(select->Arg(1).InstRecursive()->GetOpcode() == IR::Opcode::LoadStorage32);
+    REQUIRE(select->Arg(2).IsImmediate());
+    CHECK(select->Arg(2).U32() == 0);
+    // Which path was taken decides, not the pointer's value: a pointer whose low word is zero
+    // is not null.
+    const IR::Inst* const taken{select->Arg(0).InstRecursive()};
+    REQUIRE(taken->GetOpcode() == IR::Opcode::Phi);
+    REQUIRE(taken->NumArgs() == 2);
+    for (size_t arg = 0; arg < taken->NumArgs(); ++arg) {
+        REQUIRE(taken->Arg(arg).IsImmediate());
+        CHECK(taken->Arg(arg).U1() == (taken->PhiBlock(arg) == &records.body));
+    }
 }

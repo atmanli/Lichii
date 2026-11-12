@@ -2098,6 +2098,19 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         return;
     }
 
+    // Guest memory a zero clear of a whole colour target left zero (below). The buffers over it are
+    // cleared once the texture cache's lock is released: one cache lock at a time, as elsewhere.
+    boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32> zeroed_memory;
+    SCOPE_EXIT {
+        if (zeroed_memory.empty()) {
+            return;
+        }
+        std::scoped_lock buffer_lock{buffer_cache.mutex};
+        // Piece by piece: DMAClear clears one device-contiguous range.
+        for (const auto& [address, size] : zeroed_memory) {
+            buffer_cache.DMAClear(address, size / sizeof(u32), 0);
+        }
+    };
     std::scoped_lock lock{texture_cache.mutex};
     texture_cache.UpdateRenderTargets(true);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
@@ -2260,6 +2273,20 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                 Offset2D{.x = clear_rect.rect.offset.x + s32(clear_rect.rect.extent.width),
                          .y = clear_rect.rect.offset.y + s32(clear_rect.rect.extent.height)}};
             blit_image.ClearColor(framebuffer, color_mask, regs.clear_color, dst_region);
+        }
+        // To the guest a clear that leaves every byte of a target zero is also a memset of its
+        // memory, and a game may read that memory as a buffer next: storage buffers over it live
+        // in the buffer cache, which never sees the image clear, so they are zeroed too. The
+        // Duskbloods clears its upscaler's scratch target (1536x1408 RGBA16F) this way and reads
+        // the network's padding rows from it as a buffer; their stale values kept NaN alive at
+        // the bottom of the image.
+        static constexpr VkClearColorValue zero_color{};
+        if (color_full_channels && clear_covers_render_area && clear_layers.covers_all_layers &&
+            std::memcmp(&clear_value.color, &zero_color, sizeof(zero_color)) == 0) {
+            if (const auto target = texture_cache.CoveredColorTarget(
+                    color_attachment, render_area.width, render_area.height)) {
+                zeroed_memory = gpu_memory->GetSubmappedRange(target->first, target->second);
+            }
         }
     }
 

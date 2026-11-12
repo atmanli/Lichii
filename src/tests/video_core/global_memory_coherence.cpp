@@ -442,6 +442,46 @@ TEST_CASE("SPIR-V global memory helpers are DontInline in compute only",
     }
 }
 
+TEST_CASE("SPIR-V global atomic helpers follow the compute inlining profile",
+          "[video_core][spirv][global_memory]") {
+    for (const bool inline_compute : {false, true}) {
+        CAPTURE(inline_compute);
+        GlobalAtomicProgram fixture{false};
+        fixture.program.stage = Stage::Compute;
+        fixture.profile.inline_compute_global_helpers = inline_compute;
+        const auto atomic =
+            std::ranges::find_if(fixture.block.Instructions(), [](const IR::Inst& inst) {
+                return inst.GetOpcode() == IR::Opcode::GlobalAtomicIAdd32;
+            });
+        REQUIRE(atomic != fixture.block.Instructions().end());
+        IR::IREmitter ir{fixture.block};
+        static_cast<void>(
+            ir.GlobalAtomicCompareExchange(IR::U64{atomic->Arg(0)}, ir.Imm32(0), ir.Imm32(1)));
+
+        const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
+        constexpr u32 OpFunction = 54;
+        constexpr u32 OpFunctionCall = 57;
+        constexpr u32 DontInline = 0x2;
+        std::map<u32, u32> controls;
+        for (const auto& op : Instructions(code, OpFunction)) {
+            REQUIRE(op.size() == 4);
+            controls[op[1]] = op[2];
+        }
+        std::set<u32> callees;
+        for (const auto& op : Instructions(code, OpFunctionCall)) {
+            REQUIRE(op.size() >= 3);
+            callees.insert(op[2]);
+        }
+        REQUIRE(callees.size() == 2);
+        const u32 expected = inline_compute ? 0 : DontInline;
+        for (const u32 callee : callees) {
+            CAPTURE(callee);
+            REQUIRE(controls.contains(callee));
+            CHECK((controls.at(callee) & DontInline) == expected);
+        }
+    }
+}
+
 TEST_CASE("NVN fallback does not deduplicate descriptors from different constant buffers",
           "[shader][storage_buffer][nvn]") {
     const std::array<u64, 5> code{

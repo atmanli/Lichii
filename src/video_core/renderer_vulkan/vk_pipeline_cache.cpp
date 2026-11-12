@@ -73,6 +73,7 @@
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
+#include "video_core/spirv_inline_control.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -441,7 +442,43 @@ std::vector<u32> EmitStageSpirv(const Device& device, const Shader::Profile& pro
                                          std::span<const u32>(code.data(), code.size()));
         }
     }
+
+    // Every graphics module (monolithic pipelines, on the GPU thread or on a worker, and the
+    // rebuilds of evicted pipelines from the kept words) is built from these words, so the pass
+    // runs once on every path. Functions a stage calls from several places (the global memory
+    // functions of native programs) are built as calls instead of being inlined at each call site
+    // (video_core/spirv_inline_control.h).
+    const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(code);
+    if (marked != 0) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+            LOG_INFO(Render_Vulkan,
+                     "Graphics shader {:016x}: {} shared functions built as calls, not inlined",
+                     shader_hash, marked);
+        }
+        // Aftermath matches crash reports by the hash of the submitted module, so save that
+        // copy as well.
+        device.SaveShader(code);
+    }
     return code;
+}
+
+// The words a compute module is built from. Functions a compute shader calls from several places
+// (the global memory functions of native programs) are built as calls instead of being inlined at
+// each call site, which made NVIDIA spend 2-13 s on single compute shaders of a test title, every
+// one a freeze at its first dispatch (video_core/spirv_inline_control.h). The translation cache
+// keeps the SPIR-V as emitted, so cached and freshly translated stages are built alike.
+std::vector<u32> ComputeModuleCode(std::span<const u32> code, u64 shader_hash) {
+    std::vector<u32> words(code.begin(), code.end());
+    if (const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(words); marked != 0) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+            LOG_INFO(Render_Vulkan,
+                     "Compute shader {:016x}: {} shared functions built as calls, not inlined",
+                     shader_hash, marked);
+        }
+    }
+    return words;
 }
 
 vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& profile,
@@ -449,7 +486,8 @@ vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& 
                                    std::span<const u32> reference = {}) {
     const std::vector<u32> code{EmitComputeShader(profile, program, shader_hash, reference)};
     device.SaveShader(code);
-    vk::ShaderModule spv_module{BuildShader(device, code)};
+    // Saved as emitted, built from ComputeModuleCode's words
+    vk::ShaderModule spv_module{BuildShader(device, ComputeModuleCode(code, shader_hash))};
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();

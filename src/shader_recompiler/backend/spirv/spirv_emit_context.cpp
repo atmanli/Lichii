@@ -975,8 +975,13 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     using DefPtr = Id StorageDefinitions::*;
     const Id zero{u32_zero_value};
     // Inlined at each of their calls, a program with ~30 candidate buffers took NVIDIA's compiler
-    // 2.4 s (Ocarina's foliage compute programs; 0.6 s as calls, same accesses).
-    const spv::FunctionControlMask helper_control{spv::FunctionControlMask::DontInline};
+    // 2.4 s (Ocarina's foliage compute programs; 0.6 s as calls, same accesses). Other stages
+    // inline them: with DontInline, NVIDIA 580.x let a second helper call clobber the first call's
+    // live result in a mesh shader.
+    const spv::FunctionControlMask helper_control =
+        stage == Stage::Compute && !profile.inline_compute_global_helpers
+            ? spv::FunctionControlMask::DontInline
+            : spv::FunctionControlMask::MaskNone;
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
                                auto&& callback) {
         AddLabel();
@@ -1257,8 +1262,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             });
         })) {
         const Id function_type{TypeFunction(U32[1], U64, U32[1], U32[1])};
-        atomic_cas_global_func_u32 =
-            OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type);
+        atomic_cas_global_func_u32 = OpFunction(U32[1], helper_control, function_type);
         const Id address{OpFunctionParameter(U64)};
         const Id comparator{OpFunctionParameter(U32[1])};
         const Id value{OpFunctionParameter(U32[1])};

@@ -15,6 +15,9 @@
 #include "common/polyfill_thread.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline_frame_gen.h"
+#endif
 
 namespace Core::Frontend {
 class EmuWindow;
@@ -42,6 +45,12 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+#ifdef EGLANTINE_STREAMLINE
+    // DLSS Frame Generation: the guest frame presented and where the guest image is in the frame.
+    bool frame_gen{};
+    Streamline::FrameGenFrame frame_gen_frame{};
+    VkRect2D guest_rect{};
+#endif
 };
 
 class PresentManager {

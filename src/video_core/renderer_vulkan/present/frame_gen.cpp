@@ -14,6 +14,9 @@
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 
 namespace Vulkan {
 
@@ -22,6 +25,15 @@ namespace {
 constexpr size_t COLOR_CHANNELS = 4;
 constexpr u64 LSFG_REQUIRED_FRAMES = 2;
 constexpr u32 LSFG_RECURRENCE_FRAMES = 2;
+
+/// NVIDIA DLSS Frame Generation generates the frames in its place.
+[[nodiscard]] bool NvidiaFrameGenRuns() {
+#ifdef EGLANTINE_STREAMLINE
+    return Streamline::FrameGenAvailable();
+#else
+    return false;
+#endif
+}
 
 [[nodiscard]] f32 ManualFlowScale() {
     return static_cast<f32>(Settings::values.frame_gen_flow_scale.GetValue()) / 100.0f;
@@ -202,7 +214,11 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         shaders.emplace(device);
     }
 
-    if (unavailable || !Settings::values.frame_gen.GetValue()) {
+    const bool nvidia_frame_gen = NvidiaFrameGenRuns();
+    if (unavailable || !Settings::values.frame_gen.GetValue() || nvidia_frame_gen) {
+        if (nvidia_frame_gen) {
+            state.store(VideoCore::FrameGenState::NvidiaFrameGen, std::memory_order_relaxed);
+        }
         if (chain || fsr3_chain) {
             scheduler.Finish();
             chain.reset();

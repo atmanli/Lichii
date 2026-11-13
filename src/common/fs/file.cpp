@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <climits>
 #include <vector>
 
 #include "common/assert.h"
@@ -10,6 +11,10 @@
 #include "common/fs/fs.h"
 #ifdef __ANDROID__
 #include "common/fs/fs_android.h"
+#endif
+#ifdef LICHII_DIRECTSTORAGE
+#include "common/fs/dstorage_queue.h"
+#include "common/settings.h"
 #endif
 #include "common/logging.h"
 
@@ -454,5 +459,24 @@ s64 IOFile::Tell() const {
 
     return ftello(file);
 }
+
+#ifdef LICHII_DIRECTSTORAGE
+size_t IOFile::ReadSpanDirectStorage(void* data, size_t size_bytes) const {
+    if (size_bytes < DirectStorage::MinDirectStorageReadSize ||
+        size_bytes > static_cast<size_t>(LONG_MAX) ||
+        !Settings::values.use_directstorage.GetValue() || !DirectStorage::IsAvailable()) {
+        return 0;
+    }
+    const s64 position = Tell();
+    if (position < 0) {
+        return 0;
+    }
+    if (!DirectStorage::ReadFileAt(file_path, static_cast<u64>(position), data, size_bytes)) {
+        return 0;
+    }
+    std::fseek(file, static_cast<long>(size_bytes), SEEK_CUR);
+    return size_bytes;
+}
+#endif
 
 } // namespace Common::FS

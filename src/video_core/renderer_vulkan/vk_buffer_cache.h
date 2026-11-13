@@ -46,6 +46,11 @@ public:
         return *buffer;
     }
 
+    /// True for the buffer cache's null buffer slot, which unmapped bindings share.
+    [[nodiscard]] bool IsNull() const noexcept {
+        return is_null || !buffer;
+    }
+
     [[nodiscard]] VkDeviceAddress DeviceAddress() const noexcept {
         return device_address;
     }
@@ -160,6 +165,9 @@ public:
     u64 GetDeviceMemoryUsage() const;
 
     bool CanReportMemoryUsage() const;
+
+    /// Bytes each cached buffer allocates past its size.
+    u64 GetBufferAllocationTail() const;
 
     u32 GetUniformBufferAlignment() const;
 
@@ -341,7 +349,9 @@ private:
         if (handle == VK_NULL_HANDLE) {
             guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
-            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, size);
+            // A descriptor range of 0 is invalid; an unmapped binding covers the null buffer.
+            const VkDeviceSize range = buffer.IsNull() && size == 0 ? NullBufferSize() : size;
+            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, range);
         }
     }
 
@@ -349,6 +359,7 @@ private:
 
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
+    VkDeviceSize NullBufferSize() const;
 
     const Device& device;
     MemoryAllocator& memory_allocator;

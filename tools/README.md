@@ -6,6 +6,10 @@ Tools for Eden and other subprojects. When adding new scripts please use `#!/bin
 
 - [CPMUtil Scripts](./cpm)
 
+## MCP Server & Diagnostics
+
+- [Switch 2 Diagnostics MCP Server](./mcp): Model Context Protocol (MCP 2024-11-05) diagnostics server for AI assistants (Claude Code, Cursor, Antigravity, Codex). Provides real-time telemetry, Vulkan defects monitoring, and deep binary Shader Cache v2 parsing.
+
 ## Binaries
 
 - `maxwell-spirv`: Converts Maxwell shaders (dumped from `.ash` files) into SPIR-V code (emitted into STDOUT).

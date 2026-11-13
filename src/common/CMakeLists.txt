@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project SPDX-License-Identifier:
 # GPL-2.0-or-later
 
 if(DEFINED ENV{AZURECIREPO})
@@ -111,6 +110,7 @@ add_library(
     ${CMAKE_CURRENT_BINARY_DIR}/scm_rev.cpp
     scm_rev.h
     scope_exit.h
+    shutdown_progress.h
     spin_recursive_mutex.h
     scratch_buffer.h
     settings.cpp

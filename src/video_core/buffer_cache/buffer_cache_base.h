@@ -1,21 +1,23 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <array>
 #include <bit>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -193,7 +195,7 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
     friend struct BufferCacheTestAccess;
     // Page size for caching purposes.
     // This is unrelated to the CPU page size and it can be changed as it seems optimal.
-#ifdef YUZU_LEGACY
+#ifdef LICHII_LEGACY
     static constexpr u32 CACHING_PAGEBITS = 12;
 #else
     static constexpr u32 CACHING_PAGEBITS = 16;
@@ -211,7 +213,7 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
     static constexpr bool SEPARATE_IMAGE_BUFFERS_BINDINGS = P::SEPARATE_IMAGE_BUFFER_BINDINGS;
     static constexpr bool USE_MEMORY_MAPS_FOR_UPLOADS = P::USE_MEMORY_MAPS_FOR_UPLOADS;
 
-#ifdef YUZU_LEGACY
+#ifdef LICHII_LEGACY
     static constexpr s64 TARGET_THRESHOLD = 3_GiB;
 #else
     static constexpr s64 TARGET_THRESHOLD = 4_GiB;
@@ -325,6 +327,15 @@ public:
     /// The query cache wrote a result NoteReportPending kept to guest memory, or dropped it.
     void FinishReport(DAddr device_addr, u64 size);
 
+    /// Without `mutex`: false when the page under device_addr can't be one the guest reads back
+    /// (NoteReportPending would return false). Seeing the bounds before a page joins them is
+    /// the same as looking before that read took the lock.
+    [[nodiscard]] bool MayBeReadBackPage(DAddr device_addr) const noexcept {
+        const DAddr page = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
+        return page >= read_back_first.load(std::memory_order_acquire) &&
+               page <= read_back_last.load(std::memory_order_acquire);
+    }
+
     /// The GPU thread recorded a draw or dispatch (`mutex` held). After a dispatch, the downloads
     /// of the pages written since that the guest reads after each write go right behind it
     /// (RecordEarlyDownloads). Those the host GPU has run land in guest memory.
@@ -348,6 +359,37 @@ public:
     }
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
+
+    /// List-fed grid macros (nx2_list_grid.h): an inline write whose words at the `patches`'
+    /// offsets are markers. It is uploaded at once, not left to a later invalidation that would
+    /// upload guest memory's markers over the copies. Then `copy(buffer, offset, patch)` records
+    /// the host GPU's copy of the patch's kept word over it; those words are GPU-written from now
+    /// on, and registered to their list until another write reaches them (Nx2KeptWordList).
+    template <typename Patch, typename Copy>
+    void Nx2InlineKeptWords(DAddr dest_address, std::span<const u8> data,
+                            std::span<const Patch> patches, Copy&& copy) {
+        InlineMemoryImplementation(dest_address, data.size(), data);
+        if (nx2_kept_words.size() >= 0x10000) {
+            nx2_kept_words.clear(); // Only the QMD reads' fallback to the host GPU's words then
+        }
+        for (const Patch& patch : patches) {
+            const DAddr address = dest_address + patch.offset;
+            const BufferId buffer_id = FindBuffer(address, sizeof(u32), false);
+            Buffer& buffer = slot_buffers[buffer_id];
+            const u32 offset = buffer.Offset(address);
+            copy(buffer, offset, patch);
+            // As a3acb026c1 does for indirect arguments: no later upload is reordered ahead.
+            buffer.MarkUsage(offset, sizeof(u32));
+            MarkWrittenBuffer(buffer_id, address, sizeof(u32));
+            nx2_kept_words[address] = {patch.keep_id, patch.index};
+        }
+    }
+    /// The list and word Nx2InlineKeptWords last patched at `device_addr`, unless a CPU, inline,
+    /// DMA or storage write reached the word since.
+    [[nodiscard]] std::optional<std::pair<u64, u32>> Nx2KeptWordList(DAddr device_addr) const {
+        const auto it = nx2_kept_words.find(device_addr);
+        return it != nx2_kept_words.end() ? std::optional{it->second} : std::nullopt;
+    }
 
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
@@ -645,7 +687,8 @@ private:
     /// while collecting, asks for new copies.
     void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size);
 
-    [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible);
+    [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible,
+                                      std::source_location caller = std::source_location::current());
 
     void SynchronizeBufferWrites(Buffer& buffer);
 
@@ -653,8 +696,8 @@ private:
 
     void JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
 
-    [[nodiscard]] BufferId CreateBuffer(DAddr device_addr, u32 wanted_size,
-                                        bool sparse_compatible);
+    [[nodiscard]] BufferId CreateBuffer(DAddr device_addr, u32 wanted_size, bool sparse_compatible,
+                                        std::source_location caller = std::source_location::current());
 
     void Register(BufferId buffer_id);
 
@@ -757,13 +800,25 @@ private:
     /// Re-dirties repacked vertex buffers whose source data was written since they were bound.
     void RefreshRepackedVertexBuffers();
 
+    void Nx2ForgetKeptWords(DAddr device_addr, u64 size) {
+        if (nx2_kept_words.empty()) {
+            return;
+        }
+        auto it = nx2_kept_words.lower_bound(device_addr & ~DAddr{3});
+        while (it != nx2_kept_words.end() && it->first < device_addr + size) {
+            it = nx2_kept_words.erase(it);
+        }
+    }
+    /// Nx2InlineKeptWords' patched words: keep id and word index by device address.
+    std::map<DAddr, std::pair<u64, u32>> nx2_kept_words;
+
     void InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                     std::span<const u8> inlined_buffer);
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
 
     Common::SlotVector<Buffer> slot_buffers;
-#ifdef YUZU_LEGACY
+#ifdef LICHII_LEGACY
     static constexpr size_t TICKS_TO_DESTROY = 6;
 #else
     static constexpr size_t TICKS_TO_DESTROY = 8;
@@ -789,6 +844,20 @@ private:
     std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
     u64 buffer_deletions = 0;
+    /// EDEN_NX2_BUFFER_TRACE: buffers created (with the buffers they joined) and collected, logged
+    /// every 10 s, and each creation of 64 MiB or more with the line that asked for it.
+    struct CreateTrace {
+        bool enabled = std::getenv("EDEN_NX2_BUFFER_TRACE") != nullptr;
+        u64 creates{};
+        u64 created_bytes{};
+        u64 joins{};
+        u64 joined_bytes{};
+        u64 leaps{};
+        u64 collected{};
+        u64 collected_bytes{};
+        u32 large_logged{};
+        std::chrono::steady_clock::time_point last{};
+    } create_trace;
     struct GeometryStats {
         u64 syncs{};
         u64 syncs_skipped{};
@@ -828,6 +897,8 @@ private:
         u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
         u64 sync_serial{};    ///< Nx2FastDraw::SyncSerial then
         u64 host_serial{};    ///< MemoryManager::HostPointerSerial then
+        /// gpu_memory then: another one's HostPointerSerial can be the same number
+        const Tegra::MemoryManager* gpu_memory{};
         u64 kept{};
         u64 streamed_binds{};
         u64 verified{};
@@ -1088,6 +1159,9 @@ private:
     static constexpr u64 EarlyBytesPerFrame = 1_MiB;
     static constexpr u32 MaxPendingEarlyDownloads = 32;
     std::vector<ReadBackPage> read_back_pages; ///< Sorted by page
+    /// The first and last page of read_back_pages (MayBeReadBackPage), set under `mutex`.
+    std::atomic<DAddr> read_back_first{~DAddr{0}};
+    std::atomic<DAddr> read_back_last{0};
     /// NoteReportPending's results not yet written, oldest first.
     struct PendingReport {
         DAddr addr;
@@ -1126,7 +1200,7 @@ private:
     u64 minimum_memory = 0;
     u64 critical_memory = 0;
     BufferId inline_buffer_id;
-#ifdef YUZU_LEGACY
+#ifdef LICHII_LEGACY
     bool immediately_free = false;
 #endif
 

@@ -133,9 +133,26 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
 };
+// A turn action (main+0x261E8E0, ExecuteASApproachStickX; Gohma steers with it) ends by clamping
+// its turn speed, kept per 60 Hz frame, to the change it applied times the frame step. The change
+// already carries the step, so below a step of 1 the speed decays by step^2 every frame. The routine
+// divides by the step there instead and runs the game's two instructions at a step of 1 and above.
+// The routine replaces both fmul (0x261EB18 and 0x261EB1C) and returns to 0x261EB20, so the hook
+// guards both; the second instruction stays in place, unreached.
+constexpr std::array<u8, 8> TURN_SPEED_ORIGINAL{0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E};
+constexpr std::array<u8, 8> TURN_SPEED_HOOK{0xCA, 0x9F, 0x58, 0x14, 0x00, 0x08, 0x28, 0x1E};
+// fmov s1, #1.0 ; fcmp s8, s1 ; b.ge +0x10 ; fdiv s0, s0, s8 ; fneg s1, s0 ; b 0x261EB20 ;
+// ldr s1, [sp, #0xc] ; fmul s1, s0, s1 ; fmul s0, s0, s8 ; b 0x261EB20
+constexpr std::array<u8, 40> TURN_SPEED_ROUTINE{
+    0x01, 0x10, 0x2E, 0x1E, 0x00, 0x21, 0x21, 0x1E, 0x8A, 0x00, 0x00, 0x54, 0x00, 0x18,
+    0x28, 0x1E, 0x01, 0x40, 0x21, 0x1E, 0x33, 0x60, 0xA7, 0x17, 0xE1, 0x0F, 0x40, 0xBD,
+    0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E, 0x2F, 0x60, 0xA7, 0x17,
+};
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x261EB18, TURN_SPEED_HOOK, TURN_SPEED_ORIGINAL},
+    BuiltinPatchRecord{0x3C46A40, TURN_SPEED_ROUTINE, {}, true},
 };
 
 constexpr std::array BUILTIN_PATCHES{

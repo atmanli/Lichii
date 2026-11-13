@@ -567,6 +567,25 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
                 }
                 return count;
             }
+            // An instance loop's draw.begin writes come in runs of identical entries (the front
+            // sends no draw.end inside the loop): ~770,000 a second for ~56,000 draws in Ocarina
+            // of Time's Kokiri Forest. The first runs as usual, the rest only add their instances.
+            if (method == MAXWELL3D_REG_INDEX(draw.begin) && (head & HasSegment) == 0 &&
+                words > 1 && entry[1] == head) {
+                u32 count = 1;
+                while (count < words && entry[count] == head) {
+                    ++count;
+                }
+                const bool is_last = (head & Direct) != 0 || (head & IsLast) != 0;
+                maxwell3d->ConsumeSink(*system);
+                maxwell3d->CallMethod(*system, method, argument, is_last);
+                if (!maxwell3d->RepeatDrawBegin(count - 1)) {
+                    for (u32 i = 1; i < count; ++i) {
+                        maxwell3d->CallMethod(*system, method, argument, is_last);
+                    }
+                }
+                return count;
+            }
             if ((head & Direct) != 0) {
                 maxwell3d->ConsumeSink(*system);
                 maxwell3d->CallMethod(*system, method, argument, true);

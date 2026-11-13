@@ -91,9 +91,37 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1235, 0x2206, 53)));
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2207, 53)));
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 54)));
+    // Another shader lowering (an update that changed the recompiler) builds the programs again.
+    REQUIRE_FALSE(
+        marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 0x77)));
+
+    // Built again with the same contents: still done.
+    WriteBytes(warm, "precache");
+    REQUIRE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
 
     WriteBytes(warm, "a rebuilt precache");
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
+}
+
+TEST_CASE("ShaderPrecache: a rebuild with the same contents keeps the marker", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    const auto rebuilt = dir.path / "warm-compute.tmp";
+    WriteBytes(warm, "precache");
+    REQUIRE(ShaderWarm::WriteWarmMarker(
+        warm, *ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
+
+    WriteBytes(rebuilt, "precache");
+    ShaderWarm::DropStaleWarmMarker(warm, rebuilt);
+    REQUIRE(ShaderWarm::ReadWarmMarker(warm).has_value());
+
+    WriteBytes(rebuilt, "a rebuilt precache");
+    ShaderWarm::DropStaleWarmMarker(warm, rebuilt);
+    REQUIRE_FALSE(std::filesystem::exists(ShaderWarm::WarmMarkerPath(warm)));
+
+    // No marker left and nothing to replace the file with: nothing to do.
+    ShaderWarm::DropStaleWarmMarker(warm, dir.path / "missing.tmp");
+    REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
 }
 
 TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {

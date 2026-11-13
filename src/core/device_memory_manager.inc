@@ -261,7 +261,7 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
     if (address >= address_space_end) {
         return;
     }
-    size = (std::min)(size, address_space_end - address);
+    size = static_cast<size_t>((std::min)(DAddr{size}, address_space_end - address));
     std::vector<Run> runs;
     const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {

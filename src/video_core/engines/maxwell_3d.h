@@ -3219,6 +3219,11 @@ public:
     void WriteStateRegisters(Core::System& system, std::span<const u64, 4> flags,
                              std::span<const u64> writes, u32 last_break);
 
+    /// GpuSplit's back: `count` more draw.begin writes of the value just written, as as many
+    /// CallMethod calls would run them. Only an instance loop's subsequent begins, which each add
+    /// an instance; false where a begin would do more, and then nothing was done.
+    [[nodiscard]] bool RepeatDrawBegin(u32 count);
+
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
     /// the front instead of CallMethod: runs macros and macro uploads against a copy of the
     /// registers and sends the register writes to the back thread.

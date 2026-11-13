@@ -1123,8 +1123,9 @@ bool GraphicsEnvironment::Detach(
     }
     if (!texture_pool) {
         auto pool{std::make_shared<std::vector<Tegra::Texture::TICEntry>>(pool_entries)};
-        gpu_memory->ReadBlock(regs.tex_header.Address(), pool->data(),
-                              pool->size() * sizeof(Tegra::Texture::TICEntry));
+        const size_t pool_bytes{pool->size() * sizeof(Tegra::Texture::TICEntry)};
+        gpu_memory->FlushRegion(regs.tex_header.Address(), pool_bytes);
+        gpu_memory->ReadBlockUnsafe(regs.tex_header.Address(), pool->data(), pool_bytes);
         texture_pool = std::move(pool);
     }
     EngineSnapshot copy;

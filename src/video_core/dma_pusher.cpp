@@ -335,6 +335,7 @@ void DmaPusher::DispatchCalls() {
         split.Publish();
         return;
     }
+    VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::Call);
     system.GPU().FlushCommands();
     system.GPU().OnCommandListEnd();
 }
@@ -751,6 +752,10 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                         ++batch_count;
                     }
                     if (batch_count > 1) {
+                        if (!subchannel->reports_fast_draw_breaks) {
+                            VideoCommon::Nx2FastDraw::BreakUnsplit(
+                                VideoCommon::Nx2FastDraw::Reason::OtherEngine);
+                        }
                         for (u32 i = 0; i < batch_count; ++i) {
                             subchannel->method_sink.emplace_back(dma_state.method + i, commands[index + i].argument);
                         }
@@ -928,6 +933,9 @@ void DmaPusher::CallMethod(u32 argument) {
             }
             return;
         }
+        if (!subchannel->reports_fast_draw_breaks) {
+            VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::OtherEngine);
+        }
         if (!subchannel->execution_mask[dma_state.method]) {
             subchannel->method_sink.emplace_back(dma_state.method, argument);
         } else {
@@ -990,6 +998,9 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                 }
             }
             return;
+        }
+        if (!subchannel->reports_fast_draw_breaks) {
+            VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::OtherEngine);
         }
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
         subchannel->ConsumeSink(system);

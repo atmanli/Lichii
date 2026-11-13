@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <string_view>
+
 #include <catch2/catch_test_macros.hpp>
 #include "common/literals.h"
 #include "common/memory_detect.h"
 
 using namespace Common::Literals;
 using Common::HostRam;
+using Common::InstalledRamFromUdev;
 using Common::IsBelowSwitch2RamMinimum;
 
 TEST_CASE("Switch 2 RAM minimum: installed RAM below 16 GiB", "[common]") {
@@ -39,4 +42,26 @@ TEST_CASE("Cold hints only when the host is short of RAM", "[common]") {
 TEST_CASE("Switch 2 RAM minimum: unknown RAM gives no warning", "[common]") {
     CHECK_FALSE(IsBelowSwitch2RamMinimum(HostRam{0, true}));
     CHECK_FALSE(IsBelowSwitch2RamMinimum(HostRam{0, false}));
+}
+
+TEST_CASE("Installed RAM sums udev's DMI memory devices", "[common]") {
+    // A Steam Deck: four 4 GiB LPDDR5 devices, of which Linux manages about 11.5 GiB.
+    constexpr std::string_view deck = "E:MEMORY_ARRAY_MAX_CAPACITY=68719476736\n"
+                                      "E:MEMORY_DEVICE_0_SIZE=4294967296\n"
+                                      "E:MEMORY_DEVICE_0_TYPE=LPDDR5\n"
+                                      "E:MEMORY_DEVICE_1_SIZE=4294967296\n"
+                                      "E:MEMORY_DEVICE_2_SIZE=4294967296\n"
+                                      "E:MEMORY_DEVICE_3_SIZE=4294967296\n";
+    CHECK(InstalledRamFromUdev(deck) == 16_GiB);
+    CHECK_FALSE(IsBelowSwitch2RamMinimum(HostRam{InstalledRamFromUdev(deck), true}));
+    CHECK(InstalledRamFromUdev("E:MEMORY_DEVICE_0_SIZE=8589934592") == 8_GiB);
+}
+
+TEST_CASE("Installed RAM from udev ignores other and malformed entries", "[common]") {
+    CHECK(InstalledRamFromUdev("") == 0);
+    CHECK(InstalledRamFromUdev("E:MEMORY_ARRAY_MAX_CAPACITY=68719476736\n") == 0);
+    CHECK(InstalledRamFromUdev("E:MEMORY_DEVICE_0_SIZE=\n") == 0);
+    CHECK(InstalledRamFromUdev("E:MEMORY_DEVICE_0_SIZE=4G\n") == 0);
+    CHECK(InstalledRamFromUdev("E:MEMORY_DEVICE__SIZE=4294967296\n") == 0);
+    CHECK(InstalledRamFromUdev("E:MEMORY_DEVICE_0_SPEED=6400\n") == 0);
 }

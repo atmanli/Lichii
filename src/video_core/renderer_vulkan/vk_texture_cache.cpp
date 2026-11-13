@@ -76,13 +76,80 @@ using VideoCore::Surface::IsPixelFormatSRGB;
 using VideoCore::Surface::SurfaceType;
 
 namespace {
-[[nodiscard]] u32 HostMipCount(const VideoCommon::ImageInfo& info) {
+// The levels a host image of the guest's size can have: one when multisampled.
+[[nodiscard]] u32 FullHostMipCount(const VideoCommon::ImageInfo& info) {
     if (info.num_samples > 1)
         return 1;
     return VideoCommon::HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
                                           static_cast<u32>(info.resources.levels));
 }
 
+// Whether ASTC whose BC copy would have uneven block mips gets a BC copy without its uneven
+// levels (EvenBcLevels): AMD drivers without ASTC, with the GPU BC encoder. Set once by
+// TextureCacheRuntime.
+std::atomic<bool> even_bc_levels{false};
+
+// The first level of a `width` x `height` image whose size in 4x4 blocks is not its level 0 block
+// count shifted down (341 texels: 86 blocks at level 0, 85 texels = 22 blocks at level 2, not
+// 86 >> 2 = 21); 0 if every level is even.
+[[nodiscard]] u32 FirstUnevenBlockMip(u32 width, u32 height, u32 levels) {
+    const u32 blocks_x = Common::DivCeil(width, 4U);
+    const u32 blocks_y = Common::DivCeil(height, 4U);
+    for (u32 level = 1; level < levels; ++level) {
+        const u32 level_x = Common::DivCeil((std::max)(width >> level, 1U), 4U);
+        const u32 level_y = Common::DivCeil((std::max)(height >> level, 1U), 4U);
+        if (level_x != (std::max)(blocks_x >> level, 1U) ||
+            level_y != (std::max)(blocks_y >> level, 1U)) {
+            return level;
+        }
+    }
+    return 0;
+}
+
+// The same for the guest size and full level chain of `info`.
+[[nodiscard]] u32 FirstUnevenBlockMip(const VideoCommon::ImageInfo& info) {
+    return FirstUnevenBlockMip(info.size.width, info.size.height, FullHostMipCount(info));
+}
+
+// The size of `info` decoded to RGBA8: every level of every layer.
+[[nodiscard]] u64 DecodedAstcBytes(const VideoCommon::ImageInfo& info) {
+    u64 bytes = 0;
+    for (u32 level = 0; level < FullHostMipCount(info); ++level) {
+        bytes += u64{(std::max)(info.size.width >> level, 1U)} *
+                 (std::max)(info.size.height >> level, 1U) * 4;
+    }
+    return bytes * static_cast<u64>(info.resources.layers);
+}
+
+// The levels of the BC copy of an ASTC image whose own level chain has uneven block mips, where
+// the driver samples those wrong (even_bc_levels): the levels before the first uneven one, when
+// that one is 32 texels or smaller (1536: level 8 = 6 texels, 768: level 7, 576: level 5 = 18
+// texels). The copy keeps the guest's size, so texel coordinates, textureSize and copies between
+// images address it as the guest's image; only explicit LODs past its last level sample that
+// level instead. nullopt for images that keep their levels and for those whose uneven levels are
+// larger (341, 1365: kept as RGBA8, IsUnevenMipRgba8Astc).
+[[nodiscard]] std::optional<u32> EvenBcLevels(const VideoCommon::ImageInfo& info) {
+    if (!even_bc_levels.load(std::memory_order_relaxed) || !IsPixelFormatASTC(info.format) ||
+        info.type != ImageType::e2D || info.size.depth != 1 || info.num_samples > 1 ||
+        info.resources.levels <= 1 || DecodedAstcBytes(info) > (u64{1} << 30)) {
+        return std::nullopt;
+    }
+    constexpr u32 MaxTailTexels = 32;
+    const u32 first = FirstUnevenBlockMip(info);
+    if (first == 0 ||
+        (std::max)({info.size.width >> first, info.size.height >> first, 1U}) > MaxTailTexels) {
+        return std::nullopt;
+    }
+    return first;
+}
+
+// The levels of the host image: those before its uneven tail when it drops one (EvenBcLevels).
+[[nodiscard]] u32 HostMipCount(const VideoCommon::ImageInfo& info) {
+    const auto levels = EvenBcLevels(info);
+    return levels ? *levels : FullHostMipCount(info);
+}
+
+// `copies` limited to the levels both host images have.
 [[nodiscard]] std::span<const VideoCommon::ImageCopy> HostImageCopies(
     const Image& dst, const Image& src, std::span<const VideoCommon::ImageCopy> copies,
     boost::container::small_vector<VideoCommon::ImageCopy, 16>& filtered) {
@@ -199,35 +266,13 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
         info.type != ImageType::e2D || info.size.depth != 1) {
         return false;
     }
-    u64 bytes = 0;
-    for (s32 level = 0; level < static_cast<s32>(HostMipCount(info)); ++level) {
-        bytes += u64{(std::max)(info.size.width >> level, 1U)} *
-                 (std::max)(info.size.height >> level, 1U) * 4;
-    }
-    return bytes * info.resources.layers > (u64{1} << 30);
+    return DecodedAstcBytes(info) > (u64{1} << 30);
 }
 
-// Whether a block-compressed copy of `info` has a mip level whose size in 4x4 blocks is not its
-// level 0 block count shifted down (341 texels: 86 blocks at level 0, 85 texels = 22 blocks at
-// level 2, not 86 >> 2 = 21). On AMD (RX 6600 XT, Windows driver) the BC1/BC3 copies of such
-// images show dark lines along the seams of distant terrain in title 1; RGBA8 copies don't.
-[[nodiscard]] bool HasUnevenBlockMips(const ImageInfo& info) {
-    const u32 blocks_x = Common::DivCeil(info.size.width, 4U);
-    const u32 blocks_y = Common::DivCeil(info.size.height, 4U);
-    for (s32 level = 1; level < info.resources.levels; ++level) {
-        const u32 level_x = Common::DivCeil((std::max)(info.size.width >> level, 1U), 4U);
-        const u32 level_y = Common::DivCeil((std::max)(info.size.height >> level, 1U), 4U);
-        if (level_x != (std::max)(blocks_x >> level, 1U) ||
-            level_y != (std::max)(blocks_y >> level, 1U)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (HasUnevenBlockMips) on
-// an AMD driver, which samples those wrong: kept as the GPU decoder's RGBA8 instead, like huge
-// arrays.
+// ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (FirstUnevenBlockMip) on
+// an AMD driver, which samples those wrong (dark lines along the seams of distant terrain in
+// title 1 on an RX 6600 XT, Windows driver; RGBA8 copies don't show them), and whose uneven levels
+// are too large to drop (EvenBcLevels): kept as the GPU decoder's RGBA8 instead, like huge arrays.
 [[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
@@ -240,7 +285,7 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
         id != VK_DRIVER_ID_MESA_RADV) {
         return false;
     }
-    return HasUnevenBlockMips(info) && !IsHugeAstcArray(device, info);
+    return FirstUnevenBlockMip(info) != 0 && !EvenBcLevels(info) && !IsHugeAstcArray(device, info);
 }
 
 // A large image over Switch 2 sparse blocks nobody has written (title 1's terrain layer pools, 2.9
@@ -428,8 +473,14 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 // over 1 GiB as RGBA8 (title 1's 8192x8192x68 ASTC 8x8 virtual textures are 24 GB each) keeps only
 // its mip levels from `level_offset` on, so host mip 0 is guest mip `level_offset`. Normalized
 // coordinates and derivative LOD still address it correctly; explicit LODs sample one level lower.
+// An ASTC image re-compressed to BC without its uneven tail (EvenBcLevels) has those levels.
 [[nodiscard]] ImageInfo TrimmedHostInfo(const Device& device, const ImageInfo& info, u32& level_offset) {
     level_offset = 0;
+    if (const auto levels = EvenBcLevels(info)) {
+        ImageInfo host = info;
+        host.resources.levels = static_cast<s32>(*levels);
+        return host;
+    }
     if (!WillUseAcceleratedAstcDecode(device, info) || info.type != ImageType::e2D) {
         return info;
     }
@@ -1312,6 +1363,12 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
                                     compute_pass_descriptor_queue);
         }
     }
+    // The drivers IsUnevenMipRgba8Astc covers, when images are transcoded by the BC encoder.
+    const VkDriverIdKHR driver = device.GetDriverID();
+    even_bc_levels = bc_encoder_pass.has_value() && !device.IsOptimalAstcSupported() &&
+                     Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
+                     (driver == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                      driver == VK_DRIVER_ID_AMD_OPEN_SOURCE || driver == VK_DRIVER_ID_MESA_RADV);
     if (!device.IsKhrImageFormatListSupported()) {
         return;
     }
@@ -3226,6 +3283,17 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                              "{} images so far",
                              info.size.width, info.size.height, info.resources.layers,
                              info.resources.levels, count);
+                }
+            }
+            if (const auto levels = EvenBcLevels(info)) {
+                static std::atomic<u32> even_images{0};
+                const u32 count = ++even_images;
+                if (count <= 4 || (count & (count - 1)) == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "ASTC {}x{}x{} with {} levels re-compressed with its first {} levels "
+                             "(even BC block mips), {} images so far",
+                             info.size.width, info.size.height, info.resources.layers,
+                             info.resources.levels, *levels, count);
                 }
             }
             break;

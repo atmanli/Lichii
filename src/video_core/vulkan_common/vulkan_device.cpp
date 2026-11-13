@@ -956,7 +956,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     functions.vkAllocateMemory = TimedAllocateMemory;
     functions.vkFreeMemory = TimedFreeMemory;
 
-    VmaAllocatorCreateFlags flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+    // Synchronized inside VMA: the image recycler destroys dropped images on a thread of its own
+    // while the GPU thread allocates (vulkan_wrapper.cpp).
+    VmaAllocatorCreateFlags flags = 0;
     if (extensions.memory_budget) {
         flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     }
@@ -996,6 +998,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     };
 
     vk::Check(vmaCreateAllocator(&allocator_info, &allocator));
+    vk::ImageRecycler::Open(allocator);
 
     owns_static_pipeline_cache = surface != VkSurfaceKHR{};
     LoadStaticPipelineCache();
@@ -1019,6 +1022,7 @@ Device::~Device() {
             }
         }
     }
+    vk::ImageRecycler::Clear(allocator);
     vmaDestroyAllocator(allocator);
 }
 

@@ -1190,8 +1190,11 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 void Device::ReportLoss() const {
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     ReportDeviceFault();
-    if (g_report_hang_markers) {
-        g_report_hang_markers();
+    {
+        std::scoped_lock lock{g_hang_marker_report_mutex};
+        if (g_hang_marker_report) {
+            g_hang_marker_report();
+        }
     }
 
     // Wait for the log to flush and for Nsight Aftermath to dump the results

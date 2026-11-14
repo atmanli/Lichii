@@ -128,6 +128,9 @@ public:
     /// EDEN_NX2_HANG_MARKERS: the buffer TraceGpuWork writes VK_AMD_buffer_marker values to, two
     /// words (the last draw or dispatch started, the last finished), and its mapping.
     void SetHangMarkers(VkBuffer buffer, std::span<const u32> values);
+    /// Logs the draws and dispatches that started but never finished, from the marker values the
+    /// caller made visible to the host (RasterizerVulkan, from Device::ReportLoss).
+    void ReportHangMarkers() const;
 
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
@@ -546,8 +549,6 @@ private:
     void BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                          std::array<u32, 3> size);
     void EndHangMarker(vk::CommandBuffer cmdbuf);
-    /// Logs the draws and dispatches that started but never finished (Device::ReportLoss).
-    void ReportHangMarkers() const;
 
     static constexpr u32 HangMarkerItems = 1024;
     VkBuffer hang_marker_buffer{};

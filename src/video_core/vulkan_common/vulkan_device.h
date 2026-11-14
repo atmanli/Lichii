@@ -239,9 +239,11 @@ enum class NvidiaArchitecture {
 };
 
 /// Handles data specific to a physical device.
-/// EDEN_NX2_HANG_MARKERS: set by the scheduler, called by Device::ReportLoss to log the work the
-/// device loss left unfinished.
-inline std::function<void()> g_report_hang_markers;
+/// EDEN_NX2_HANG_MARKERS: the rasterizer's report of the work a device loss left unfinished,
+/// called by Device::ReportLoss. Set and cleared under the mutex, which ReportLoss holds while it
+/// runs the report, so the rasterizer can't free the markers while a report reads them.
+inline std::mutex g_hang_marker_report_mutex;
+inline std::function<void()> g_hang_marker_report;
 
 class Device {
 public:

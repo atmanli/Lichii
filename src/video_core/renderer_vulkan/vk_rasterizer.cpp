@@ -499,10 +499,19 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         scheduler.SetHangMarkers(
             *hang_marker_buffer,
             std::span<const u32>{reinterpret_cast<const u32*>(mapped.data()), 2});
+        std::scoped_lock lock{g_hang_marker_report_mutex};
+        g_hang_marker_report = [this] {
+            hang_marker_buffer.Invalidate();
+            scheduler.ReportHangMarkers();
+        };
     }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
+    if (hang_marker_buffer) {
+        std::scoped_lock lock{g_hang_marker_report_mutex};
+        g_hang_marker_report = nullptr;
+    }
     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
     // The channels are gone by now, and submitting invalidates the state tracker's flags.
     state_tracker.ClearChannel();

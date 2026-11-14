@@ -909,6 +909,16 @@ bool Puller::CanResumeAcquireImpl(DmaPusher& dma_pusher) {
             }
             return true;
         }
+        // The value still has not landed: the fence chain can sit on recorded but unsubmitted
+        // commands (DeferFlush batching, or a back whose idle hook already ran and sleeps).
+        // Waiting on it without submitting can wedge every channel at once, so flush the
+        // scheduler before forcing the release again.
+        VideoCommon::GpuSplit::Get().Run(
+            [rasterizer = dma_pusher.rasterizer] {
+                rasterizer->FlushCommands();
+                rasterizer->ReleaseFences();
+            },
+            VideoCommon::DrainSite::FenceRelease);
     }
     ReportLongWait(dma_pusher, *pending_acquire, current);
     return false;

@@ -1,0 +1,87 @@
+name: Refresh win-max-pgo2
+
+# One-click rebuild of win-max-pgo2 from the latest upstream nx2 plus every
+# open PR that merges cleanly (red / status:failure PRs excluded). The push
+# uses the REFRESH_TOKEN secret (a PAT with the "repo" + "workflow" scopes),
+# because GitHub forbids the built-in token from pushing workflow files.
+# That same push triggers the Windows x64 PGO build automatically.
+#
+# Requires a repository secret named REFRESH_TOKEN.
+# Use it from: Actions tab -> "Refresh win-max-pgo2" -> "Run workflow".
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-win-max-pgo2
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out win-max-pgo2
+        uses: actions/checkout@v4
+        with:
+          ref: win-max-pgo2
+          fetch-depth: 0
+          token: ${{ secrets.REFRESH_TOKEN }}
+
+      - name: Rebuild win-max-pgo2 from upstream nx2 + open PRs
+        env:
+          GH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "atmanli"
+          git config user.email "20604966+atmanli@users.noreply.github.com"
+
+          # Keep this workflow and the four CI files across the reset.
+          mkdir -p /tmp/keep/.github/workflows /tmp/keep/CMakeModules /tmp/keep/tools/windows
+          cp .github/workflows/refresh.yml          /tmp/keep/.github/workflows/
+          cp .github/workflows/release-binaries.yml /tmp/keep/.github/workflows/
+          cp CMakeModules/CPMUtil.cmake             /tmp/keep/CMakeModules/
+          cp tools/windows/install-llvm.ps1         /tmp/keep/tools/windows/
+          cp tools/windows/install-vulkan-sdk.ps1   /tmp/keep/tools/windows/
+
+          echo "::group::Reset to upstream nx2"
+          git remote add upstream https://github.com/zortos293/Lichii.git 2>/dev/null || true
+          git fetch --no-tags upstream nx2
+          git checkout -B win-max-pgo2 upstream/nx2
+          echo "nx2 tip: $(git rev-parse --short HEAD)"
+          echo "::endgroup::"
+
+          echo "::group::Merge open PRs that apply cleanly"
+          RED=" $(gh api 'search/issues?q=repo:zortos293/Lichii+type:pr+state:open+status:failure&per_page=100' --jq '.items[].number' | tr '\n' ' ') "
+          echo "Red (excluded): $RED"
+          # PRs that merge cleanly but break the build (incompatible with other merged PRs / nx2).
+          # Add a number here when a refresh build fails to COMPILE because of a specific PR.
+          # #1378: calls the GraphicsPipeline constructor without the draw_templates argument.
+          # #1306: texture_cache.h lambda captures download_overlaps/async_downloads unused (-Werror).
+          # #1447: uses the renamed Core::Memory::YUZU_PAGEMASK/YUZU_PAGESIZE constants.
+          # #1696: evicted-pipeline rework constructs GraphicsPipeline with a stale signature.
+          SKIP=" 1378 1306 1447 1696 "
+          echo "Skipped (break the build): $SKIP"
+          PRS="$(gh api --paginate 'search/issues?q=repo:zortos293/Lichii+type:pr+state:open&per_page=100' --jq '.items[].number' | sort -rn | uniq)"
+          inc=0; con=0
+          for n in $PRS; do
+            case "$RED" in *" $n "*) continue;; esac
+            case "$SKIP" in *" $n "*) continue;; esac
+            git fetch --no-tags upstream "pull/$n/head" 2>/dev/null || continue
+            if git merge --no-ff -m "Merge PR #$n" FETCH_HEAD >/dev/null 2>&1; then
+              inc=$((inc+1))
+            else
+              git merge --abort 2>/dev/null || true
+              con=$((con+1))
+            fi
+          done
+          echo "Merged: $inc | conflicts skipped: $con"
+          echo "::endgroup::"
+
+          echo "::group::Restore CI files and push"
+          cp -r /tmp/keep/. .
+          git add -A
+          git commit -m "ci: refresh win-max-pgo2 (latest nx2 + ${inc} open PRs)" || echo "nothing to commit"
+          # Pushing with the PAT is allowed to touch workflow files and also
+          # triggers the release-binaries build via its push trigger.
+          git push --force origin win-max-pgo2
+          echo "::endgroup::"

@@ -54,6 +54,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x807:
     case 0x808:
+    case 0xc07:
+    case 0xc08: // SEL / FSEL with a uniform source: Rd and Ra are registers
     case 0x923:
     case 0x820:
     case 0xa20:
@@ -216,6 +218,11 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
             operand(64);
         if (opcode == 0x825)
             operand(64, 2);
+        break;
+    case 0xe25: // IMAD.WIDE with a uniform addend pair (bits 32-37, no register): Rd:Rd+1, Ra, Rb
+        operand(16, 2);
+        operand(24);
+        operand(64);
         break;
     case 0x83b:
         operand(16, 1U << input.Bits(72, 2));

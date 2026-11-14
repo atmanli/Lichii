@@ -91,6 +91,26 @@ public:
         [[nodiscard]] bool Matches(u32 current) const;
         /// Whether it waits for the word to reach `value` (greater or equal).
         [[nodiscard]] bool WaitsToReach() const;
+
+        /// How the acquire is decided without draining the split's back (CheckWithoutDrain).
+        enum class EarlyCheck : u8 {
+            Met,         ///< By the word in guest memory
+            MetByQueued, ///< By the last release sent to the word that the back has not run yet
+            NotMet,      ///< Nothing sent to the word can meet it yet
+            Drain,       ///< Drain the split and read the word
+        };
+        /// The last release sent to the word that may not be in memory yet
+        /// (GpuSplit::QueuedSemaphoreWrite).
+        struct QueuedRelease {
+            u32 payload;   ///< What the word holds once it landed, when `known`
+            bool known;    ///< The front knows the payload
+            bool at_least; ///< The word holds `payload` at least (a maximum over an unknown value)
+            bool ran;      ///< The back ran it; it lands once its fence ran (GpuSplit::Ran)
+        };
+        /// From the last release still queued for the back to the word (`queued`) and the word
+        /// in guest memory (`word`, read when nothing is queued or the back ran the release).
+        [[nodiscard]] EarlyCheck CheckEarly(const std::optional<QueuedRelease>& queued,
+                                            u32 word) const;
     };
 
     Puller() = default;

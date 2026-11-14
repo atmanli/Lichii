@@ -19,6 +19,7 @@ add_executable(tests
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
+    core/mii_model.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_thread_stats.cpp
@@ -249,7 +250,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)

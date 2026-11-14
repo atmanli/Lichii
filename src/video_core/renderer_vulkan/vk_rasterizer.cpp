@@ -485,6 +485,21 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         &scheduler);
     oot_performance_scale =
         Settings::AppliedOcarinaRenderScale() == Settings::NvidiaDlssQuality::Performance;
+    if (device.HasBufferMarker()) {
+        hang_marker_buffer = memory_allocator.CreateBuffer(
+            VkBufferCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = 2 * sizeof(u32),
+                .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            },
+            MemoryUsage::Download);
+        const std::span<u8> mapped = hang_marker_buffer.Mapped();
+        std::ranges::fill(mapped, u8{0});
+        scheduler.SetHangMarkers(
+            *hang_marker_buffer,
+            std::span<const u32>{reinterpret_cast<const u32*>(mapped.data()), 2});
+    }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {

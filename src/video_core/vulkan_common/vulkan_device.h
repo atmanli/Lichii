@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <functional>
 #include <optional>
 #include <set>
 #include <span>
@@ -238,6 +239,10 @@ enum class NvidiaArchitecture {
 };
 
 /// Handles data specific to a physical device.
+/// EDEN_NX2_HANG_MARKERS: set by the scheduler, called by Device::ReportLoss to log the work the
+/// device loss left unfinished.
+inline std::function<void()> g_report_hang_markers;
+
 class Device {
 public:
     explicit Device(VkInstance instance, vk::PhysicalDevice physical, VkSurfaceKHR surface,
@@ -260,6 +265,11 @@ public:
 
     /// Reports a device loss.
     void ReportLoss() const;
+
+    /// Whether EDEN_NX2_HANG_MARKERS loaded VK_AMD_buffer_marker.
+    bool HasBufferMarker() const {
+        return has_buffer_marker;
+    }
 
     /// Logs what VK_EXT_device_fault reports about a device loss.
     void ReportDeviceFault() const;
@@ -1402,6 +1412,7 @@ private:
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
+    bool has_buffer_marker{};
     VkPhysicalDeviceProperties2 properties2{};
 
     // Misc features

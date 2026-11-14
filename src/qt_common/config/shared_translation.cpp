@@ -200,8 +200,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
         INSERT(Settings, ocarina_xess, tr("Use Intel XeSS upscaling in Ocarina of Time"),
                   tr("Uses Intel XeSS-SR instead of the game's native network. Download Intel's official "
-                      "XeSS SDK 3.0.2 and place libxess.dll in the xess directory under Lichii's user "
-                      "data folder or next to the executable. If XeSS is unavailable, FSR 3.1 is used "
+                      "XeSS SDK 3.0.2 (its libxess.dll reports runtime version 2.0.2) and place "
+                      "libxess.dll in the xess directory under Lichii's user data folder or next "
+                      "to the executable. "
+                      "If XeSS is unavailable, FSR 3.1 is used "
                       "when supported, otherwise the native game path remains active. NVIDIA DLSS takes "
                       "precedence when enabled and available. Takes effect when a game starts."));
         INSERT(Settings, xess_quality, tr("Intel XeSS quality:"),

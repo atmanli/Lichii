@@ -81,7 +81,8 @@ bool Start() {
     if (runtime.empty()) {
         LOG_INFO(Render_Vulkan,
                  "XeSS-SR runtime not found; get libxess.dll from Intel XeSS SDK 3.0.2 "
-                 "(https://github.com/intel/xess/releases/tag/v3.0.2) and place it in {} "
+                 "(the DLL reports runtime version 2.0.2; "
+                 "https://github.com/intel/xess/releases/tag/v3.0.2) and place it in {} "
                  "or next to the executable; using the selected fallback",
                  Common::FS::PathToUTF8String(user_runtime.parent_path()));
         return false;
@@ -119,8 +120,10 @@ bool Start() {
     }
 
     xess_version_t version{};
-    if (api.get_version(&version) != XESS_RESULT_SUCCESS || version.major != 3) {
-        LOG_WARNING(Render_Vulkan, "Unsupported XeSS runtime version {}.{}.{}; expected 3.x",
+    // The SDK release version is not the SR runtime version: SDK 3.0.2 ships runtime 2.0.2.
+    if (api.get_version(&version) != XESS_RESULT_SUCCESS || version.major < 2) {
+        LOG_WARNING(Render_Vulkan,
+                    "Unsupported XeSS runtime version {}.{}.{}; expected 2.x or newer",
                     version.major, version.minor, version.patch);
         FreeLibrary(module);
         state.module = nullptr;

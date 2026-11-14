@@ -145,8 +145,9 @@ The public headers are fetched from Intel's MIT-licensed XeSS repository at comm
 `de0fb9c1c510661c571164e1418ceca8101dab69`. The proprietary runtime is not bundled. Download the
 official [XeSS SDK 3.0.2 release](https://github.com/intel/xess/releases/tag/v3.0.2) and place
 `libxess.dll` from its `bin` directory in the `xess` directory under Lichii's user data folder, or
-next to the executable. Restart Lichii after adding the runtime. At startup the log reports the
-runtime version and whether Vulkan requirements were enabled; when it is absent, incompatible, or
+next to the executable. That SDK's DLL reports runtime version 2.0.2 (the SDK and runtime versions
+are distinct). Restart Lichii after adding the runtime. At startup the log reports the runtime
+version and whether Vulkan requirements were enabled; when it is absent, incompatible, or
 unsupported by the device, FSR 3.1 is used when available, otherwise the native game path remains
 active. XeSS is a temporal output upscaler and does not accelerate the guest's HMMA instructions
 themselves.

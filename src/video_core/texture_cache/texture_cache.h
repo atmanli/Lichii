@@ -173,17 +173,23 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
-        const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+        const bool must_download = IsDownloadable(image);
         if ((!aggressive_mode && !evict_old_costly && True(image.flags & ImageFlagBits::CostlyLoad)) ||
             (!high_priority_mode && must_download)) {
             return false;
         }
         if (must_download) {
-            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
-            const auto copies = FullDownloadCopies(image.info);
-            image.DownloadMemory(map, copies);
-            runtime.Finish();
-            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
+            WriteBackImage(image);
+            // An image that overlaps others badly shares memory with them. Dropped without a
+            // write-back, the next image made over that memory loads whatever an older image left
+            // there: The Duskbloods' HUD layer came back as its character portraits. The overlaps
+            // drawn after it are written back again over it, oldest first, so each part of the
+            // memory ends with its newest data.
+            if (True(image.flags & ImageFlagBits::BadOverlap)) {
+                for (const ImageId overlap_id : NewerGpuOverlaps(image)) {
+                    WriteBackImage(slot_images[overlap_id]);
+                }
+            }
             ++gc_download_deletes;
             ClearStaleImage(image);
         } else {
@@ -1404,6 +1410,40 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
             UntrackImage(image, image_id);
         }
     });
+}
+
+template <class P>
+boost::container::small_vector<ImageId, 8> TextureCache<P>::NewerGpuOverlaps(
+    const ImageBase& image) const {
+    // Writing an overlap back can overwrite the images newer than it that overlap it in turn, so
+    // those follow too, through the whole chain.
+    boost::container::small_vector<ImageId, 8> newer;
+    boost::container::small_vector<const ImageBase*, 8> pending{&image};
+    while (!pending.empty()) {
+        const ImageBase& written = *pending.back();
+        pending.pop_back();
+        for (const ImageId overlap_id : written.overlapping_images) {
+            const ImageBase& overlap = slot_images[overlap_id];
+            if (overlap.modification_tick <= written.modification_tick ||
+                !IsDownloadable(overlap) || std::ranges::find(newer, overlap_id) != newer.end()) {
+                continue;
+            }
+            newer.push_back(overlap_id);
+            pending.push_back(&overlap);
+        }
+    }
+    std::ranges::sort(newer, {}, [this](ImageId id) { return slot_images[id].modification_tick; });
+    return newer;
+}
+
+template <class P>
+void TextureCache<P>::WriteBackImage(Image& image) {
+    auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+    const auto copies = FullDownloadCopies(image.info);
+    image.DownloadMemory(map, copies);
+    runtime.Finish();
+    SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
+                 swizzle_data_buffer);
 }
 
 template <class P>

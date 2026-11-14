@@ -5272,6 +5272,10 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         added_lod_bias = biased - lod_bias;
         lod_bias = biased;
     }
+    if (!device.SupportsSamplerMipLodBias()) {
+        lod_bias = 0.0f;
+        added_lod_bias = 0.0f;
+    }
     base_ci = VkSamplerCreateInfo{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .pNext = nullptr,

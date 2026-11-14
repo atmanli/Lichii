@@ -1727,7 +1727,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 return;
             }
             scheduler.TraceGpuWork(
-                cmdbuf, hashes.first, hashes.second,
+                cmdbuf, Scheduler::GpuWork::Draw, hashes.first, hashes.second,
                 {draw_params.num_vertices, draw_params.num_instances, 0}, [&] {
                     if (draw_params.is_indexed) {
                         cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
@@ -1822,7 +1822,8 @@ void RasterizerVulkan::DrawIndirect() {
             if (scheduler.GraphicsPipelineMissing()) {
                 return;
             }
-            scheduler.TraceGpuWork(cmdbuf, hashes.first, hashes.second, {}, [&] {
+            scheduler.TraceGpuWork(cmdbuf, Scheduler::GpuWork::IndirectDraw, hashes.first,
+                                   hashes.second, {}, [&] {
                 if (params.is_indexed) {
                     cmdbuf.DrawIndexedIndirect(buffer_obj, offset,
                                                static_cast<u32>(params.max_draw_counts),
@@ -2495,7 +2496,8 @@ void RasterizerVulkan::DispatchCompute() {
             if (!pipeline->IsBound()) {
                 return;
             }
-            scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, {}, [&] {
+            scheduler.TraceGpuWork(cmdbuf, Scheduler::GpuWork::IndirectDispatch,
+                                   pipeline->ShaderHash(), 0, {}, [&] {
                 cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             });
         });
@@ -2552,7 +2554,8 @@ void RasterizerVulkan::DispatchCompute() {
         if (byte_addressed_shadow) {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, false);
         }
-        scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, dim,
+        scheduler.TraceGpuWork(cmdbuf, Scheduler::GpuWork::Dispatch, pipeline->ShaderHash(), 0,
+                               dim,
                                [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });
         if (byte_addressed_shadow) {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);

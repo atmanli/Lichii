@@ -703,14 +703,14 @@ void Scheduler::SetHangMarkers(VkBuffer buffer, std::span<const u32> values) {
     LOG_INFO(Render_Vulkan, "Hang markers on: every draw and dispatch writes VK_AMD_buffer_marker");
 }
 
-void Scheduler::BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
-                                std::array<u32, 3> size) {
+void Scheduler::BeginHangMarker(vk::CommandBuffer cmdbuf, GpuWork kind, u64 hash,
+                                u64 fragment_hash, std::array<u32, 3> size) {
     u32 id{};
     {
         std::scoped_lock lock{hang_marker_mutex};
         id = ++hang_marker_id;
         hang_marker_wrapped |= id == 0;
-        hang_marker_items[id % HangMarkerItems] = {hash, fragment_hash, size};
+        hang_marker_items[id % HangMarkerItems] = {kind, hash, fragment_hash, size};
     }
     cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, hang_marker_buffer, 0, id);
 }
@@ -733,15 +733,26 @@ void Scheduler::ReportHangMarkers() const {
     const u32 finished = hang_marker_values[1];
     const u32 recorded = hang_marker_id;
     LOG_CRITICAL(Render_Vulkan,
-                 "Hang markers: last draw or dispatch started {}, last finished {}, recorded {}",
+                 "Hang markers: last marked work reached {}, last finished {}, recorded {} "
+                 "(indirect-count and mesh draws, clears, blits, copies and utility compute are "
+                 "not marked)",
                  started, finished, recorded);
     const auto describe = [this](u32 id) {
-        const WorkTrace& item = hang_marker_items[id % HangMarkerItems];
-        return item.fragment_hash == 0
-                   ? fmt::format("s6:{:016x} grid {}x{}x{}", item.hash, item.size[0],
-                                 item.size[1], item.size[2])
-                   : fmt::format("s1:{:016x}+s5:{:016x} {} vertices x{}", item.hash,
-                                 item.fragment_hash, item.size[0], item.size[1]);
+        const HangMarkerItem& item = hang_marker_items[id % HangMarkerItems];
+        switch (item.kind) {
+        case GpuWork::Draw:
+            return fmt::format("draw s1:{:016x}+s5:{:016x} {} vertices x{}", item.hash,
+                               item.fragment_hash, item.size[0], item.size[1]);
+        case GpuWork::IndirectDraw:
+            return fmt::format("draw s1:{:016x}+s5:{:016x} indirect", item.hash,
+                               item.fragment_hash);
+        case GpuWork::Dispatch:
+            return fmt::format("dispatch s6:{:016x} grid {}x{}x{}", item.hash, item.size[0],
+                               item.size[1], item.size[2]);
+        case GpuWork::IndirectDispatch:
+            return fmt::format("dispatch s6:{:016x} indirect", item.hash);
+        }
+        return std::string{};
     };
     // The GPU writes 32-bit marker IDs: after 2^32 draws and dispatches they start again from 0,
     // and the order between them is lost.
@@ -756,12 +767,15 @@ void Scheduler::ReportHangMarkers() const {
         LOG_CRITICAL(Render_Vulkan, "Hang markers: the work after marker {} is no longer kept",
                      finished);
     }
-    // Unfinished work first: what the GPU was running, then what it had queued after it.
+    // Unfinished work first. A top-of-pipe marker only says the command processor reached the
+    // work: only the work right after the last finished marker is surely incomplete.
     const u64 first = (std::max)(u64{finished} + 1, oldest);
     const u64 last = (std::min)(u64{recorded}, first + 15);
     for (u64 id = first; id <= last; ++id) {
-        LOG_CRITICAL(Render_Vulkan, "Hang marker {} {}: {}", id,
-                     id <= started ? "started, unfinished" : "queued",
+        const char* const state = id == u64{finished} + 1 ? "first unfinished"
+                                  : id <= started         ? "reached"
+                                                          : "queued";
+        LOG_CRITICAL(Render_Vulkan, "Hang marker {} {}: {}", id, state,
                      describe(static_cast<u32>(id)));
     }
     for (u64 id = (std::max)(finished > 3 ? u64{finished} - 3 : u64{1}, oldest); id <= finished;

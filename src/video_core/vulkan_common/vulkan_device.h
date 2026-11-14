@@ -8,8 +8,8 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
-#include <mutex>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -241,13 +241,13 @@ enum class NvidiaArchitecture {
     Arch_AmpereOrNewer,
 };
 
-/// Handles data specific to a physical device.
 /// EDEN_NX2_HANG_MARKERS: the rasterizer's report of the work a device loss left unfinished,
 /// called by Device::ReportLoss. Set and cleared under the mutex, which ReportLoss holds while it
 /// runs the report, so the rasterizer can't free the markers while a report reads them.
 inline std::mutex g_hang_marker_report_mutex;
 inline std::function<void()> g_hang_marker_report;
 
+/// Handles data specific to a physical device.
 class Device {
 public:
     explicit Device(VkInstance instance, vk::PhysicalDevice physical, VkSurfaceKHR surface,

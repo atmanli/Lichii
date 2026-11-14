@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -41,6 +40,7 @@
 #include "qt_common/game_list/model.h"
 #include "qt_common/game_list/discovery.h"
 #include "qt_common/game_list/worker.h"
+#include "qt_common/util/game.h"
 
 namespace {
 
@@ -289,8 +289,13 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
     }
 
     u64 play_time = play_time_manager.GetPlayTime(program_id);
+    // Artwork the user picked replaces the icon from the game file.
+    const std::vector<u8> custom_artwork = QtCommon::Game::ReadCustomArtwork(program_id);
+    // So does the name the user gave the game in Properties.
+    const std::string custom_title = QtCommon::Game::ReadCustomTitle(program_id);
     return QList<QStandardItem*>{
-        new GameListItemPath(FormatGameName(path), icon, QString::fromStdString(name),
+        new GameListItemPath(FormatGameName(path), custom_artwork.empty() ? icon : custom_artwork,
+                             QString::fromStdString(custom_title.empty() ? name : custom_title),
                              file_type_string, program_id, play_time, patch_versions),
         new GameListItem(file_type_string),
         new GameListItemSize(size),

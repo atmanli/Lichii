@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <thread>
 #include <chrono>
 #include <condition_variable>
@@ -31,6 +32,7 @@
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
+#include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -61,6 +63,7 @@
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/k_session.h"
+#include "core/hle/kernel/k_synchronization_object.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
@@ -78,6 +81,7 @@
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/nx2_stub_interface.h"
+#include "core/hle/service/nx2_fence_action.h"
 #include "core/hle/service/nx2_frame_interval.h"
 #include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_movie_clock.h"
@@ -624,6 +628,9 @@ private:
             LOG_DEBUG(Service, "nx2:gpu 102 destroy handle={} [{:#x}, +{:#x}] slot={}", handle,
                       address, size, w[3]);
             if (size != 0) {
+                // The registry's listener calls wait for the GPU thread, whose back takes
+                // m_region_mutex in BackSparseWrite: they run once the lock is released.
+                const Nvidia::Devices::Nx2GpuMemoryRegistry::DeferScope defer;
                 std::scoped_lock lk{m_region_mutex};
                 std::vector<std::pair<u64, u64>> tiles;
                 for (const auto& [tile_address, tile] : m_gpu_only_tiles) {
@@ -677,8 +684,9 @@ private:
         const u32 slot = w[11];
         LOG_DEBUG(Service, "nx2:gpu 214 words {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
                  w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12]);
-        if (last > start && ((last + 1 - start) % Core::Memory::YUZU_PAGESIZE) == 0) {
+        if (last > start && ((last + 1 - start) % Core::Memory::LICHII_PAGESIZE) == 0) {
             const u64 size = last + 1 - start;
+            const Nvidia::Devices::Nx2GpuMemoryRegistry::DeferScope defer; // as in 102
             const bool lazy_sparse = (w[7] & SparseRegionFlag) != 0 && LazySparseRegions();
             const bool back_whole =
                 !lazy_sparse && (!LazyGpuOnlyRegions() || KeepsConstantsInGpuOnlyRegions());
@@ -778,6 +786,7 @@ private:
             rb.Push(ResultSuccess);
             return;
         }
+        const Nvidia::Devices::Nx2GpuMemoryRegistry::DeferScope defer; // as in 102
         std::vector<GpuOnlyRegion> freed;
         SCOPE_EXIT {
             FreeBackings(std::move(freed));
@@ -791,7 +800,7 @@ private:
         }
         if (last > first) {
             if (const auto region = m_sparse_regions.find(first); region != m_sparse_regions.end()) {
-                m_tile_bytes -= Core::Memory::YUZU_PAGESIZE *
+                m_tile_bytes -= Core::Memory::LICHII_PAGESIZE *
                                 static_cast<u64>(std::count(region->second.tile_pages.begin(),
                                                             region->second.tile_pages.end(), true));
                 m_sparse_regions.erase(region);
@@ -812,13 +821,17 @@ private:
                     region->second.cpu_address, region->second.size);
                 if (!done) {
                     done = std::make_shared<std::atomic<bool>>(false);
-                    system.GPU().RunInOrder([done] { done->store(true, std::memory_order_release); });
+                    Nvidia::Devices::Nx2GpuMemoryRegistry::Defer([this, done] {
+                        system.GPU().RunInOrder(
+                            [done] { done->store(true, std::memory_order_release); });
+                    });
                 }
                 m_released_regions.push_back({std::move(region->second), done});
                 region = m_gpu_only_regions.erase(region);
             }
         }
-        SignalAfterGpu(w[8]);
+        // Behind the unmaps above, outside m_region_mutex.
+        Nvidia::Devices::Nx2GpuMemoryRegistry::Defer([this, slot = w[8]] { SignalAfterGpu(slot); });
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -837,6 +850,7 @@ private:
         std::vector<u8> kinds(count);
         std::vector<GpuOnlyRegion> freed;
         {
+            const Nvidia::Devices::Nx2GpuMemoryRegistry::DeferScope defer; // as in 102
             std::scoped_lock lk{m_region_mutex};
             freed = TakeReleasedRegions();
             ++m_tile_calls;
@@ -898,7 +912,7 @@ private:
     // takes it). The service thread and FillReserve call it.
     std::optional<MappedBacking> AllocateGpuOnlyBacking(u64 size, bool log_failure, bool clear) {
         ASSERT(!VideoCommon::GpuSplit::OnGpuThread() && !VideoCommon::GpuSplit::OnBackThread());
-        using Core::Memory::YUZU_PAGESIZE;
+        using Core::Memory::LICHII_PAGESIZE;
         auto& kernel_core = system.Kernel();
         auto* const process = system.ApplicationProcess();
         if (process == nullptr) {
@@ -915,7 +929,7 @@ private:
         const bool application_fallback = Kernel::KSystemControl::Init::GetApplicationPoolGrowth() != 0;
         const auto allocate = [&](Kernel::KMemoryManager::Pool pool) {
             return kernel_core.MemoryManager().AllocateAndOpen(
-                pg.get(), size / YUZU_PAGESIZE,
+                pg.get(), size / LICHII_PAGESIZE,
                 Kernel::KMemoryManager::EncodeOption(pool,
                                                      Kernel::KMemoryManager::Direction::FromBack));
         };
@@ -992,8 +1006,12 @@ private:
             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().ReleaseBacking(it->second.cpu_address,
                                                                         it->second.size);
             auto done = std::make_shared<std::atomic<bool>>(false);
-            system.GPU().RunInOrder([done] { done->store(true, std::memory_order_release); });
+            // Behind the release above (held back while a DeferScope is open).
+            Nvidia::Devices::Nx2GpuMemoryRegistry::Defer([this, done] {
+                system.GPU().RunInOrder([done] { done->store(true, std::memory_order_release); });
+            });
             // Counted out by FreeBackings once its pages are freed.
+            m_gpu_only_bytes -= it->second.size;
             m_released_regions.push_back({std::move(it->second), done});
             m_gpu_only_regions.erase(it);
         }
@@ -1187,7 +1205,7 @@ private:
     // Reserve memory for size bytes: the smallest entry that holds them, split when it is larger
     // (a region's last block can be short). Needs m_region_mutex.
     std::optional<MappedBacking> TakeBacking(u64 size) {
-        using Core::Memory::YUZU_PAGESIZE;
+        using Core::Memory::LICHII_PAGESIZE;
         auto best = m_reserve.end();
         for (auto it = m_reserve.begin(); it != m_reserve.end(); ++it) {
             if (it->size >= size && (best == m_reserve.end() || it->size < best->size)) {
@@ -1207,13 +1225,13 @@ private:
             std::addressof(kernel_core.GetSystemSystemResource().GetBlockInfoManager());
         auto front = std::make_unique<Kernel::KPageGroup>(kernel_core, block_infos);
         auto rest = std::make_unique<Kernel::KPageGroup>(kernel_core, block_infos);
-        u64 front_pages = size / YUZU_PAGESIZE;
+        u64 front_pages = size / LICHII_PAGESIZE;
         for (const auto& block : *best->pages) {
             const u64 pages = block.GetNumPages();
             const u64 taken = (std::min)(front_pages, pages);
             front_pages -= taken;
             if (R_FAILED(front->AddBlock(block.GetAddress(), taken)) ||
-                R_FAILED(rest->AddBlock(block.GetAddress() + taken * YUZU_PAGESIZE, pages - taken))) {
+                R_FAILED(rest->AddBlock(block.GetAddress() + taken * LICHII_PAGESIZE, pages - taken))) {
                 return std::nullopt;
             }
         }
@@ -1502,9 +1520,9 @@ private:
     // on the console, so it gets no more blocks, and the blocks it got before (written while no
     // tile was mapped, which the console would have dropped) go back.
     void StartTiles(u64 start, SparseRegion& region) {
-        using Core::Memory::YUZU_PAGESIZE;
+        using Core::Memory::LICHII_PAGESIZE;
         region.tiles = true;
-        region.tile_pages.assign(Common::DivCeil(region.size, YUZU_PAGESIZE), false);
+        region.tile_pages.assign(Common::DivCeil(region.size, LICHII_PAGESIZE), false);
         std::shared_ptr<std::atomic<bool>> done;
         u64 released = 0;
         for (u64 block = 0; block < region.blocks.size(); ++block) {
@@ -1528,7 +1546,11 @@ private:
                                                                         backing->second.size);
             if (!done) {
                 done = std::make_shared<std::atomic<bool>>(false);
-                system.GPU().RunInOrder([done] { done->store(true, std::memory_order_release); });
+                // Behind the tile unmap above, held back with it (216's DeferScope).
+                Nvidia::Devices::Nx2GpuMemoryRegistry::Defer([this, done] {
+                    system.GPU().RunInOrder(
+                        [done] { done->store(true, std::memory_order_release); });
+                });
             }
             released += backing->second.size;
             m_released_regions.push_back({std::move(backing->second), done});
@@ -1542,19 +1564,19 @@ private:
 
     // Counts the bytes of tiles mapped, page by page.
     void MarkTiles(SparseRegion& region, u64 offset, u64 size, bool mapped) {
-        using Core::Memory::YUZU_PAGESIZE;
+        using Core::Memory::LICHII_PAGESIZE;
         if (!region.tiles) {
             return;
         }
-        const u64 last = (std::min)(Common::DivCeil(offset + size, YUZU_PAGESIZE),
+        const u64 last = (std::min)(Common::DivCeil(offset + size, LICHII_PAGESIZE),
                                     static_cast<u64>(region.tile_pages.size()));
-        for (u64 page = offset / YUZU_PAGESIZE; page < last; ++page) {
+        for (u64 page = offset / LICHII_PAGESIZE; page < last; ++page) {
             if (region.tile_pages[page] != mapped) {
                 region.tile_pages[page] = mapped;
                 if (mapped) {
-                    m_tile_bytes += YUZU_PAGESIZE;
+                    m_tile_bytes += LICHII_PAGESIZE;
                 } else {
-                    m_tile_bytes -= YUZU_PAGESIZE;
+                    m_tile_bytes -= LICHII_PAGESIZE;
                 }
             }
         }
@@ -1657,8 +1679,12 @@ private:
     // Every 30 s: the backing of sparse blocks and GPU-only regions is marked cold. The game
     // writes it once (texture uploads by 2D blits: title 1 fills 2-4 GB of texture pools) and it
     // is read again only when the texture cache builds an image over it, so the OS may compress or
-    // page it out before anything else. Last member: stops before the regions are destroyed.
+    // page it out before anything else. Only while the host is short of RAM, as for uploads
+    // (DeviceMemoryManager::HintCold). Last member: stops before the regions are destroyed.
     void HintColdBacking() {
+        if (!Common::IsHostLowOnMemory()) {
+            return;
+        }
         struct Range {
             u64 physical_offset;
             u64 virtual_address;
@@ -1912,6 +1938,7 @@ public:
             {1, &INx2Vi2Session::ReturnOne, "Unknown1"},
             {3, &INx2Vi2Session::ReturnOne, "GetDisplayCount (guessed)"},
             {5, &INx2Vi2Session::GetTimestampRecorderCount, "GetTimestampRecorderCount (guessed)"},
+            {53, &INx2Vi2Session::GetRecordedTimestamps, "GetRecordedTimestamps"},
             {11, &INx2Vi2Session::ReturnEvent, "Unknown11"},
             {31, &INx2Vi2Session::AcquireNativeEvent, "AcquireNativeEvent"},
             {32, &INx2Vi2Session::DuplicateNativeEvent, "DuplicateNativeEvent"},
@@ -1968,6 +1995,10 @@ public:
     }
 
     ~INx2Vi2Session() override {
+        // A service fiber can be discarded during shutdown without unwinding its stack.
+        // Remove or join its callback before closing the session-owned event.
+        m_frame_wait_action.reset();
+        m_context.CloseEvent(m_frame_wait_event);
         // The vsync callback may be running on the HostTiming thread: empty its event list under
         // its lock first (it holds the state, not this session), then close the events.
         {
@@ -2002,13 +2033,11 @@ private:
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
         const u64 present = Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (Core::g_nx2_present_time_services.load(std::memory_order_relaxed) != 0) {
-            const u64 present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now().time_since_epoch())
-                                       .count();
-            Core::g_nx2_present_times_ns[present % Core::g_nx2_present_times_ns.size()].store(
-                present_ns, std::memory_order_relaxed);
-        }
+        const u64 present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count();
+        Core::g_nx2_present_times_ns[present % Core::g_nx2_present_times_ns.size()].store(
+            present_ns, std::memory_order_relaxed);
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -2075,6 +2104,9 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
         const auto paced = std::chrono::steady_clock::now();
+        if (const u32 recorder = w[18] & 0xf; recorder != 0) {
+            m_recorded_ticks[recorder - 1] = system.CoreTiming().GetClockTicks();
+        }
         if (const auto* const process = system.ApplicationProcess(); process != nullptr) {
             UpdateFrameInterval(*process, entered);
         }
@@ -2474,6 +2506,22 @@ private:
         }
     }
 
+    /// Allocate one reusable session event; resource exhaustion retains the host wait.
+    bool EnsureFrameWaitEvent() {
+        if (!m_frame_wait_event && !m_frame_wait_event_attempted) {
+            m_frame_wait_event_attempted = true;
+            m_frame_wait_event = m_context.CreateEvent("nx2:vi2 frame fence wait");
+            if (!m_frame_wait_event) {
+                LOG_WARNING(Service, "nx2:vi2 frame wait event unavailable; retaining host wait");
+            }
+        }
+        return m_frame_wait_event != nullptr;
+    }
+
+    Kernel::KEvent* m_frame_wait_event{};
+    std::optional<Nx2ScopedGuestFenceAction> m_frame_wait_action;
+    bool m_frame_wait_event_attempted{};
+
     /// Waits until the fence is reached. With `unless_gpu_waits`, gives up after a few ms once a
     /// GPU channel was seen suspended on a semaphore (it may be one this thread releases later).
     /// Returns whether the fence was reached.
@@ -2487,36 +2535,61 @@ private:
         // command buffers ahead misses the equal-value gates its other channels acquire.
         const auto deadline = start + std::chrono::milliseconds{4000};
         if (!syncpoints.IsReadyGuest(fence_id, fence_value)) {
-            // Woken by the GPU thread as it reaches the fence. Polling with 200 us sleeps slept
-            // about 1 ms per check on Windows, added to every frame. An action left registered
-            // after a timeout fires later on a state nobody waits on.
-            struct Wake {
-                std::mutex mutex;
-                std::condition_variable cv;
-                bool done{};
-            };
-            auto wake = std::make_shared<Wake>();
-            syncpoints.RegisterGuestAction(fence_id, fence_value, [wake] {
-                {
-                    std::scoped_lock lk{wake->mutex};
-                    wake->done = true;
-                }
-                wake->cv.notify_all();
-            });
-            std::unique_lock lk{wake->mutex};
-            // Title 1's channels resume and suspend again while they wait on this thread, so any
-            // suspension counts, not only an unbroken one.
-            bool gpu_waited = false;
-            while (!wake->done && system.IsPoweredOn() &&
-                   std::chrono::steady_clock::now() < deadline) {
-                if (unless_gpu_waits) {
-                    gpu_waited |= system.GPU().HasSuspendedChannels();
-                    if (gpu_waited &&
-                        std::chrono::steady_clock::now() - start > std::chrono::milliseconds{3}) {
-                        return false;
+            // Fixed waits suspend the guest service thread so its core can run other work.
+            // Adaptive waits retain their semaphore escape path below.
+            if (!unless_gpu_waits && EnsureFrameWaitEvent()) {
+                m_frame_wait_event->Clear(kernel);
+                m_frame_wait_action.emplace(
+                    syncpoints, fence_id, fence_value,
+                    [event = m_frame_wait_event, kernel_ptr = &kernel] {
+                        event->Signal(*kernel_ptr);
+                    });
+                Kernel::KSynchronizationObject* event = &m_frame_wait_event->GetReadableEvent();
+                while (!syncpoints.IsReadyGuest(fence_id, fence_value) && system.IsPoweredOn() &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    s32 index = -1;
+                    // Retain bounded shutdown checks and the existing four-second deadline.
+                    const auto timeout = kernel.HardwareTimer().GetTick() + 50'000'000;
+                    const Result result =
+                        Kernel::KSynchronizationObject::Wait(kernel, &index, &event, 1, timeout);
+                    if (result == Kernel::ResultTerminationRequested) {
+                        break;
                     }
                 }
-                wake->cv.wait_for(lk, std::chrono::milliseconds{unless_gpu_waits ? 1 : 50});
+                // Join any in-progress signal before the next request clears the event.
+                m_frame_wait_action.reset();
+            } else {
+                // Woken by the GPU thread as it reaches the fence. Polling with 200 us sleeps slept
+                // about 1 ms per check on Windows, added to every frame. An action left registered
+                // after a timeout fires later on a state nobody waits on.
+                struct Wake {
+                    std::mutex mutex;
+                    std::condition_variable cv;
+                    bool done{};
+                };
+                auto wake = std::make_shared<Wake>();
+                syncpoints.RegisterGuestAction(fence_id, fence_value, [wake] {
+                    {
+                        std::scoped_lock lk{wake->mutex};
+                        wake->done = true;
+                    }
+                    wake->cv.notify_all();
+                });
+                std::unique_lock lk{wake->mutex};
+                // Title 1's channels resume and suspend again while they wait on this thread, so any
+                // suspension counts, not only an unbroken one.
+                bool gpu_waited = false;
+                while (!wake->done && system.IsPoweredOn() &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    if (unless_gpu_waits) {
+                        gpu_waited |= system.GPU().HasSuspendedChannels();
+                        if (gpu_waited &&
+                            std::chrono::steady_clock::now() - start > std::chrono::milliseconds{3}) {
+                            return false;
+                        }
+                    }
+                    wake->cv.wait_for(lk, std::chrono::milliseconds{unless_gpu_waits ? 1 : 50});
+                }
             }
         }
         if (unless_gpu_waits && !syncpoints.IsReadyGuest(fence_id, fence_value)) {
@@ -2893,6 +2966,30 @@ private:
         TipcReplyWords(ctx, {7});
     }
 
+    // 53(B buffer, u32 recorder, u64 checkpoint bits, u64 max count): one u64 tick per checkpoint
+    // bit, in bit order, then the u64 byte count written and a u8 "still pending". A present names
+    // its recorder in word 18 (bits 0-3, recorder + 1). nn::vi::ListFrameHistory reports a frame as
+    // shown only once its recorder has a tick, and Unreal's frame flip tracking waits for that:
+    // Orbitals froze after the Unreal logo and aborted on its 70 s render fence timeout while this
+    // replied nothing.
+    void GetRecordedTimestamps(HLERequestContext& ctx) {
+        const auto* w = ctx.CommandBuffer();
+        const u32 recorder = w[5];
+        const u64 checkpoints = (u64{w[6]} | (u64{w[7]} << 32)) & 0x1f;
+        const u64 max_count = u64{w[8]} | (u64{w[9]} << 32);
+        if (recorder >= m_recorded_ticks.size() || !m_recorded_ticks[recorder]) {
+            TipcReplyWords(ctx, {0, 0, 1});
+            return;
+        }
+        std::vector<u64> ticks(std::min<u64>(std::popcount(checkpoints), max_count),
+                               *m_recorded_ticks[recorder]);
+        const size_t size = std::min(ticks.size() * sizeof(u64), ctx.GetWriteBufferSize(0));
+        if (size != 0) {
+            ctx.WriteBufferB(ticks.data(), size, 0);
+        }
+        TipcReplyWords(ctx, {static_cast<u32>(size), 0, 0});
+    }
+
     void ReturnEvent(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:vi2 TIPC {} [2]={:#x} [3]={:#x}, returning an event",
                     ctx.GetCommand(), ctx.CommandBuffer()[2], ctx.CommandBuffer()[3]);
@@ -3078,6 +3175,7 @@ private:
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
     u64 m_presents{};
+    std::array<std::optional<u64>, 15> m_recorded_ticks{}; ///< 53's recorders, by present word 18
     u64 m_shown_layout{}; // image and crop size last logged
     u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
     u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw

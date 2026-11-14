@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -50,6 +49,7 @@ struct HostTranslateInfo {
     /// array of the table's entries (not OpenGL: its pipelines bind at most 64 textures; Vulkan
     /// only with nonuniform sampled image array indexing)
     bool support_handle_table_arrays{};
+    bool needs_lrz_disable{}; ///< True when fragment shaders must write depth to turn off LRZ
 
     /// The properties that change which values translation reads from the environment, a bit
     /// each: those deciding a pass that reads values, or a pass that changes the program before

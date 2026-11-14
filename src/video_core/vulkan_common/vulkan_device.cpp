@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -46,6 +47,23 @@
 namespace Vulkan {
 using namespace Common::Literals;
 namespace {
+// Matches Mesa's boolean parsing of its environment options.
+bool EnvFlagSet(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string_view v{value};
+    for (const std::string_view truthy : {"1", "true", "t", "yes", "y"}) {
+        if (std::ranges::equal(v, truthy, [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == b;
+            })) {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace Alternatives {
 constexpr std::array STENCIL8_UINT{
     VK_FORMAT_D16_UNORM_S8_UINT,
@@ -490,11 +508,23 @@ void Device::RemoveExtensionFeatureIfUnsuitable(bool is_suitable, Feature& featu
 }
 
 namespace {
-/// AMD FSR 4 runs AMD's own shaders inside AMD's runtime (Windows, AMD's driver). They need
-/// float16 and, on RDNA 4, float8 on the device; the emulator's shaders use neither for it.
+/// FSR 4 runs AMD's own shaders: inside AMD's runtime on Windows with AMD's driver, and through
+/// the fsr4-vk port on Linux with RADV. They need float16 and, on RDNA 4, float8 on the device;
+/// the emulator's shaders use neither for it.
 bool WantsAmdFsr4(VkDriverId driver_id) {
 #ifdef _WIN32
     return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && Settings::values.amd_fsr4.GetValue();
+#elif defined(__linux__) && !defined(__ANDROID__)
+    return driver_id == VK_DRIVER_ID_MESA_RADV && Settings::values.amd_fsr4.GetValue();
+#else
+    return false;
+#endif
+}
+
+/// The fsr4-vk port's shaders use features the emulator's don't; they're enabled only for it.
+bool WantsFsr4Port(VkDriverId driver_id) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return WantsAmdFsr4(driver_id);
 #else
     return false;
 #endif
@@ -792,7 +822,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         descriptor_indexing.descriptorBindingStorageTexelBufferUpdateAfterBind = false;
         descriptor_indexing.descriptorBindingUpdateUnusedWhilePending = false;
         descriptor_indexing.descriptorBindingVariableDescriptorCount = false;
-        descriptor_indexing.runtimeDescriptorArray = false;
+        // The fsr4-vk port's shaders declare runtime descriptor arrays.
+        descriptor_indexing.runtimeDescriptorArray =
+            descriptor_indexing.runtimeDescriptorArray && WantsFsr4Port(driver_id);
     }
 
     // VK_EXT_descriptor_buffer requires VK_KHR_buffer_device_address
@@ -985,6 +1017,38 @@ Device::~Device() {
         }
     }
     vmaDestroyAllocator(allocator);
+}
+
+VideoCommon::Fsr4PortDevice Device::Fsr4PortDevice() const {
+    return {
+        .vendor_id = properties.properties.vendorID,
+        .device_id = properties.properties.deviceID,
+        .radv = properties.driver.driverID == VK_DRIVER_ID_MESA_RADV,
+        .mixed_dot4_accelerated = properties.integer_dot_product
+                                      .integerDotProduct4x8BitPackedMixedSignednessAccelerated !=
+                                  VK_FALSE,
+        .descriptor_buffer = extensions.descriptor_buffer && extensions.buffer_device_address &&
+                             features.descriptor_indexing.runtimeDescriptorArray,
+        .synchronization2 = extensions.synchronization2,
+        .compute_wave32 = extensions.subgroup_size_control &&
+                          features.subgroup_size_control.computeFullSubgroups &&
+                          IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT),
+        .shader_arithmetic = features.shader_float16_int8.shaderInt8 &&
+                             features.features.shaderInt16 &&
+                             features.shader_float16_int8.shaderFloat16 &&
+                             properties.float_controls.shaderDenormPreserveFloat16 &&
+                             extensions.shader_integer_dot_product,
+        .compute_derivatives = extensions.compute_shader_derivatives &&
+                               (properties.subgroup_properties.supportedStages &
+                                VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+                               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_QUAD_BIT),
+        .fp8_matrices = fp8_matrix_shapes && extensions.cooperative_matrix &&
+                        extensions.shader_float8 &&
+                        features.shader_float8.shaderFloat8CooperativeMatrix &&
+                        extensions.cooperative_matrix2 &&
+                        features.vulkan_memory_model.vulkanMemoryModel &&
+                        features.bit8_storage.storageBuffer8BitAccess,
+    };
 }
 
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
@@ -1202,6 +1266,19 @@ void Device::ReportDeviceFault() const {
 void Device::SaveShader(std::span<const u32> spirv) const {
     if (nsight_aftermath_tracker) {
         nsight_aftermath_tracker->SaveShader(spirv);
+    }
+}
+
+bool Device::DriverCachesPipelines() const noexcept {
+    switch (properties.driver.driverID) {
+    case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+    case VK_DRIVER_ID_AMD_PROPRIETARY:
+        return true;
+    case VK_DRIVER_ID_MESA_RADV:
+        // RADV uses Mesa's on-disk shader cache unless the user turns it off.
+        return !EnvFlagSet("MESA_SHADER_CACHE_DISABLE") && !EnvFlagSet("MESA_GLSL_CACHE_DISABLE");
+    default:
+        return false;
     }
 }
 
@@ -1930,6 +2007,18 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
             usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        const auto has_fp32_result_shape = [&](VkComponentTypeKHR input) {
+            return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
+                return shape.MSize == 16 && shape.NSize == 16 && shape.KSize == 16 &&
+                       shape.AType == input && shape.BType == input &&
+                       shape.CType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                       shape.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                       shape.saturatingAccumulation == VK_FALSE &&
+                       shape.scope == VK_SCOPE_SUBGROUP_KHR;
+            });
+        };
+        fp8_matrix_shapes = has_fp32_result_shape(VK_COMPONENT_TYPE_FLOAT16_KHR) &&
+                            has_fp32_result_shape(VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT);
         extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
@@ -1971,6 +2060,11 @@ void Device::RemoveUnsuitableExtensions() {
     // disk cache of their own (DriverCachesPipelines) that don't prefer their internal cache: the
     // store would only duplicate it there (PipelineBinaries). NVIDIA 610.88 also gave ~7.8 MB of
     // blobs a pipeline: one Ocarina of Time session stored 2.3 GB.
+    // AMD's proprietary driver is the exception: its disk cache never keeps graphics pipelines
+    // with VK_DYNAMIC_STATE_VERTEX_INPUT_EXT (#770), so an RX 6650 XT rebuilt ~5,800 boot
+    // pipelines at ~120 ms each (12-15 min to the first frame) at every boot, and turning dynamic
+    // vertex input off lost the device on the first pipeline. The store keeps them instead.
+    const bool amd_binaries = properties.driver.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
     if (extensions.pipeline_binary) {
         LOG_INFO(Render_Vulkan,
                  "VK_KHR_pipeline_binary: pipelineBinaries {}, internal cache {}, prefers internal "
@@ -1982,7 +2076,8 @@ void Device::RemoveUnsuitableExtensions() {
     }
     extensions.pipeline_binary =
         features.pipeline_binary.pipelineBinaries && extensions.maintenance5 &&
-        !properties.pipeline_binary.pipelineBinaryPrefersInternalCache && !DriverCachesPipelines();
+        !properties.pipeline_binary.pipelineBinaryPrefersInternalCache &&
+        (!DriverCachesPipelines() || amd_binaries);
     RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
                                        VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
 
@@ -1992,6 +2087,29 @@ void Device::RemoveUnsuitableExtensions() {
         (!features.shader_float8.shaderFloat8 || !WantsAmdFsr4(properties.driver.driverID))) {
         RemoveExtensionFeature(extensions.shader_float8, features.shader_float8,
                                VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+    }
+
+    // Only for the fsr4-vk port: integer dot products and compute derivatives for its INT8
+    // network, and VK_NV_cooperative_matrix2's matrix conversions (all RADV implements of it,
+    // behind its radv_cooperative_matrix2_nv option) for its FP8 network.
+    const bool fsr4_port = WantsFsr4Port(properties.driver.driverID);
+    if (extensions.shader_integer_dot_product &&
+        (!fsr4_port || !features.shader_integer_dot_product.shaderIntegerDotProduct)) {
+        RemoveExtensionFeature(extensions.shader_integer_dot_product,
+                               features.shader_integer_dot_product,
+                               VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+    }
+    if (extensions.compute_shader_derivatives &&
+        (!fsr4_port || !features.compute_shader_derivatives.computeDerivativeGroupLinear)) {
+        RemoveExtensionFeature(extensions.compute_shader_derivatives,
+                               features.compute_shader_derivatives,
+                               VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    }
+    if (extensions.cooperative_matrix2 &&
+        (!fsr4_port || !extensions.cooperative_matrix ||
+         !features.cooperative_matrix2.cooperativeMatrixConversions)) {
+        RemoveExtensionFeature(extensions.cooperative_matrix2, features.cooperative_matrix2,
+                               VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
     }
 
     // VK_KHR_maintenance6
@@ -2098,6 +2216,18 @@ u64 Device::GetDeviceMemorySlack() const {
 }
 
 u64 Device::GetDeviceMemoryBudget() const {
+    u64 result = GetDeviceHeapMemoryBudget();
+    if (is_integrated && !IsMoltenVK()) {
+        // An integrated GPU's device-local heap is system memory (a Radeon 780M reported a 21 GB
+        // budget): following it let the texture cache fill that much RAM before collecting, and
+        // kept ASTC uncompressed. Its budget is at most the share CollectPhysicalMemoryInfo
+        // gives it (4 GiB, 6 GiB with aggressive VRAM use).
+        result = (std::min)(result, device_access_memory);
+    }
+    return result;
+}
+
+u64 Device::GetDeviceHeapMemoryBudget() const {
     if (!extensions.memory_budget) {
         return 0;
     }
@@ -2120,13 +2250,6 @@ u64 Device::GetDeviceMemoryBudget() const {
         if (heap != main_heap) {
             result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
         }
-    }
-    if (is_integrated && !IsMoltenVK()) {
-        // An integrated GPU's device-local heap is system memory (a Radeon 780M reported a 21 GB
-        // budget): following it let the texture cache fill that much RAM before collecting, and
-        // kept ASTC uncompressed. Its budget is at most the share CollectPhysicalMemoryInfo
-        // gives it (4 GiB, 6 GiB with aggressive VRAM use).
-        result = (std::min)(result, device_access_memory);
     }
     return result;
 }
@@ -2180,6 +2303,7 @@ void Device::CollectPhysicalMemoryInfo() {
         }
         device_access_memory += heap_size;
     }
+    main_heap_size = limit(mem_properties.memoryHeaps[main_heap].size);
     if (is_integrated) {
         const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
         const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;

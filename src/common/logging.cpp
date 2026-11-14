@@ -272,6 +272,7 @@ struct FileBackend final : public Backend {
                 mode = FS::FileAccessMode::Append;
         }
         file.emplace(path, mode, FS::FileType::TextFile);
+        file_path = path;
         // Count what is already there so the size limit still applies when appending.
         if (mode == FS::FileAccessMode::Append)
             bytes_written = file->GetSize();
@@ -322,6 +323,9 @@ struct FileBackend final : public Backend {
     void Flush() noexcept override {
         file->Flush();
     }
+
+    std::filesystem::path file_path;
+
 private:
     std::optional<FS::IOFile> file;
     std::size_t bytes_written = 0;
@@ -384,7 +388,7 @@ struct LogcatBackend : public Backend {
             }
         }();
         auto const df = GetDirectFormatArgs(entry);
-        __android_log_print(android_log_priority, "YuzuNative", "%s %s:%u:%s: %s", df.class_name, entry.filename, entry.line_num, entry.function, entry.message);
+        __android_log_print(android_log_priority, "LichiiNative", "%s %s:%u:%s: %s", df.class_name, entry.filename, entry.line_num, entry.function, entry.message);
     }
     void Flush() noexcept override {}
 };
@@ -466,8 +470,20 @@ void Start() {
 }
 
 void Stop() {
+    Flush();
+}
+
+void Flush() {
     if (logging_instance)
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
+}
+
+std::filesystem::path FilePath() {
+#ifndef __OPENORBIS__
+    if (logging_instance && logging_instance->file_backend)
+        return logging_instance->file_backend->file_path;
+#endif
+    return {};
 }
 
 void FmtCrashMessageImpl(const char* filename, unsigned int line_num, const char* function, fmt::string_view format, const fmt::format_args& args) noexcept {

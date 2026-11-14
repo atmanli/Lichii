@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
     common/addon_config.cpp
+    common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp
     video_core/unswizzle_workers.cpp
@@ -23,7 +23,9 @@ add_executable(tests
     core/nx2_video_ready.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
+    core/nx2_zip.cpp
     core/nx2_present_pacer.cpp
+    core/nx2_fence_action.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
     core/perf_stats.cpp
@@ -98,6 +100,7 @@ add_executable(tests
     video_core/async_shader_emission.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
+    video_core/query_stream.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp
@@ -105,6 +108,7 @@ add_executable(tests
     video_core/mesh_fallback.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
+    video_core/gpu_trace.cpp
     video_core/gpu_written_pages.cpp
     video_core/nx2_semaphore_mirror.cpp
     video_core/command_writer.cpp
@@ -155,6 +159,7 @@ add_executable(tests
     video_core/ssa_fixed_variables.cpp
     video_core/virtual_range_cache.cpp
     video_core/ocarina_upscale.cpp
+    video_core/ocarina_camera.cpp
     video_core/fsr4_support.cpp
     common/bit_field.cpp
     common/bit_util.cpp
@@ -165,6 +170,7 @@ add_executable(tests
     common/event.cpp
     common/fibers.cpp
     common/fs_iterate.cpp
+    frontend_common/install_keys.cpp
     common/game_presets.cpp
     common/host_memory.cpp
     common/host_memory_failure.cpp
@@ -187,6 +193,7 @@ add_executable(tests
     core/core_timing.cpp
     core/local_redirect.cpp
     core/nextendo_redirect.cpp
+    core/filesystem_rename.cpp
     core/thread_startup_policy.cpp
     core/nup_writer.cpp
     core/nup_metadata.cpp
@@ -200,6 +207,8 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
+    core/numeric_name_info.cpp
+    core/numeric_name_info_ipc.cpp
     video_core/memory_tracker.cpp
     video_core/invalidation_accumulator.cpp
     video_core/memory_manager_runs.cpp
@@ -222,6 +231,8 @@ add_executable(tests
     video_core/turing_macro_ram.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/usage_tracker.cpp
+    video_core/nx2_backx.cpp
+    video_core/vertex_input_cache.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/descriptor_payload_growth.cpp
@@ -243,7 +254,7 @@ target_link_libraries(tests PRIVATE common core audio_core input_common video_co
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)
-    target_sources(tests PRIVATE core/jit_ordered_loads.cpp core/window_trace.cpp)
+    target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 
@@ -258,7 +269,7 @@ target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithM
 add_test(NAME profile_migration_tests COMMAND profile_migration_tests)
 
 if (TARGET SDL3::SDL3)
-    add_executable(sdl_window_state_tests yuzu_cmd/sdl_window_state.cpp)
+    add_executable(sdl_window_state_tests lichii_cmd/sdl_window_state.cpp)
     target_link_libraries(sdl_window_state_tests PRIVATE SDL3::SDL3 Catch2::Catch2WithMain)
     add_test(NAME sdl_window_state_tests COMMAND sdl_window_state_tests)
 endif()
@@ -336,7 +347,8 @@ if (NOT ANDROID)
         common/first_run_config.cpp
         common/recommended_settings.cpp
         ../frontend_common/profile_import.cpp
-        ../frontend_common/config.cpp)
+        ../frontend_common/config.cpp
+        ../frontend_common/recommended_settings.cpp)
     target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
         ${PLATFORM_LIBRARIES})
     add_test(NAME config_tests COMMAND config_tests)

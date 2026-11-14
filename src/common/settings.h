@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -701,9 +700,8 @@ struct Values {
                                                          true,
                                                          true};
 
-    // Precache shaders before the game starts: the compute programs in the game files and the
-    // cached graphics pipelines the boot leaves for later are built on the loading screen, so the
-    // driver's cache holds them before the game first uses them.
+    // Precache shaders before the game starts: the compute programs in the game files are built on
+    // the loading screen, so the driver's cache holds them before the game first uses them.
     // Ask: the desktop app asks at launch while the game has no finished precache; where nothing
     // asks, as Off.
     SwitchableSetting<PrecacheShaders> precache_shaders{linkage,
@@ -1136,6 +1134,13 @@ struct NvidiaDlssRuntimeSettings {
 
 void RefreshNvidiaDlssRuntimeSettings();
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings();
+
+/// The NVIDIA DLSS quality whose render scale Ocarina of Time's built-in patch applies when the
+/// game starts: Balanced, Performance or Ultra Performance with NVIDIA DLSS on, docked.
+std::optional<NvidiaDlssQuality> OcarinaDlssRenderScale();
+/// The quality whose render-scale patch the running game's main module got (none: unpatched).
+void SetAppliedOcarinaRenderScale(std::optional<NvidiaDlssQuality> quality);
+std::optional<NvidiaDlssQuality> AppliedOcarinaRenderScale();
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

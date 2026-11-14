@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -20,6 +19,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/fsr4_support.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 VK_DEFINE_HANDLE(VmaAllocator)
@@ -59,6 +59,7 @@ VK_DEFINE_HANDLE(VmaPool)
 #define FOR_EACH_VK_FEATURE_EXT(FEATURE)                                                           \
     FEATURE(EXT, BorderColorSwizzle, BORDER_COLOR_SWIZZLE, border_color_swizzle)                   \
     FEATURE(EXT, ColorWriteEnable, COLOR_WRITE_ENABLE, color_write_enable)                         \
+    FEATURE(KHR, ComputeShaderDerivatives, COMPUTE_SHADER_DERIVATIVES, compute_shader_derivatives) \
     FEATURE(EXT, CustomBorderColor, CUSTOM_BORDER_COLOR, custom_border_color)                      \
     FEATURE(EXT, DepthBiasControl, DEPTH_BIAS_CONTROL, depth_bias_control)                         \
     FEATURE(EXT, DepthClipControl, DEPTH_CLIP_CONTROL, depth_clip_control)                         \
@@ -78,11 +79,13 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
+    FEATURE(NV, CooperativeMatrix2, COOPERATIVE_MATRIX_2, cooperative_matrix2)                     \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
     FEATURE(KHR, PipelineBinary, PIPELINE_BINARY, pipeline_binary)                                 \
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
+    FEATURE(KHR, ShaderIntegerDotProduct, SHADER_INTEGER_DOT_PRODUCT, shader_integer_dot_product)  \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
     FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                        \
             shader_maximal_reconvergence)                                                        \
@@ -563,9 +566,12 @@ FN_MAX_LIMIT_LIST
         return is_warp_potentially_bigger;
     }
 
-    /// Returns true if the device can be forced to use the guest warp size.
+    /// Returns true if the device can be forced to use the guest warp size. Lavapipe's
+    /// subgroups are 8 wide and can't be forced to 32.
     bool IsGuestWarpSizeSupported(VkShaderStageFlagBits stage) const {
-        return properties.subgroup_size_control.requiredSubgroupSizeStages & stage;
+        const auto& control = properties.subgroup_size_control;
+        return (control.requiredSubgroupSizeStages & stage) != 0 &&
+               control.minSubgroupSize <= GuestWarpSize && GuestWarpSize <= control.maxSubgroupSize;
     }
 
     /// Returns true if the device supports the provided subgroup feature.
@@ -1094,6 +1100,12 @@ FN_MAX_LIMIT_LIST
         return device_access_memory;
     }
 
+    /// Size of the largest device-local heap (with EDEN_NX2_VRAM_LIMIT_MIB applied). Unlike
+    /// GetDeviceLocalMemory() this is the card's memory, not a budget with a reserve taken off.
+    u64 GetDeviceLocalHeapSize() const {
+        return main_heap_size;
+    }
+
     bool CanReportMemoryUsage() const {
         return extensions.memory_budget;
     }
@@ -1105,6 +1117,9 @@ FN_MAX_LIMIT_LIST
     /// budget. 0 without the extension. The unused part of the allocator's blocks is not
     /// subtracted: see GetDeviceMemorySlack().
     u64 GetDeviceMemoryBudget() const;
+
+    /// GetDeviceMemoryBudget() before the cap an integrated GPU gets: the heap's own budget.
+    u64 GetDeviceHeapMemoryBudget() const;
 
     /// Memory the allocator holds from the driver in the main device-local heap but has no
     /// allocation in (the unused part of its blocks). GetDeviceMemoryUsage() does not count it,
@@ -1226,6 +1241,9 @@ FN_MAX_LIMIT_LIST
                features.bit16_storage.storageBuffer16BitAccess;
     }
 
+    /// What the fsr4-vk FSR 4 port needs, as enabled on this device.
+    [[nodiscard]] VideoCommon::Fsr4PortDevice Fsr4PortDevice() const;
+
     [[nodiscard]] static constexpr bool CheckBrokenCompute(VkDriverId driver_id,
                                                            u32 driver_version) {
         if (driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) {
@@ -1249,11 +1267,9 @@ FN_MAX_LIMIT_LIST
     /// NVIDIA's and AMD's drivers keep a disk cache of built pipelines of their own, so the
     /// emulator keeps none on top: a VkPipelineCache only kept every pipeline the title ever built
     /// in host memory (title 1: a 245 MB file, ~0.35 GB of RAM for the session) and copied it whole
-    /// at each save, which stalled frames, and pipelines built no slower without it.
-    bool DriverCachesPipelines() const noexcept {
-        return properties.driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
-               properties.driver.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
-    }
+    /// at each save, which stalled frames, and pipelines built no slower without it. RADV keeps
+    /// one too through Mesa's shader cache, unless it is disabled.
+    bool DriverCachesPipelines() const noexcept;
 
     bool IsMoltenVK() const noexcept {
         return properties.driver.driverID == VK_DRIVER_ID_MOLTENVK;
@@ -1396,6 +1412,7 @@ private:
     bool float16_math{};                       ///< Shaders may do float16 arithmetic.
     bool cooperative_hmma_16x8x16{};           ///< HMMA runs on the guest's matrix shape.
     bool cooperative_hmma_16x16x16{};          ///< HMMA runs on 16x16x16 matrices.
+    bool fp8_matrix_shapes{}; ///< 16x16x16 FP16 and FP8 matrices with FP32 results (fsr4-vk).
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.
@@ -1432,6 +1449,7 @@ private:
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.
     u64 heap_size_limit{};    ///< EDEN_NX2_VRAM_LIMIT_MIB for device-local heaps, 0 if unset.
+    u64 main_heap_size{};     ///< Size of main_heap, with heap_size_limit applied.
 
     /// Format properties dictionary.
     ::Common::unordered_map<VkFormat, VkFormatProperties> format_properties;

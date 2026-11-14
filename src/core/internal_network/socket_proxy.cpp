@@ -497,7 +497,7 @@ Errno ProxySocket::SetNonBlock(bool enable) {
 std::pair<Errno, Errno> ProxySocket::GetPendingError() {
     std::lock_guard guard(packets_mutex);
     if (closed) {
-        return {Errno::BADF, Errno::SUCCESS};
+        return {Errno::SUCCESS, Errno::BADF};
     }
     LOG_DEBUG(Network, "(STUBBED) called");
     return {Errno::SUCCESS, Errno::SUCCESS};

@@ -696,17 +696,29 @@ void Scheduler::SetHangMarkers(VkBuffer buffer, std::span<const u32> values) {
 
 void Scheduler::BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                                 std::array<u32, 3> size) {
-    const u32 id = ++hang_marker_id;
-    hang_marker_items[id % HangMarkerItems] = {hash, fragment_hash, size};
+    u32 id{};
+    {
+        std::scoped_lock lock{hang_marker_mutex};
+        id = ++hang_marker_id;
+        hang_marker_items[id % HangMarkerItems] = {hash, fragment_hash, size};
+    }
     cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, hang_marker_buffer, 0, id);
 }
 
 void Scheduler::EndHangMarker(vk::CommandBuffer cmdbuf) {
+    u32 id{};
+    {
+        std::scoped_lock lock{hang_marker_mutex};
+        id = hang_marker_id;
+    }
     cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, hang_marker_buffer,
-                                sizeof(u32), hang_marker_id);
+                                sizeof(u32), id);
 }
 
 void Scheduler::ReportHangMarkers() const {
+    // Never taken by the worker while it reports a loss: BeginHangMarker and EndHangMarker hold
+    // it only around the counter and the ring.
+    std::scoped_lock lock{hang_marker_mutex};
     const u32 started = hang_marker_values[0];
     const u32 finished = hang_marker_values[1];
     const u32 recorded = hang_marker_id;
@@ -728,8 +740,9 @@ void Scheduler::ReportHangMarkers() const {
                      finished);
     }
     // Unfinished work first: what the GPU was running, then what it had queued after it.
-    const u32 last = (std::min)(recorded, finished + 16);
-    for (u32 id = (std::max)(finished + 1, oldest); id <= last; ++id) {
+    const u32 first = (std::max)(finished + 1, oldest);
+    const u32 last = (std::min)(recorded, first + 15);
+    for (u32 id = first; id <= last; ++id) {
         LOG_CRITICAL(Render_Vulkan, "Hang marker {} {}: {}", id,
                      id <= started ? "started, unfinished" : "queued", describe(id));
     }

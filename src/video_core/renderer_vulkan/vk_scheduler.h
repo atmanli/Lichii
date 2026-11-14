@@ -553,7 +553,10 @@ private:
     static constexpr u32 HangMarkerItems = 1024;
     VkBuffer hang_marker_buffer{};
     std::span<const u32> hang_marker_values;
-    u32 hang_marker_id{}; ///< Written on the worker thread, which records the work
+    /// Guards hang_marker_id and hang_marker_items: the worker records them, a device loss on
+    /// any thread reports them.
+    mutable std::mutex hang_marker_mutex;
+    u32 hang_marker_id{};
     std::vector<WorkTrace> hang_marker_items;
     vk::QueryPool trace_work_pool;
     std::vector<WorkTrace> trace_work_items;

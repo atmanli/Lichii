@@ -217,6 +217,11 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         if (opcode == 0x825)
             operand(64, 2);
         break;
+    case 0xe25: // IMAD.WIDE with a uniform addend pair (bits 32-37, no register): Rd:Rd+1, Ra, Rb
+        operand(16, 2);
+        operand(24);
+        operand(64);
+        break;
     case 0x83b:
         operand(16, 1U << input.Bits(72, 2));
         operand(24);

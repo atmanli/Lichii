@@ -521,9 +521,9 @@ public:
         : ComputePass(device_, scheduler, pool, bindings, templates, bank, push,
                       OCARINA_DLSS_4K_COMPOSITE_COMP_SPV) {}
 
-    void Record(Scheduler& scheduler, const void* descriptors, VkImage image,
+    void Record(Scheduler& scheduler, const void* descriptors, VkImage image, VkExtent2D extent,
                 const OcarinaUpscaler& upscaler, u64 frame) {
-        scheduler.Record([this, descriptors, image, &upscaler, frame](vk::CommandBuffer cmd) {
+        scheduler.Record([this, descriptors, image, extent, &upscaler, frame](vk::CommandBuffer cmd) {
             const auto output = ProbeBarrier(image, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                              VK_IMAGE_LAYOUT_GENERAL);
@@ -540,7 +540,7 @@ public:
             cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
             const u32 enabled = !upscaler.EvaluationFailed();
             cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, enabled);
-            cmd.Dispatch(3840 / 8, 2160 / 8, 1);
+            cmd.Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
             const VkMemoryBarrier complete{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -549,7 +549,8 @@ public:
             cmd.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                 0, complete);
             if (enabled && (!logged || frame % 120 == 0)) {
-                LOG_INFO(Render_Vulkan, "Ocarina temporal presented 3840x2160 frame={}", frame);
+                LOG_INFO(Render_Vulkan, "Ocarina temporal presented {}x{} frame={}",
+                         extent.width, extent.height, frame);
                 logged = true;
             }
         });
@@ -802,6 +803,7 @@ struct OcarinaUpscaler::Impl {
     vk::ImageView native_scene_view;
     vk::Image composite;
     vk::ImageView composite_view;
+    VkExtent2D composite_extent{};
     std::unique_ptr<OcarinaColorPass> reference_pass;
     std::unique_ptr<OcarinaCompositePass> composite_pass;
     vk::Sampler linear_sampler;
@@ -858,18 +860,31 @@ void OcarinaUpscaler::SaveSceneReference(VkImageView color) {
     state.scheduler.InvalidateState();
 }
 
-void OcarinaUpscaler::Composite4k(VkImageView native_composite, u64 frame) {
+void OcarinaUpscaler::CompositeOutput(VkImageView native_composite, VkExtent2D output_extent,
+                                      u64 frame) {
     auto& state = *impl;
     if (state.composited_frame == frame) {
         return;
     }
+    if (output_extent.width == 0 || output_extent.height == 0) {
+        throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
     if (!state.composite_pass) {
-        constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
-        state.composite = CreateOcarinaImage(state.allocator, {3840, 2160}, format,
-                                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-        state.composite_view = CreateOcarinaView(state.device, *state.composite, format);
         state.composite_pass = std::make_unique<OcarinaCompositePass>(
             state.device, state.scheduler, state.pool);
+    }
+    if (!state.composite || state.composite_extent.width != output_extent.width ||
+        state.composite_extent.height != output_extent.height) {
+        if (state.composite) {
+            state.scheduler.Finish();
+            state.composite_view = {};
+            state.composite = {};
+        }
+        constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+        state.composite = CreateOcarinaImage(state.allocator, output_extent, format,
+                                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        state.composite_view = CreateOcarinaView(state.device, *state.composite, format);
+        state.composite_extent = output_extent;
     }
     state.scheduler.RequestOutsideRenderPassOperationContext();
     state.queue.Acquire(state.scheduler, 4);
@@ -879,7 +894,7 @@ void OcarinaUpscaler::Composite4k(VkImageView native_composite, u64 frame) {
     state.queue.AddSampledImage(native_composite, sampler);
     state.queue.AddImage(*state.composite_view);
     state.composite_pass->Record(state.scheduler, state.queue.UpdateData(), *state.composite,
-                                 *this, frame);
+                                 output_extent, *this, frame);
     state.scheduler.InvalidateState();
     state.composited_frame = frame;
 }
@@ -1148,7 +1163,9 @@ VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device) 
 #endif
     // Balanced's scene is padded, which only DLSS takes.
     const auto scale = Settings::AppliedOcarinaRenderScale();
-    const bool render_scaled = scale && *scale != Settings::NvidiaDlssQuality::Balanced;
+    const bool render_scaled =
+        scale && *scale != Settings::OcarinaRenderScale::Scale100 &&
+        *scale != Settings::OcarinaRenderScale::Scale87;
     const bool xess_available = XessUpscaler::IsSupported(device) &&
                                 Fsr3Upscaler::IsSupported(device);
     const auto backend = VideoCommon::SelectOcarinaUpscaler(

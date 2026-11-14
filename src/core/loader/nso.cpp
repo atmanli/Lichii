@@ -197,12 +197,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     // the game's own wait for the second vblank, or every 2-step frame reads as 33 ms and the game
     // never leaves 30 FPS (found by SerkiGohan). Presents are then paced with interval 1.
     // Match the instruction sequences instead of relying on a title-version-specific address.
+    // Fixed 60 FPS: mode 1 (one vblank per frame, one step per frame), with the present paced at
+    // the interval the game sends, so a slow frame plays in slow motion rather than fast.
     const bool mkw_dynamic = Settings::values.mkw_dynamic_fps.GetValue();
+    const bool mkw_60 = !mkw_dynamic && Settings::values.mkw_60fps.GetValue();
     bool mkw_dynamic_fps_patch_applied = false;
-    if ((mkw_dynamic || Settings::values.mkw_30fps.GetValue()) && name == "main" &&
+    if ((mkw_dynamic || mkw_60 || Settings::values.mkw_30fps.GetValue()) && name == "main" &&
         process.GetProgramId() == Settings::MarioKartWorldProgramId) {
         constexpr u32 ModeLoadInsn = 0xB9421268; // ldr w8, [x19, #0x210]
-        const u32 mode = mkw_dynamic ? 0U : 2U;
+        const u32 mode = mkw_dynamic ? 0U : mkw_60 ? 1U : 2U;
         const u32 mode_instruction = 0x52800008U | (mode << 5); // mov w8, #mode
         const auto& text = nso_header.segments[0];
         u8* const code = codeset.memory.data() + module_start + text.location;
@@ -269,7 +272,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                 mkw_dynamic_fps_patch_applied = true;
             }
             LOG_INFO(Loader, "Mario Kart World: {} FPS mode enabled (main+{:#x})",
-                     mkw_dynamic ? "dynamic" : "30",
+                     mkw_dynamic ? "dynamic" : mkw_60 ? "60" : "30",
                      text.location + mode_site * sizeof(u32));
         } else {
             LOG_WARNING(Loader,

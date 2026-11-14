@@ -687,6 +687,57 @@ void Scheduler::TraceGraphicsPipeline(const std::array<u64, 6>& hashes) {
     });
 }
 
+void Scheduler::SetHangMarkers(VkBuffer buffer, std::span<const u32> values) {
+    hang_marker_items.resize(HangMarkerItems);
+    hang_marker_values = values;
+    hang_marker_buffer = buffer;
+    LOG_INFO(Render_Vulkan, "Hang markers on: every draw and dispatch writes VK_AMD_buffer_marker");
+}
+
+void Scheduler::BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                                std::array<u32, 3> size) {
+    const u32 id = ++hang_marker_id;
+    hang_marker_items[id % HangMarkerItems] = {hash, fragment_hash, size};
+    cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, hang_marker_buffer, 0, id);
+}
+
+void Scheduler::EndHangMarker(vk::CommandBuffer cmdbuf) {
+    cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, hang_marker_buffer,
+                                sizeof(u32), hang_marker_id);
+}
+
+void Scheduler::ReportHangMarkers() const {
+    const u32 started = hang_marker_values[0];
+    const u32 finished = hang_marker_values[1];
+    const u32 recorded = hang_marker_id;
+    LOG_CRITICAL(Render_Vulkan,
+                 "Hang markers: last draw or dispatch started {}, last finished {}, recorded {}",
+                 started, finished, recorded);
+    const auto describe = [this](u32 id) {
+        const WorkTrace& item = hang_marker_items[id % HangMarkerItems];
+        return item.fragment_hash == 0
+                   ? fmt::format("s6:{:016x} grid {}x{}x{}", item.hash, item.size[0],
+                                 item.size[1], item.size[2])
+                   : fmt::format("s1:{:016x}+s5:{:016x} {} vertices x{}", item.hash,
+                                 item.fragment_hash, item.size[0], item.size[1]);
+    };
+    // Only the last HangMarkerItems markers keep their work: older slots hold newer work.
+    const u32 oldest = recorded >= HangMarkerItems ? recorded - HangMarkerItems + 1 : 1;
+    if (finished + 1 < oldest) {
+        LOG_CRITICAL(Render_Vulkan, "Hang markers: the work after marker {} is no longer kept",
+                     finished);
+    }
+    // Unfinished work first: what the GPU was running, then what it had queued after it.
+    const u32 last = (std::min)(recorded, finished + 16);
+    for (u32 id = (std::max)(finished + 1, oldest); id <= last; ++id) {
+        LOG_CRITICAL(Render_Vulkan, "Hang marker {} {}: {}", id,
+                     id <= started ? "started, unfinished" : "queued", describe(id));
+    }
+    for (u32 id = (std::max)(finished > 3 ? finished - 3 : 1, oldest); id <= finished; ++id) {
+        LOG_CRITICAL(Render_Vulkan, "Hang marker {} finished: {}", id, describe(id));
+    }
+}
+
 void Scheduler::TraceComputePipeline(u64 hash) {
     if (!trace_work_pool) {
         return;

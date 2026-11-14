@@ -700,6 +700,7 @@ void Scheduler::BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment
     {
         std::scoped_lock lock{hang_marker_mutex};
         id = ++hang_marker_id;
+        hang_marker_wrapped |= id == 0;
         hang_marker_items[id % HangMarkerItems] = {hash, fragment_hash, size};
     }
     cmdbuf.WriteBufferMarkerAMD(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, hang_marker_buffer, 0, id);
@@ -735,7 +736,7 @@ void Scheduler::ReportHangMarkers() const {
     };
     // The GPU writes 32-bit marker IDs: after 2^32 draws and dispatches they start again from 0,
     // and the order between them is lost.
-    if (finished > recorded || started > recorded) {
+    if (hang_marker_wrapped) {
         LOG_CRITICAL(Render_Vulkan, "Hang markers: the marker IDs wrapped, no report");
         return;
     }

@@ -557,6 +557,7 @@ private:
     /// any thread reports them.
     mutable std::mutex hang_marker_mutex;
     u32 hang_marker_id{};
+    bool hang_marker_wrapped{}; ///< The 32-bit ID passed its last value: the IDs lost their order
     std::vector<WorkTrace> hang_marker_items;
     vk::QueryPool trace_work_pool;
     std::vector<WorkTrace> trace_work_items;

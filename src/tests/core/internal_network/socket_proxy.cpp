@@ -677,6 +677,22 @@ TEST_CASE("Closed room sockets cannot expose a successful stale name",
     }
 }
 
+TEST_CASE("Closed room sockets reject pending-error queries as an operation error",
+          "[core][sockets][room-endpoint][closed-error]") {
+    for (const auto protocol : {Network::Protocol::UDP, Network::Protocol::TCP}) {
+        Network::ProxySocket socket;
+        BindSocket(socket, protocol);
+        CHECK(socket.GetPendingError() ==
+              std::pair{Network::Errno::SUCCESS, Network::Errno::SUCCESS});
+        REQUIRE(socket.Close() == Network::Errno::SUCCESS);
+        for (int query = 0; query < 2; ++query) {
+            const auto [pending_error, operation_error] = socket.GetPendingError();
+            CHECK(operation_error == Network::Errno::BADF);
+            CHECK(pending_error == Network::Errno::SUCCESS);
+        }
+    }
+}
+
 TEST_CASE("Room socket names reach the guest as a BSD IPv4 sockaddr",
           "[core][sockets][room-endpoint]") {
     Network::ProxySocket socket;

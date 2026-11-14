@@ -106,16 +106,31 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
+        const bool marked = hang_marker_buffer != VK_NULL_HANDLE;
+        if (marked) [[unlikely]] {
+            BeginHangMarker(cmdbuf, hash, fragment_hash, size);
+        }
         if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
             work();
-            return;
+        } else {
+            const u32 query = trace_work_count * 2;
+            trace_work_items[trace_work_count++] = {hash, fragment_hash, size};
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query);
+            work();
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool,
+                                  query + 1);
         }
-        const u32 query = trace_work_count * 2;
-        trace_work_items[trace_work_count++] = {hash, fragment_hash, size};
-        cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query);
-        work();
-        cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
+        if (marked) [[unlikely]] {
+            EndHangMarker(cmdbuf);
+        }
     }
+
+    /// EDEN_NX2_HANG_MARKERS: the buffer TraceGpuWork writes VK_AMD_buffer_marker values to, two
+    /// words (the last draw or dispatch started, the last finished), and its mapping.
+    void SetHangMarkers(VkBuffer buffer, std::span<const u32> values);
+    /// Logs the draws and dispatches that started but never finished, from the marker values the
+    /// caller made visible to the host (RasterizerVulkan, from Device::ReportLoss).
+    void ReportHangMarkers() const;
 
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
@@ -530,6 +545,19 @@ private:
         /// Dispatch grid, or vertex and instance counts of a draw; zero when indirect.
         std::array<u32, 3> size{};
     };
+
+    void BeginHangMarker(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                         std::array<u32, 3> size);
+    void EndHangMarker(vk::CommandBuffer cmdbuf);
+
+    static constexpr u32 HangMarkerItems = 1024;
+    VkBuffer hang_marker_buffer{};
+    std::span<const u32> hang_marker_values;
+    /// Guards hang_marker_id and hang_marker_items: the worker records them, a device loss on
+    /// any thread reports them.
+    mutable std::mutex hang_marker_mutex;
+    u32 hang_marker_id{};
+    std::vector<WorkTrace> hang_marker_items;
     vk::QueryPool trace_work_pool;
     std::vector<WorkTrace> trace_work_items;
     u32 trace_work_count{};

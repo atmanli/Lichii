@@ -94,6 +94,7 @@ void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::Locat
 }
 
 void AddressSpace::ClearCache() {
+    ++cache_generation;
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();
@@ -112,7 +113,9 @@ CodePtr AddressSpace::Emit(IR::Block block) {
 
     UnprotectCodeMemory();
 
-    EmittedBlockInfo block_info = EmitArm64(code, std::move(block), GetEmitConfig(), fastmem_manager);
+    auto emit_config = GetEmitConfig();
+    emit_config.cache_generation = cache_generation;
+    EmittedBlockInfo block_info = EmitArm64(code, std::move(block), emit_config, fastmem_manager);
 
     ASSERT(block_entries.insert({block.Location(), block_info.entry_point}).second);
     ASSERT(reverse_block_entries.insert({block_info.entry_point, block.Location()}).second);

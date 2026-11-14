@@ -733,21 +733,31 @@ void Scheduler::ReportHangMarkers() const {
                    : fmt::format("s1:{:016x}+s5:{:016x} {} vertices x{}", item.hash,
                                  item.fragment_hash, item.size[0], item.size[1]);
     };
+    // The GPU writes 32-bit marker IDs: after 2^32 draws and dispatches they start again from 0,
+    // and the order between them is lost.
+    if (finished > recorded || started > recorded) {
+        LOG_CRITICAL(Render_Vulkan, "Hang markers: the marker IDs wrapped, no report");
+        return;
+    }
+    // Counted in 64 bits, so the bounds below never wrap at the last 32-bit ID.
     // Only the last HangMarkerItems markers keep their work: older slots hold newer work.
-    const u32 oldest = recorded >= HangMarkerItems ? recorded - HangMarkerItems + 1 : 1;
-    if (finished + 1 < oldest) {
+    const u64 oldest = recorded >= HangMarkerItems ? u64{recorded} - HangMarkerItems + 1 : 1;
+    if (u64{finished} + 1 < oldest) {
         LOG_CRITICAL(Render_Vulkan, "Hang markers: the work after marker {} is no longer kept",
                      finished);
     }
     // Unfinished work first: what the GPU was running, then what it had queued after it.
-    const u32 first = (std::max)(finished + 1, oldest);
-    const u32 last = (std::min)(recorded, first + 15);
-    for (u32 id = first; id <= last; ++id) {
+    const u64 first = (std::max)(u64{finished} + 1, oldest);
+    const u64 last = (std::min)(u64{recorded}, first + 15);
+    for (u64 id = first; id <= last; ++id) {
         LOG_CRITICAL(Render_Vulkan, "Hang marker {} {}: {}", id,
-                     id <= started ? "started, unfinished" : "queued", describe(id));
+                     id <= started ? "started, unfinished" : "queued",
+                     describe(static_cast<u32>(id)));
     }
-    for (u32 id = (std::max)(finished > 3 ? finished - 3 : 1, oldest); id <= finished; ++id) {
-        LOG_CRITICAL(Render_Vulkan, "Hang marker {} finished: {}", id, describe(id));
+    for (u64 id = (std::max)(finished > 3 ? u64{finished} - 3 : u64{1}, oldest); id <= finished;
+         ++id) {
+        LOG_CRITICAL(Render_Vulkan, "Hang marker {} finished: {}", id,
+                     describe(static_cast<u32>(id)));
     }
 }
 

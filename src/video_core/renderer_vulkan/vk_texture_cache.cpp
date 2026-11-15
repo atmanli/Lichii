@@ -1325,6 +1325,10 @@ void ReapFinishedTranscodes(Scheduler& scheduler, PendingQueue& pending_transcod
     for (const auto& t : free_transcodes) {
         free_bytes += decode_bytes(t);
     }
+    // Flush() leaves the cached timeline tick unchanged. Query it only when reaping needs it.
+    if (!pending_transcodes.empty() && !scheduler.IsFree(pending_transcodes.front().tick)) {
+        scheduler.GetMasterSemaphore().Refresh();
+    }
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
         auto& done = pending_transcodes.front();
         const u64 bytes = decode_bytes(done);

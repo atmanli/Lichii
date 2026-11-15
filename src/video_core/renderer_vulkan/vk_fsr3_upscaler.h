@@ -113,6 +113,9 @@ private:
     Texture output;
 
     VkExtent2D render_extent{};
+    /// What the render-size images are allocated for: dynamic resolution renders less of it
+    /// (the shaders take it as the maximum render size) without starting the history again.
+    VkExtent2D render_capacity{};
     VkExtent2D upscale_extent{};
     std::array<s32, 2> previous_render_size{};
     std::array<s32, 2> previous_upscale_size{};

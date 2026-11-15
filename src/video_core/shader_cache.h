@@ -7,7 +7,10 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <exception>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -142,7 +145,43 @@ protected:
     /// The v2 cache that records the native programs lowered here, while one is open
     ShaderCacheV2::Cache* shader_cache_v2{};
 
+    struct AsyncRange {
+        VAddr addr{};
+        size_t size{};
+    };
+
+    /// Tracks guest device ranges accessed by an offloaded async translation CPU stage so
+    /// overlapping invalidations and unmaps wait for it (or cancel it if still queued) without
+    /// waiting on non-overlapping builds or Vulkan driver compiles.
+    struct AsyncTranslationActivity {
+        AsyncTranslationActivity(std::vector<AsyncRange> tracked_ranges_, bool unbounded_reads_)
+            : tracked_ranges{std::move(tracked_ranges_)}, unbounded_reads{unbounded_reads_} {}
+
+        std::vector<AsyncRange> tracked_ranges;
+        bool unbounded_reads{false};
+
+        mutable std::mutex mutex;
+        std::condition_variable cv;
+        std::function<void()> cancel_callback;
+        bool stop_requested{false};
+        bool invalidated{false};
+        bool cpu_done{false};
+
+        [[nodiscard]] bool Overlaps(VAddr addr, size_t size) const noexcept;
+        void SetCancelCallback(std::function<void()> callback);
+        void ClearCancelCallback() noexcept;
+        void MarkCpuDone() noexcept;
+        [[nodiscard]] bool IsCpuDone() const noexcept;
+        [[nodiscard]] bool IsInvalidated() const noexcept;
+    };
+
+    std::shared_ptr<AsyncTranslationActivity> RegisterAsyncTranslation(
+        std::vector<AsyncRange> tracked_ranges, bool unbounded_reads);
+    void WaitForInvalidatedAsyncTranslations(std::span<const std::pair<DAddr, size_t>> ranges);
+    void ClearAsyncTranslationCallbacks();
+
 private:
+    static void CoalesceRanges(std::vector<AsyncRange>& ranges);
     friend struct ShaderCacheTestAccess;
 
     /// @brief Tries to obtain a cached shader starting in a given address
@@ -218,6 +257,9 @@ private:
     /// shader_infos may point at a freed program.
     std::atomic<u64> removal_serial{};
     u64 seen_removal_serial{};
+
+    std::mutex async_translations_mutex;
+    std::vector<std::shared_ptr<AsyncTranslationActivity>> async_translations;
 };
 
 } // namespace VideoCommon

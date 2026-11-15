@@ -248,6 +248,7 @@ add_executable(tests
     video_core/usage_tracker.cpp
     video_core/nx2_backx.cpp
     video_core/vertex_input_cache.cpp
+    video_core/detached_graphics_environment.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/descriptor_payload_growth.cpp

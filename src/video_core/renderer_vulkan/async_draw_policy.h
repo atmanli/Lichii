@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 
 #include "common/common_types.h"
@@ -54,6 +55,20 @@ constexpr NativeDrawAction DecideNativePending(NativePendingMode mode, bool can_
         return NativeDrawAction::Skip;
     }
     return NativeDrawAction::WaitTimed;
+}
+
+/// Translation and driver compilation spend the same per-frame wait budget.
+template <typename Clock = std::chrono::steady_clock, typename Wait>
+bool WaitWithinNativeBudget(s64& budget_left_us, s64& used_us, Wait&& wait) {
+    if (budget_left_us <= 0) {
+        return false;
+    }
+    const auto begin = Clock::now();
+    const bool ready = wait(std::chrono::microseconds{budget_left_us});
+    const auto spent = std::chrono::ceil<std::chrono::microseconds>(Clock::now() - begin).count();
+    budget_left_us -= spent;
+    used_us += spent;
+    return ready;
 }
 
 } // namespace Vulkan

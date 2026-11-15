@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -14,8 +15,9 @@
 #include <optional>
 #include <span>
 #include <type_traits>
-#include "common/container/unordered_map.h"
+#include <utility>
 #include <vector>
+#include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
@@ -35,6 +37,13 @@ struct ProgramRecord;
 } // namespace VideoCommon::ShaderCacheV2
 
 namespace VideoCommon {
+
+// Detached translation must retry on the GPU thread when a required input was not captured.
+struct DetachedShaderStateRequired final : std::exception {
+    const char* what() const noexcept override {
+        return "Detached shader requires uncaptured guest state";
+    }
+};
 
 class GenericEnvironment : public Shader::Environment {
 public:
@@ -105,6 +114,30 @@ public:
         texture_pool_flushed = true;
     }
 
+    /// Sets an immutable descriptor pool snapshot and host tiling mode captured on the GPU thread
+    /// so detached background translation reads descriptors without touching live guest memory.
+    void SetDetachedTexturePool(std::shared_ptr<const std::vector<u8>> snapshot,
+                                bool uses_native_tiling) noexcept {
+        detached_tex_pool = std::move(snapshot);
+        detached_uses_native_tiling = uses_native_tiling;
+        texture_pool_flushed = true;
+    }
+
+    [[nodiscard]] std::pair<GPUVAddr, size_t> CodeGuestRange() const noexcept {
+        if (native_source_size != 0) {
+            return {program_base, native_source_size};
+        }
+        if (!has_unbound_instructions && cached_highest > cached_lowest) {
+            return {program_base + cached_lowest,
+                    static_cast<size_t>(cached_highest - cached_lowest)};
+        }
+        return {program_base, 0};
+    }
+
+    [[nodiscard]] bool HasUnboundInstructions() const noexcept {
+        return has_unbound_instructions;
+    }
+
     [[nodiscard]] u64 CalculateHash() const;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
@@ -144,6 +177,7 @@ protected:
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
+    bool detached_reads_only{};
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
 
     u32 local_memory_size{};
@@ -163,6 +197,8 @@ protected:
     bool has_unbound_instructions = false;
     bool has_hle_engine_state = false;
     bool texture_pool_flushed = false;
+    std::shared_ptr<const std::vector<u8>> detached_tex_pool;
+    bool detached_uses_native_tiling = false;
 };
 
 class GraphicsEnvironment final : public GenericEnvironment {
@@ -189,9 +225,35 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    /// Captures live Maxwell3D registers, replace table, texture descriptor pool snapshot, and all
+    /// enabled constant buffers so translation can run on a background worker while the GPU thread
+    /// continues. Returns false if any active state exceeds snapshotting limits and synchronous
+    /// translation is required.
+    [[nodiscard]] bool DetachFromLiveState(
+        std::shared_ptr<const std::vector<u8>> tex_pool_snapshot = {});
+
+    /// After translation, serialization needs only recorded answers, not the input snapshots.
+    void ReleaseDetachedSnapshots();
+
 private:
+    struct DetachedConstBuffer {
+        GPUVAddr address = 0;
+        u32 size = 0;
+        u32 offset = 0;
+        bool enabled = false;
+    };
+
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    bool via_header_index{};
+    GPUVAddr tex_header_address{};
+    u32 tex_header_limit{};
+    std::array<DetachedConstBuffer, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+        detached_cbufs{};
+    std::vector<u8> detached_cbuf_data;
+    ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType>
+        detached_replace_table;
+    bool is_detached{};
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

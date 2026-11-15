@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
 #include "core/file_sys/fssystem/fssystem_aes_ctr_counter_extended_storage.h"
 #include "core/file_sys/fssystem/fssystem_aes_ctr_storage.h"
 #include "core/file_sys/fssystem/fssystem_nca_header.h"
@@ -242,9 +243,21 @@ size_t AesCtrCounterExtendedStorage::Read(u8* buffer, size_t size, size_t offset
 }
 
 void SoftwareDecryptor::Decrypt(u8* buf, size_t buf_size, const std::array<u8, AesCtrCounterExtendedStorage::KeySize>& key, const std::array<u8, AesCtrCounterExtendedStorage::IvSize>& iv) {
-    Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(key, Core::Crypto::Mode::CTR);
-    cipher.SetIV(iv);
-    cipher.Transcode(buf, buf_size, buf, Core::Crypto::Op::Decrypt);
+    // Reads call this once per bucket tree entry, so keep the last cipher of this thread instead of
+    // creating the OpenSSL contexts and key schedule again each time.
+    struct CachedCipher {
+        explicit CachedCipher(const std::array<u8, AesCtrCounterExtendedStorage::KeySize>& k)
+            : key{k}, cipher{k, Core::Crypto::Mode::CTR} {}
+        std::array<u8, AesCtrCounterExtendedStorage::KeySize> key;
+        Core::Crypto::AESCipher<Core::Crypto::Key128> cipher;
+    };
+    thread_local std::optional<CachedCipher> cached;
+    if (!cached || cached->key != key) {
+        cached.reset();
+        cached.emplace(key);
+    }
+    cached->cipher.SetIV(iv);
+    cached->cipher.Transcode(buf, buf_size, buf, Core::Crypto::Op::Decrypt);
 }
 
 } // namespace FileSys

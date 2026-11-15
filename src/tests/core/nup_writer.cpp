@@ -451,7 +451,10 @@ TEST_CASE("NUP reads zstd members above the memory cache through a temporary fil
         REQUIRE(PackedTree(nup.GetRomFSDir(0)) == SourceTree(root / "Base/RomFS"));
         REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
     }
-    REQUIRE(std::distance(fs::directory_iterator(spill_dir), fs::directory_iterator{}) == 0);
+    // Fully decoded members stay as kept copies for the next launch; temporaries are removed.
+    for (const auto& entry : fs::directory_iterator(spill_dir)) {
+        REQUIRE(entry.path().extension() == ".bin");
+    }
 }
 
 TEST_CASE("NUP rejects a TOC whose counts or offsets wrap", "[nup]") {

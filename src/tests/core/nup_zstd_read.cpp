@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -76,6 +77,7 @@ struct Member {
     u64 size;
     u8 codec;
     std::string name{};
+    std::array<u8, 0x20> sha256{};
 };
 
 Member ZstdMember(const std::vector<u8>& content) {
@@ -128,6 +130,7 @@ std::vector<u8> BuildNup(const std::vector<Member>& members) {
         Put(bytes, record + 0x08, members[i].size, 8);
         Put(bytes, record + 0x10, extent_offsets[i], 8);
         Put(bytes, record + 0x18, members[i].extent.size(), 8);
+        std::copy(members[i].sha256.begin(), members[i].sha256.end(), bytes.begin() + record + 0x20);
         bytes[record + 0x40] = members[i].codec;
         Put(bytes, toc + children_at + i * 4, 1 + i, 4);
     }
@@ -405,4 +408,40 @@ TEST_CASE("NUP serves a sound sibling in place of a .zs member with no zstd head
     const auto package = nup.GetPackageDir(0);
     REQUIRE(package != nullptr);
     REQUIRE(package->GetFile("Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs")->ReadAllBytes() == damaged);
+}
+
+TEST_CASE("NUP zstd spilled members with a hash are kept decoded for the next open",
+          "[nup][nup-read]") {
+    const auto content = Content(std::size_t{3} << 20, 77);
+    Member member = ZstdMember(content);
+    unsigned int length{};
+    EVP_Digest(content.data(), content.size(), member.sha256.data(), &length, EVP_sha256(),
+               nullptr);
+    const auto bytes = BuildNup({member});
+    TempDir t;
+    const auto kept_files = [&] {
+        std::size_t count = 0;
+        for (const auto& entry : fs::directory_iterator(t.path)) {
+            count += entry.path().extension() == ".bin";
+        }
+        return count;
+    };
+    {
+        NupContainer nup{Backing(bytes), 1 << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        const auto file = nup.OpenFile(0);
+        REQUIRE(ReadMatches(file, content, 0, 4096));
+        REQUIRE(kept_files() == 0);
+        REQUIRE(file->ReadAllBytes() == content);
+        REQUIRE(kept_files() == 1);
+    }
+    REQUIRE(kept_files() == 1);
+    // A container whose extent is garbage still reads the member: it never decodes it again.
+    Member broken = member;
+    std::fill(broken.extent.begin(), broken.extent.end(), u8{0xA5});
+    NupContainer nup{Backing(BuildNup({broken})), 1 << 20, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    const auto file = nup.OpenFile(0);
+    REQUIRE(ReadMatches(file, content, content.size() - 4096, 4096));
+    REQUIRE(file->ReadAllBytes() == content);
 }

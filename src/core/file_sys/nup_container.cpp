@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
@@ -167,6 +168,73 @@ constexpr std::size_t DecoderCharge = 256 * 1024;
 /// 128 MiB; another one restarts from its first frame when read past its prefix again.
 constexpr std::size_t MaxSpillDecoders = 2;
 
+/// Fully decoded spilled members are kept as `<sha256>-<size>.bin` in the spill directory, so the
+/// next launch reads them without decoding again (a 15 GiB Xenoblade Chronicles 2 member took
+/// 30 s at every boot). The least recently used are deleted beyond this total.
+constexpr u64 KeptDecodedCap = u64{64} << 30;
+/// A member is kept only while this much disk stays free after it.
+constexpr u64 KeptDecodedFreeMargin = u64{8} << 30;
+/// Partial and temporary files this old are left over from a crash.
+constexpr auto StaleSpillAge = std::chrono::minutes{10};
+
+std::string KeptDecodedName(const std::array<u8, 0x20>& sha256, u64 size) {
+    if (std::ranges::all_of(sha256, [](u8 byte) { return byte == 0; })) {
+        return {};
+    }
+    std::string name;
+    for (const u8 byte : sha256) {
+        name += fmt::format("{:02x}", byte);
+    }
+    return fmt::format("{}-{}.bin", name, size);
+}
+
+/// Deletes the least recently used kept members beyond KeptDecodedCap, and with `stale` also
+/// partial and temporary files a crash left behind.
+void TrimSpillDir(const std::filesystem::path& dir, bool stale) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    struct Kept {
+        fs::path path;
+        fs::file_time_type time;
+        u64 size;
+    };
+    std::vector<Kept> kept;
+    u64 total = 0;
+    const auto now = fs::file_time_type::clock::now();
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        std::error_code entry_ec;
+        if (!entry.is_regular_file(entry_ec)) {
+            continue;
+        }
+        const auto extension = entry.path().extension();
+        const auto time = entry.last_write_time(entry_ec);
+        if (entry_ec) {
+            continue;
+        }
+        if (extension == ".bin") {
+            const u64 size = entry.file_size(entry_ec);
+            if (!entry_ec) {
+                kept.push_back({entry.path(), time, size});
+                total += size;
+            }
+        } else if (stale && (extension == ".tmp" || extension == ".part") &&
+                   now - time > StaleSpillAge) {
+            fs::remove(entry.path(), entry_ec);
+        }
+    }
+    std::ranges::sort(kept, {}, &Kept::time);
+    for (const auto& file : kept) {
+        if (total <= KeptDecodedCap) {
+            break;
+        }
+        if (fs::remove(file.path, ec)) {
+            total -= file.size;
+            LOG_INFO(Loader, "NUP: deleted the decoded copy {} to stay under {} GiB",
+                     file.path.filename().string(), KeptDecodedCap >> 30);
+        }
+    }
+}
+
 } // namespace
 
 /// The decoded prefix of one zstd member, grown as reads need more of it. Reads below
@@ -174,7 +242,7 @@ constexpr std::size_t MaxSpillDecoders = 2;
 struct NupMember {
     ~NupMember() {
         file.Close();
-        if (!path.empty()) {
+        if (!path.empty() && !kept) {
             std::error_code ec;
             std::filesystem::remove(path, ec);
         }
@@ -201,6 +269,10 @@ struct NupMember {
     std::mutex file_mutex;
     std::filesystem::path path;
     Common::FS::IOFile file;
+    // Where the temporary file goes once fully decoded; empty if it is not kept.
+    std::filesystem::path keep_path;
+    // Path is a kept decoded copy, left on disk.
+    bool kept{};
 };
 
 /// Members of one container, shared by all files opened from it. In-memory members are charged
@@ -297,10 +369,11 @@ class NupVfsFile final : public VfsFile {
 public:
     NupVfsFile(VirtualFile backing_, u64 extent_offset_, u64 extent_size_, u64 uncompressed_size_,
                std::string name_, std::shared_ptr<NupDecompressCache> cache_,
-               std::size_t cache_index_)
+               std::size_t cache_index_, std::string kept_name_ = {})
         : backing(std::move(backing_)), extent_offset(extent_offset_), extent_size(extent_size_),
           uncompressed_size(uncompressed_size_), name(std::move(name_)), cache(std::move(cache_)),
-          cache_index(cache_index_), spilled(cache->Spills(uncompressed_size)) {}
+          cache_index(cache_index_), spilled(cache->Spills(uncompressed_size)),
+          kept_name(std::move(kept_name_)) {}
 
     std::string GetName() const override {
         return name;
@@ -416,8 +489,12 @@ private:
                     std::random_device random;
                     std::error_code ec;
                     std::filesystem::create_directories(cache->spill_dir, ec);
-                    member.path = cache->spill_dir / fmt::format("{:08x}{:08x}-{}.tmp", random(),
-                                                                 random(), cache_index);
+                    if (OpenKept(member)) {
+                        return true;
+                    }
+                    member.path = cache->spill_dir /
+                                  fmt::format("{:08x}{:08x}-{}.{}", random(), random(), cache_index,
+                                              member.keep_path.empty() ? "tmp" : "part");
                     member.file.Open(member.path, Common::FS::FileAccessMode::Write);
                     member.file.Close();
                     member.file.Open(member.path, Common::FS::FileAccessMode::ReadWrite);
@@ -503,9 +580,60 @@ private:
         if (member.produced != uncompressed_size || member.last_result != 0) {
             return fail("the data does not end at the file size");
         }
+        if (spilled && !member.keep_path.empty()) {
+            Keep(member);
+        }
         member.decoded.store(uncompressed_size, std::memory_order_release);
         finish();
         return true;
+    }
+
+    /// Serves the member from a decoded copy an earlier run kept, if there is one. Otherwise sets
+    /// where to keep this run's copy, if the member has a hash and the disk has room.
+    bool OpenKept(NupMember& member) const {
+        if (kept_name.empty()) {
+            return false;
+        }
+        namespace fs = std::filesystem;
+        const fs::path path = cache->spill_dir / kept_name;
+        std::error_code ec;
+        if (fs::file_size(path, ec) == uncompressed_size && !ec) {
+            member.file.Open(path, Common::FS::FileAccessMode::Read);
+            if (member.file.IsOpen()) {
+                // Marks it recently used for TrimSpillDir.
+                fs::last_write_time(path, fs::file_time_type::clock::now(), ec);
+                member.path = path;
+                member.kept = true;
+                member.decoded.store(uncompressed_size, std::memory_order_release);
+                LOG_INFO(Loader, "NUP: {} ({} MiB) read from its decoded copy", name,
+                         uncompressed_size >> 20);
+                return true;
+            }
+        }
+        const auto space = fs::space(cache->spill_dir, ec);
+        if (!ec && space.available > uncompressed_size + KeptDecodedFreeMargin) {
+            member.keep_path = path;
+        }
+        return false;
+    }
+
+    /// Renames the fully decoded temporary file to its kept name.
+    void Keep(NupMember& member) const {
+        std::scoped_lock lock{member.file_mutex};
+        member.file.Close();
+        std::error_code ec;
+        std::filesystem::rename(member.path, member.keep_path, ec);
+        if (!ec) {
+            member.path = member.keep_path;
+            member.kept = true;
+        }
+        member.file.Open(member.path, member.kept ? Common::FS::FileAccessMode::Read
+                                                  : Common::FS::FileAccessMode::ReadWrite);
+        if (member.kept) {
+            LOG_INFO(Loader, "NUP: kept the decoded copy of {} ({} MiB) for the next launch", name,
+                     uncompressed_size >> 20);
+            TrimSpillDir(cache->spill_dir, false);
+        }
     }
 
     VirtualFile backing;
@@ -516,6 +644,7 @@ private:
     std::shared_ptr<NupDecompressCache> cache;
     std::size_t cache_index;
     bool spilled;
+    std::string kept_name;
 };
 
 } // namespace
@@ -536,6 +665,8 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
                            : std::move(spill_dir_);
+    static std::once_flag trimmed;
+    std::call_once(trimmed, [&] { TrimSpillDir(cache->spill_dir, true); });
     if (file == nullptr) {
         return;
     }
@@ -889,7 +1020,8 @@ VirtualFile NupContainer::OpenFileAs(std::size_t file_index, const std::string& 
             static_cast<std::size_t>(node.extent_offset), name);
     }
     return std::make_shared<NupVfsFile>(file, node.extent_offset, node.extent_size, node.size,
-                                        name, cache, file_index);
+                                        name, cache, file_index,
+                                        KeptDecodedName(node.sha256, node.size));
 }
 
 std::optional<bool> NupContainer::HasZstdMagic(std::size_t file_index) const {

@@ -141,6 +141,27 @@ TEST_CASE("A native access built from its own candidates is routed among them al
     CHECK(std::ranges::count(selections, 2) == 2);
 }
 
+TEST_CASE("Selecting the buffer routes every access among all bound buffers",
+          "[shader][global_memory_routes]") {
+    Fixture fixture;
+    REQUIRE(fixture.program.global_memory_routes.size() == 1);
+    Profile profile{};
+    profile.supported_spirv = 0x00010300;
+    profile.support_int64 = true;
+    profile.support_descriptor_aliasing = true;
+    profile.unified_descriptor_binding = true;
+    profile.min_ssbo_alignment = 16;
+    const size_t routed{
+        SelectionsPerFunction(Backend::SPIRV::EmitSPIRV(profile, fixture.program)).size()};
+    profile.select_global_memory_buffer = true;
+    const auto selections{
+        SelectionsPerFunction(Backend::SPIRV::EmitSPIRV(profile, fixture.program))};
+    // The 32, 64 and 128-bit load and store through every buffer, and the entry point: the routed
+    // load and store add none
+    CHECK(selections.size() == 7);
+    CHECK(routed == 9);
+}
+
 TEST_CASE("A route through a pointer array keeps the bound slots past those searched",
           "[shader][global_memory_routes]") {
     ObjectPool<IR::Inst> pool;

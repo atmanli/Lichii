@@ -1129,6 +1129,9 @@ struct Values {
     /// A title that reads GPU-written memory on the CPU needs reactive flushing whatever the
     /// setting says. Set per boot by the game overrides; the settings dialog never touches it.
     bool force_reactive_flushing{};
+    /// Per boot, from the game overrides: the tensor-core passes of an NVN2 DLSS evaluation are
+    /// skipped and its output upscaled with FSR 3.1 from the evaluation's inputs.
+    bool nx2_dlss_to_fsr{};
 
 };
 

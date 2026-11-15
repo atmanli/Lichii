@@ -147,7 +147,11 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
     const auto queued = split.QueuedSemaphoreWriteAt(*device);
     // A fenced release the back ran whose fence has yet to run: memory decides, as once it landed.
     const bool ran = queued && split.Ran(queued->position);
-    const u32 word = !queued || ran ? dma_pusher.memory_manager.Read<u32>(acquire.address) : 0;
+    const bool reads = !queued || ran;
+    // As ReadSemaphoreWord (without its flush, which the guard above made unnecessary): GPU
+    // acquires see a word's mirror shadow while guest memory still holds what it was set over.
+    const u32 guest = reads ? dma_pusher.memory_manager.Read<u32>(acquire.address) : 0;
+    const u32 word = reads ? Nx2MirrorShadow::Get().Read(*device, guest).value_or(guest) : 0;
     using EarlyCheck = Puller::PendingAcquire::EarlyCheck;
     std::optional<Puller::PendingAcquire::QueuedRelease> queued_release;
     if (queued) {

@@ -201,7 +201,8 @@ public:
           body{std::move(body_)} {
         nca_size = HeaderSize;
         for (const auto& s : sections)
-            nca_size = std::max<u64>(nca_size, static_cast<u64>(s.offset + s.size));
+            nca_size =
+                std::max<u64>(nca_size, static_cast<u64>(s.offset) + static_cast<u64>(s.size));
         ciphers.reserve(sections.size());
         for (const auto& s : sections)
             ciphers.push_back(s.Ctr() ? std::make_unique<AESCipher<Key128>>(s.key, Mode::CTR)
@@ -229,7 +230,8 @@ public:
         for (std::size_t i = 0; i < sections.size() && pos < end; ++i) {
             const auto& s = sections[i];
             const u64 begin = std::max<u64>(static_cast<u64>(s.offset), HeaderSize);
-            const u64 stop = std::max<u64>(static_cast<u64>(s.offset + s.size), begin);
+            const u64 stop =
+                std::max<u64>(static_cast<u64>(s.offset) + static_cast<u64>(s.size), begin);
             if (stop <= pos) continue;
             if (pos < begin) {
                 const u64 g = std::min(end, begin);
@@ -334,6 +336,13 @@ std::optional<u64> SolidSize(const std::vector<Section>& sections) {
         end = section_end;
     }
     return end > HeaderSize ? std::optional{end} : std::nullopt;
+}
+
+// An NCZBLOCK stream has the same section table as a solid one, so it gets the same checks, and
+// its sections must end within the NCA the blocks decompress to.
+bool BlockSectionsValid(const std::vector<Section>& sections, const BlockHeader& block) {
+    const auto end = SolidSize(sections);
+    return end && *end - HeaderSize <= block.decompressed_size;
 }
 
 bool SupportedSolidFrame(const FileSys::VirtualFile& source, u64 offset, u64 nca_size) {
@@ -545,8 +554,9 @@ private:
         }
         while (frontier < needed) {
             while (section_index < sections.size() &&
-                   static_cast<u64>(sections[section_index].offset +
-                                    sections[section_index].size) <= frontier) {
+                   static_cast<u64>(sections[section_index].offset) +
+                           static_cast<u64>(sections[section_index].size) <=
+                       frontier) {
                 ++section_index;
             }
             if (section_index == sections.size())
@@ -624,6 +634,12 @@ FileSys::VirtualFile OpenNcz(const FileSys::VirtualFile& f, std::string_view nam
     auto& [sections, block] = *parsed;
 
     if (block) {
+        // Without these checks the section offsets and sizes, signed values from the file, gave
+        // the file a size unrelated to the input.
+        if (!BlockSectionsValid(sections, *block)) {
+            LOG_ERROR(Crypto, "Invalid NCZBLOCK section layout");
+            return nullptr;
+        }
         auto hdr = f->ReadBytes(HeaderSize, 0);
         if (hdr.size() != HeaderSize) return nullptr;
         std::unique_ptr<BlockReader> body;
@@ -671,7 +687,7 @@ bool IsSupportedNCZ(const FileSys::VirtualFile& f) {
     if (!parsed)
         return false;
     if (parsed->second)
-        return true;
+        return BlockSectionsValid(parsed->first, *parsed->second);
     const auto size = SolidSize(parsed->first);
     return size && SupportedSolidFrame(f, payload, *size);
 }

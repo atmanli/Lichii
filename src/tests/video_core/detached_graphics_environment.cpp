@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -183,4 +184,81 @@ TEST_CASE("Detached GraphicsEnvironment rejects oversized constant buffer and ex
     fixture.maxwell3d->regs.tex_header.limit = 0x40000;
     auto env_big_pool = fixture.MakeVertexEnvironment();
     CHECK_FALSE(env_big_pool.DetachFromLiveState());
+}
+
+TEST_CASE("Detached storage classification never discovers keys through live mappings",
+          "[shader_environment][async_graphics]") {
+    DetachedGraphicsFixture fixture;
+    auto& cbuf = fixture.maxwell3d->state.shader_stages[0].const_buffers[0];
+    cbuf.address = DetachedGraphicsFixture::CbufBase;
+    cbuf.size = 64;
+    cbuf.enabled = true;
+    const u64 holder = DetachedGraphicsFixture::CbufBase + 32;
+    const u64 target = DetachedGraphicsFixture::ProgramBase;
+    std::memcpy(fixture.bytes + DetachedGraphicsFixture::CbufOffset, &holder, sizeof(holder));
+    std::memcpy(fixture.bytes + DetachedGraphicsFixture::CbufOffset + 32, &target, sizeof(target));
+
+    auto env = fixture.MakeVertexEnvironment();
+    REQUIRE(env.IsCbufStorageBufferPointer(0, 0));
+    REQUIRE(env.IsCbufIndirectStorageBufferPointer(0, 0, 0));
+    REQUIRE_FALSE(env.IsCbufStorageBufferPointer(0, 16));
+    REQUIRE_FALSE(env.IsCbufIndirectStorageBufferPointer(0, 16, 0));
+    REQUIRE(env.DetachFromLiveState());
+    fixture.memory->Unmap(DetachedGraphicsFixture::ProgramBase,
+                          DetachedGraphicsFixture::BackingSize);
+
+    // Previously captured answers survive mapping removal and holder mutations.
+    std::memset(fixture.bytes + DetachedGraphicsFixture::CbufOffset, 0, 64);
+    std::memcpy(fixture.bytes + DetachedGraphicsFixture::CbufOffset + 16, &holder, sizeof(holder));
+    CHECK(env.IsCbufStorageBufferPointer(0, 0));
+    CHECK(env.IsCbufIndirectStorageBufferPointer(0, 0, 0));
+    CHECK_FALSE(env.IsCbufStorageBufferPointer(0, 16));
+    CHECK_FALSE(env.IsCbufIndirectStorageBufferPointer(0, 16, 0));
+    CHECK_THROWS_AS(env.IsCbufStorageBufferPointer(0, 8),
+                    VideoCommon::DetachedShaderStateRequired);
+    // Even a cached direct holder does not authorize an uncaptured indirect read.
+    CHECK_THROWS_AS(env.IsCbufIndirectStorageBufferPointer(0, 0, 8),
+                    VideoCommon::DetachedShaderStateRequired);
+}
+
+TEST_CASE("Detached instruction reads stay inside the captured program",
+          "[shader_environment][async_graphics]") {
+    DetachedGraphicsFixture fixture;
+    auto env = fixture.MakeVertexEnvironment();
+    env.SetCachedSize(0x100);
+    const u64 captured = env.ReadInstruction(sizeof(Shader::ProgramHeader) + sizeof(u64));
+    REQUIRE(captured == 0xe30000000007000fULL);
+    REQUIRE(env.DetachFromLiveState());
+    fixture.memory->Unmap(DetachedGraphicsFixture::ProgramBase,
+                          DetachedGraphicsFixture::BackingSize);
+    CHECK(env.ReadInstruction(sizeof(Shader::ProgramHeader) + sizeof(u64)) == captured);
+    CHECK_THROWS_AS(env.ReadInstruction(0x1000), VideoCommon::DetachedShaderStateRequired);
+}
+
+TEST_CASE("Detached snapshots can be released before queued serialization",
+          "[shader_environment][async_graphics]") {
+    DetachedGraphicsFixture fixture;
+    auto& cbuf = fixture.maxwell3d->state.shader_stages[0].const_buffers[0];
+    cbuf.address = DetachedGraphicsFixture::CbufBase;
+    cbuf.size = 64;
+    cbuf.enabled = true;
+    constexpr u32 Value = 0x12345678;
+    std::memcpy(fixture.bytes + DetachedGraphicsFixture::CbufOffset, &Value, sizeof(Value));
+    auto env = fixture.MakeVertexEnvironment();
+    env.SetCachedSize(0x100);
+    REQUIRE(env.DetachFromLiveState());
+    REQUIRE(env.ReadCbufValue(0, 0) == Value);
+    REQUIRE(env.ReadTextureType(0) == Shader::TextureType::Color2D);
+    std::ostringstream before;
+    env.Serialize(before, 0);
+
+    env.ReleaseDetachedSnapshots();
+    fixture.memory->Unmap(DetachedGraphicsFixture::ProgramBase,
+                          DetachedGraphicsFixture::BackingSize);
+    std::ostringstream after;
+    env.Serialize(after, 0);
+    CHECK(before.str() == after.str());
+    CHECK(env.ReadCbufValue(0, 0) == Value);
+    CHECK_THROWS_AS(env.ReadCbufValue(0, 4), VideoCommon::DetachedShaderStateRequired);
+    CHECK_THROWS_AS(env.ReadTextureType(0), VideoCommon::DetachedShaderStateRequired);
 }

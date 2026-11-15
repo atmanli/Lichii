@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -15,8 +16,8 @@
 #include <span>
 #include <type_traits>
 #include <utility>
-#include "common/container/unordered_map.h"
 #include <vector>
+#include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
@@ -36,6 +37,13 @@ struct ProgramRecord;
 } // namespace VideoCommon::ShaderCacheV2
 
 namespace VideoCommon {
+
+// Detached translation must retry on the GPU thread when a required input was not captured.
+struct DetachedShaderStateRequired final : std::exception {
+    const char* what() const noexcept override {
+        return "Detached shader requires uncaptured guest state";
+    }
+};
 
 class GenericEnvironment : public Shader::Environment {
 public:
@@ -169,6 +177,7 @@ protected:
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
+    bool detached_reads_only{};
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
 
     u32 local_memory_size{};
@@ -222,6 +231,9 @@ public:
     /// translation is required.
     [[nodiscard]] bool DetachFromLiveState(
         std::shared_ptr<const std::vector<u8>> tex_pool_snapshot = {});
+
+    /// After translation, serialization needs only recorded answers, not the input snapshots.
+    void ReleaseDetachedSnapshots();
 
 private:
     struct DetachedConstBuffer {

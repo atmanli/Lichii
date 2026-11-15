@@ -155,6 +155,9 @@ private:
         std::unique_ptr<GraphicsPipeline> pipeline;
         std::chrono::microseconds gpu_setup_us{0};
         std::chrono::microseconds stage_translate_worker_us{0};
+        std::chrono::steady_clock::duration translate_wait{};
+        VideoCommon::EvictedPointerSlots::Slots keep_pointers;
+        bool requires_synchronous_retry{false};
         bool evicted{false};
     };
 
@@ -334,6 +337,7 @@ private:
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
     std::unordered_set<u64> evicted_hashes;   ///< Key hashes of evicted pipelines not created again
+    std::unordered_set<u64> synchronous_runtime_retries;
     VideoCommon::EvictedPointerSlots evicted_pointer_slots;
     /// The SPIR-V and stage infos of evicted pipelines, which build them again when used again
     VideoCommon::BoundedStore<GraphicsPipelineCacheKey, KeptGraphicsStages> kept_stages{0};

@@ -243,6 +243,9 @@ u64 GenericEnvironment::ReadInstruction(u32 address) {
     if (native_source_size) {
         throw Shader::RuntimeError("Lowered native instruction address out of range: {:#x}", address);
     }
+    if (detached_reads_only) {
+        throw DetachedShaderStateRequired{};
+    }
     has_unbound_instructions = true;
     return gpu_memory->Read<u64>(program_base + address);
 }
@@ -263,6 +266,9 @@ bool GenericEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
     if (const auto it = storage_pointer_types.find(key); it != storage_pointer_types.end()) {
         return it->second != 0;
     }
+    if (detached_reads_only) {
+        throw DetachedShaderStateRequired{};
+    }
     const u64 address = u64{ReadCbufValue(index, offset)} |
                         (u64{ReadCbufValue(index, offset + 4)} << 32);
     const bool mapped = address != 0 && gpu_memory->IsWithinGPUAddressRange(address) &&
@@ -275,6 +281,9 @@ bool GenericEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offse
     const u64 key = MakeIndirectCbufKey(index, offset, indirect);
     if (const auto it = storage_pointer_types.find(key); it != storage_pointer_types.end()) {
         return it->second != 0;
+    }
+    if (detached_reads_only) {
+        throw DetachedShaderStateRequired{};
     }
     bool mapped = false;
     if (IsCbufStorageBufferPointer(index, offset)) {
@@ -473,6 +482,9 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
 
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
+    if (detached_reads_only && !detached_tex_pool) {
+        throw DetachedShaderStateRequired{};
+    }
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const bool uses_native_tiling =
         detached_tex_pool ? detached_uses_native_tiling : gpu_memory->UsesNativeTiling();
@@ -1080,8 +1092,14 @@ bool GraphicsEnvironment::DetachFromLiveState(
         }
     }
     is_detached = true;
+    detached_reads_only = true;
     maxwell3d = nullptr;
     return true;
+}
+
+void GraphicsEnvironment::ReleaseDetachedSnapshots() {
+    detached_tex_pool.reset();
+    std::vector<u8>{}.swap(detached_cbuf_data);
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -1096,6 +1114,9 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
         if (cbuf_offset < cbuf.size) {
             const size_t available =
                 (std::min)(sizeof(u32), static_cast<size_t>(cbuf.size - cbuf_offset));
+            if (cbuf.offset + cbuf_offset + available > detached_cbuf_data.size()) {
+                throw DetachedShaderStateRequired{};
+            }
             std::memcpy(&value, detached_cbuf_data.data() + cbuf.offset + cbuf_offset, available);
         }
         cbuf_values.emplace(key, value);

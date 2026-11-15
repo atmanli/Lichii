@@ -2324,10 +2324,19 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         return bind_pipeline(pipeline);
     }
 
+    bool synchronous_retry = synchronous_runtime_retries.erase(graphics_key.Hash()) != 0;
     if (const auto async_it = async_runtime_builds.find(graphics_key);
         async_it != async_runtime_builds.end()) {
-        if (async_it->second->activity && async_it->second->activity->IsInvalidated()) {
+        const auto wait_for_translation = [&] {
+            const auto begin = std::chrono::steady_clock::now();
             shader_jobs->RunOrWait(async_it->second->job);
+            async_it->second->translate_wait += std::chrono::steady_clock::now() - begin;
+        };
+        if (async_it->second->activity && async_it->second->activity->IsInvalidated()) {
+            wait_for_translation();
+            synchronous_retry |= async_it->second->requires_synchronous_retry;
+            HarvestAsyncRuntimeBuild(*async_it->second);
+            synchronous_runtime_retries.erase(graphics_key.Hash());
             async_runtime_builds.erase(async_it);
         } else {
             if (!async_it->second->job.Ready()) {
@@ -2335,12 +2344,16 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
                     RecordSkippedPendingDraw();
                     return nullptr;
                 }
-                shader_jobs->RunOrWait(async_it->second->job);
+                wait_for_translation();
             }
             auto entry = std::move(async_it->second);
             async_runtime_builds.erase(async_it);
-            if (!entry->activity || !entry->activity->IsInvalidated()) {
-                return bind_pipeline(HarvestAsyncRuntimeBuild(*entry));
+            synchronous_retry = entry->requires_synchronous_retry;
+            const bool invalidated = entry->activity && entry->activity->IsInvalidated();
+            GraphicsPipeline* const pipeline = HarvestAsyncRuntimeBuild(*entry);
+            synchronous_runtime_retries.erase(graphics_key.Hash());
+            if (!invalidated && !synchronous_retry) {
+                return bind_pipeline(pipeline);
             }
         }
     }
@@ -2368,7 +2381,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
             built = RebuildGraphicsPipeline(std::move(*kept));
             ReportRuntimePipeline(RuntimeBuild::Kept, std::chrono::steady_clock::now() - begin);
             ++rebuilt_from_kept;
-        } else if (CanDiscardCurrentDraw() &&
+        } else if (!synchronous_retry && CanDiscardCurrentDraw() &&
                    StartAsyncGraphicsPipeline(keep ? &*keep : nullptr, evicted)) {
             translated_again += evicted ? 1 : 0;
             RecordSkippedPendingDraw();
@@ -3361,7 +3374,10 @@ void PipelineCache::FinalizeGraphicsSerialization(const GraphicsPipelineCacheKey
 
 bool PipelineCache::StartAsyncGraphicsPipeline(
     const VideoCommon::EvictedPointerSlots::Slots* keep_pointers, bool evicted) {
-    if (!shader_jobs) {
+    // Bound queued snapshots as well as running jobs, before allocating environments or pools.
+    // Each entry has at most one capped texture pool and six bounded sets of constant buffers.
+    constexpr size_t MaxPendingBuilds = 8;
+    if (!shader_jobs || async_runtime_builds.size() >= MaxPendingBuilds) {
         return false;
     }
     const auto setup_begin = std::chrono::steady_clock::now();
@@ -3404,6 +3420,9 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
     entry->key = graphics_key;
     entry->environments = std::move(environments);
     entry->evicted = evicted;
+    if (keep_pointers) {
+        entry->keep_pointers = *keep_pointers;
+    }
     entry->activity = RegisterAsyncTranslation(std::move(tracked_ranges), unbounded_reads);
     struct AsyncCpuGuard {
         explicit AsyncCpuGuard(std::shared_ptr<AsyncTranslationActivity> activity_)
@@ -3431,14 +3450,22 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
             const auto translate_begin = std::chrono::steady_clock::now();
             std::shared_ptr<ShaderPools> emit_pools = TakeSparePools();
             ShaderPools& pools = *emit_pools;
-            if (use_emit_pools) {
-                raw_entry->pipeline =
-                    CreateGraphicsPipeline(pools, raw_entry->key, raw_entry->environments->Span(),
-                                           nullptr, true, std::move(emit_pools), nullptr);
-            } else {
-                raw_entry->pipeline =
-                    CreateGraphicsPipeline(pools, raw_entry->key, raw_entry->environments->Span(),
-                                           nullptr, true, nullptr, nullptr);
+            try {
+                if (use_emit_pools) {
+                    raw_entry->pipeline = CreateGraphicsPipeline(
+                        pools, raw_entry->key, raw_entry->environments->Span(), nullptr, true,
+                        std::move(emit_pools), nullptr);
+                } else {
+                    raw_entry->pipeline = CreateGraphicsPipeline(pools, raw_entry->key,
+                                                                 raw_entry->environments->Span(),
+                                                                 nullptr, true, nullptr, nullptr);
+                }
+            } catch (const VideoCommon::DetachedShaderStateRequired&) {
+                // Discard this attempt. The next draw requesting the key translates on the
+                // GPU thread, where its storage classifications and guest mappings are ordered.
+                raw_entry->requires_synchronous_retry = true;
+            }
+            if (emit_pools) {
                 ReturnPools(std::move(emit_pools));
             }
             raw_entry->stage_translate_worker_us =
@@ -3456,22 +3483,37 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
 }
 
 GraphicsPipeline* PipelineCache::HarvestAsyncRuntimeBuild(AsyncRuntimeBuild& entry) {
-    if (entry.activity && entry.activity->IsInvalidated()) {
-        return nullptr;
-    }
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     std::string shaders = FormatGraphicsPipelineShaders(entry.key);
-    shaders += fmt::format(" translate_wait_ms=0.0 stage_translate_ms={:.1f} async=1",
-                           ms(entry.stage_translate_worker_us));
+    shaders += fmt::format(" translate_wait_ms={:.1f} stage_translate_ms={:.1f} async=1",
+                           ms(entry.translate_wait), ms(entry.stage_translate_worker_us));
     const RuntimeBuild kind = entry.evicted ? RuntimeBuild::Evicted
                               : disk_pipelines.contains(entry.key.Hash()) ? RuntimeBuild::Recorded
                                                                           : RuntimeBuild::New;
     ReportRuntimePipeline(
-        kind, std::chrono::duration_cast<std::chrono::steady_clock::duration>(entry.gpu_setup_us),
-        shaders, std::chrono::nanoseconds{0}, entry.stage_translate_worker_us);
+        kind, entry.gpu_setup_us + entry.translate_wait, shaders,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(entry.translate_wait),
+        entry.stage_translate_worker_us);
+    if (entry.requires_synchronous_retry || (entry.activity && entry.activity->IsInvalidated())) {
+        evicted_pointer_slots.Remember(entry.key.Hash(), entry.keep_pointers);
+        if (entry.evicted) {
+            evicted_hashes.insert(entry.key.Hash());
+        }
+        if (entry.requires_synchronous_retry) {
+            constexpr size_t MaxRetryKeys = 8192;
+            if (synchronous_runtime_retries.size() >= MaxRetryKeys) {
+                synchronous_runtime_retries.erase(synchronous_runtime_retries.begin());
+            }
+            synchronous_runtime_retries.insert(entry.key.Hash());
+        }
+        return nullptr;
+    }
     GraphicsPipeline* const built_ptr = entry.pipeline.get();
     graphics_cache.insert_or_assign(entry.key, std::move(entry.pipeline));
     if (entry.environments) {
+        for (auto& env : entry.environments->envs) {
+            env.ReleaseDetachedSnapshots();
+        }
         FinalizeGraphicsSerialization(entry.key, built_ptr, *entry.environments);
     }
     return built_ptr;

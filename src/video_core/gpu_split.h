@@ -89,7 +89,7 @@ struct AcquireStats {
     std::atomic<u64> by_queued{}; ///< Of passed: met by a release the back had not run yet
     std::atomic<u64> latched{};   ///< Polls resumed by a release the back ran (no drain)
     std::atomic<u64> drained{};   ///< Acquires and polls that drained the split
-    std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire
+    std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire not met in memory
     std::atomic<u64> drain_settings{};  ///< ...the split or the accuracy settings ask for it
     std::atomic<u64> drain_word{};      ///< ...the word is unmapped or on a GPU-written page
     std::atomic<u64> drain_queued{};    ///< ...a queued release to it is unknown or doesn't meet it

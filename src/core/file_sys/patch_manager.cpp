@@ -924,6 +924,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     const auto disabled = GetDisabledAddons();
     std::vector<std::string_view> replaced;
+    bool max_resolution_applied = false;
     for (const auto& patch : BUILTIN_PATCHES) {
         if (patch.title_id != title_id || patch.module != name) {
             continue;
@@ -940,6 +941,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.dlss_quality) {
 #ifdef EGLANTINE_STREAMLINE
             const bool wanted =
+                max_resolution_applied &&
                 Settings::values.ocarina_render_scale.GetValue() ==
                     Settings::OcarinaRenderScale::Automatic &&
                 Settings::OcarinaDlssRenderScale() == patch.dlss_quality &&
@@ -953,7 +955,8 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             }
         }
         if (patch.ocarina_render_scale &&
-            (Settings::values.ocarina_render_scale.GetValue() != *patch.ocarina_render_scale ||
+            (!max_resolution_applied ||
+             Settings::values.ocarina_render_scale.GetValue() != *patch.ocarina_render_scale ||
              std::find(disabled.cbegin(), disabled.cend(), MAX_RESOLUTION_NAME) !=
                  disabled.cend())) {
             continue;
@@ -1037,6 +1040,9 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         for (const auto& record : patch.records) {
             std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
                         record.bytes.data(), record.bytes.size());
+        }
+        if (patch.name == MAX_RESOLUTION_NAME) {
+            max_resolution_applied = true;
         }
         LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} records) to {}", patch.name,
                  patch.records.size(), name);

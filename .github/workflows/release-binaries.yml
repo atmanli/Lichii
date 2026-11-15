@@ -344,7 +344,9 @@ jobs:
           if command -v ccache > /dev/null; then ccache --zero-stats; elif command -v sccache > /dev/null; then sccache --zero-stats; fi
           targets="lichii lichii-cmd"
           if [[ "${{ matrix.platform }}" == windows* ]]; then targets="$targets lichii-updater"; fi
-          cmake --build build/release --target $targets --parallel
+          # -k 0: keep compiling after the first error so one run surfaces ALL compile errors
+          # (makes finding every stale PR a single pass instead of one CI run per error).
+          cmake --build build/release --target $targets --parallel -- -k 0
           if command -v ccache > /dev/null; then ccache --show-stats; elif command -v sccache > /dev/null; then sccache --show-stats; fi
 
       - name: Stop sccache on Windows

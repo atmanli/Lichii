@@ -217,6 +217,7 @@ add_executable(tests
     core/internal_network/network.cpp
     core/numeric_name_info.cpp
     core/numeric_name_info_ipc.cpp
+    core/cmif_out_buffer.cpp
     video_core/memory_tracker.cpp
     video_core/invalidation_accumulator.cpp
     video_core/memory_manager_runs.cpp

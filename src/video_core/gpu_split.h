@@ -56,6 +56,7 @@ enum class DrainSite : u32 {
     RingFull,       ///< The ring is full: the front waits for the back to make room
     BackRegister,   ///< A register a macro the back ran may have written (Maxwell3D)
     BackCode,       ///< The macro code changes under the macros the back has yet to run
+    SafeRead,       ///< Safe command list reads: images and reports on the list's pages
     Count,
 };
 
@@ -131,7 +132,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "other",           "fetch drain",   "acquire",    "semaphore flush", "fence release",
     "list writers",    "list sync",     "list flush", "macro dma read",  "macro dma writes",
     "macro dma flush", "gp sync fence", "map",        "front start",     "front verify",
-    "ring full",       "back register", "back code",
+    "ring full",       "back register", "back code",     "safe read",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -200,7 +201,7 @@ public:
     }
 
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
-    /// commands read without cache flushes). Called by the front between commands.
+    /// Vulkan). Called by the front between commands.
     void MaybeStart(Core::System& system);
     void Stop();
 
@@ -690,6 +691,8 @@ private:
     bool active{};
     u32 starts{};
     bool front_macros{};
+    /// The GPU and DMA accuracy settings the front last decided under (MaybeStart).
+    u8 started_accuracy{};
     std::unique_ptr<u64[]> ring;
 
     // Front side, in its own 128-byte block (x86 prefetchers pull 64-byte lines in pairs): the

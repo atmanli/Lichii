@@ -156,22 +156,23 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (!wanted || !Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
         return;
     }
-    // The front reads command lists straight from guest memory; a read that flushes the caches
-    // first (safe DMA, accurate GPU) would touch back-owned state. The settings can change
-    // mid-game: hand the engines back to the front (and start again when they allow it).
-    const bool safe_reads = Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh()
-                                                          : Settings::IsDMALevelSafe();
-    const bool allowed = !safe_reads && !Settings::IsGPULevelHigh() &&
-                         Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
-    if (active && !allowed) {
-        Drain();
-        Stop();
-        LOG_INFO(HW_GPU, "GPU thread split: stopped, the accuracy settings need the caches on the front");
+    // Accurate GPU and safe DMA run on the split too: the back writes out what the caches hold
+    // of a command list before the front reads it (DmaPusher::FlushCachedCommands), and acquires
+    // drain while releases wait for fences (ReleasesLandAtOnce). The settings can change mid-game:
+    // the work sent under the old ones runs before the front decides anything under the new.
+    const u8 accuracy = static_cast<u8>(Settings::values.current_gpu_accuracy) |
+                        static_cast<u8>(static_cast<u8>(Settings::values.dma_accuracy.GetValue()) << 4);
+    if (active) {
+        if (accuracy != started_accuracy) {
+            Drain();
+            started_accuracy = accuracy;
+        }
         return;
     }
-    if (active || !allowed) {
+    if (Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Vulkan) {
         return;
     }
+    started_accuracy = accuracy;
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
     const char* const verify = std::getenv("EDEN_NX2_ACQUIRE_VERIFY");

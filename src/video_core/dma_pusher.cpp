@@ -566,24 +566,32 @@ bool DmaPusher::Step() {
             }
         }
         // A resumed entry is read again: the words after the acquire may be new by now.
-        // A safe read flushes the caches, which belong to the split's back thread while it runs
-        // (the split only starts with unsafe reads; the settings can change mid-game).
-        const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
-                              (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
+        // A safe read flushes the caches, which belong to the split's back thread while it runs:
+        // there the GPU-written list tracking below and FlushCachedCommands take its place.
+        const bool safe_reads =
+            Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe();
+        const bool use_safe = !VideoCommon::GpuSplit::Get().Active() && safe_reads;
         // Pages no GPU work has written yet may still get the list from compute or copy work
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
-            VideoCommon::GpuSplit::Get().WaitForSyncedWriters();
+        // Safe reads wait for all of the work before that wait, draws included: a queued draw may
+        // write the list's page for the first time.
+        if (auto& split = VideoCommon::GpuSplit::Get();
+            split.Active() && (safe_reads || !gpu_written)) {
+            if (safe_reads) {
+                split.WaitForSync();
+            } else {
+                split.WaitForSyncedWriters();
+            }
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
-        const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
-                               command_list.snapshot_suspensions ==
-                                   suspensions.load(std::memory_order_acquire) &&
-                               VideoCommon::CanUseSubmittedCommands(
+        bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
+                         command_list.snapshot_suspensions ==
+                             suspensions.load(std::memory_order_acquire) &&
+                         VideoCommon::CanUseSubmittedCommands(
             command_resume_offset != 0,
             dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
                 !std::ranges::binary_search(command_list.deferred_entries,
@@ -591,6 +599,10 @@ bool DmaPusher::Step() {
             gpu_written,
             use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
                                                      header.size * sizeof(u32)));
+        if (safe_reads && VideoCommon::GpuSplit::Get().Active() &&
+            FlushCachedCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32), !submitted)) {
+            submitted = false;
+        }
         // An entry parsed from memory instead of its submit-time copy is the way a command
         // ring the game already refilled gets read as this frame's commands (garbage methods,
         // unbound subchannels, render targets of absurd size). EDEN_NX2_LIVE_READ_CHECK counts
@@ -1243,6 +1255,42 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
         chunk = chunk_end;
     }
     return true;
+}
+
+bool DmaPusher::FlushCachedCommands(GPUVAddr address, size_t size, bool live) {
+    if (rasterizer == nullptr) {
+        return false;
+    }
+    // The back registers images and reports as it runs: look once the work the GPU fetches this
+    // list after (everything before the last host-level wait) has run.
+    auto& split = VideoCommon::GpuSplit::Get();
+    split.WaitForSync();
+    bool cached = false;
+    for (GPUVAddr chunk = address; chunk < address + size && !cached;) {
+        const GPUVAddr chunk_end = (std::min)(address + size, (chunk & ~GPUVAddr{0xfff}) + 0x1000);
+        const auto device = memory_manager.GpuToCpuAddress(chunk);
+        cached = device && rasterizer->MayHoldImagesOrReports(*device, chunk_end - chunk);
+        chunk = chunk_end;
+    }
+    if (!cached) {
+        return false;
+    }
+    bool image_written = false;
+    split.Run(
+        [memory = &memory_manager, address, size, live, image_written = &image_written] {
+            using VideoCommon::CacheType;
+            *image_written = memory->IsMemoryDirty(address, size, CacheType::TextureCache);
+            if (*image_written || live) {
+                memory->FlushRegion(address, size, CacheType::TextureCache | CacheType::QueryCache);
+            }
+        },
+        VideoCommon::DrainSite::SafeRead);
+    static std::atomic<u64> flushes{};
+    if (const u64 count = flushes.fetch_add(1, std::memory_order_relaxed); (count & 1023) == 0) {
+        LOG_INFO(HW_GPU, "Safe command list reads on the split that waited for the back: {}",
+                 count + 1);
+    }
+    return image_written;
 }
 
 bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {

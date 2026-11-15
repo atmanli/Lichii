@@ -2728,6 +2728,10 @@ bool RasterizerVulkan::HoldsQueries(DAddr addr, u64 size) {
     return query_cache.HoldsQueries(addr, size);
 }
 
+bool RasterizerVulkan::MayHoldImagesOrReports(DAddr addr, u64 size) {
+    return texture_cache.page_filter.Any(addr, size) || query_cache.HoldsQueries(addr, size);
+}
+
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     // Guest cores ask this on reads of cached pages, and the back holds both caches' locks through
     // each draw. Pages no image was ever registered on, and Switch 2 pages the GPU never wrote,

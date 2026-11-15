@@ -3453,8 +3453,15 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
         std::chrono::steady_clock::now() - setup_begin);
     AsyncRuntimeBuild* const raw_entry = entry.get();
     const bool use_emit_pools = maxwell3d->GetNativeMacroEngine().native_turing;
+    u64 code_bytes{};
+    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+        if (entry->key.unique_hashes[index] != 0) {
+            code_bytes += entry->environments->envs[index].CachedSizeBytes();
+        }
+    }
     entry->job = shader_jobs->Submit({
         .priority = VideoCommon::ShaderJobPriority::Soon,
+        .cpu_bytes = TranslationBytes(code_bytes),
         .cpu = [this, raw_entry, use_emit_pools, cpu_guard = std::move(cpu_guard)](
                    VideoCommon::ShaderJobContext& ctx) -> VideoCommon::ShaderDriverStage {
             if (ctx.StopRequested() ||

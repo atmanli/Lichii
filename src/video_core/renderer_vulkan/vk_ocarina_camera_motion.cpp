@@ -112,6 +112,16 @@ constexpr std::array PUSH_CONSTANTS{
 };
 constexpr VkImageSubresourceRange MOTION_RANGE{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
+enum class OcarinaOutputColorEncoding : u32 {
+    SquaredRgb = 0,
+    LinearRgb = 1,
+};
+
+struct OcarinaCompositeParameters {
+    u32 enabled;
+    OcarinaOutputColorEncoding output_color_encoding;
+};
+
 struct ActorTransforms {
     std::array<f32, 16> current;
     std::array<f32, 16> previous;
@@ -519,7 +529,8 @@ class OcarinaCompositePass final : public ComputePass {
         return result;
     }();
     static constexpr DescriptorBankInfo bank{.textures = 3, .images = 1, .score = 4};
-    static constexpr std::array push{VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(u32)}};
+    static constexpr std::array push{
+        VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(OcarinaCompositeParameters)}};
 
 public:
     OcarinaCompositePass(const Device& device_, Scheduler& scheduler, DescriptorPool& pool)
@@ -528,8 +539,10 @@ public:
 
     void Record(Scheduler& scheduler, const void* descriptors, VkImage image, VkExtent2D extent,
                 const OcarinaUpscaler& upscaler, u64 frame,
+                OcarinaOutputColorEncoding output_color_encoding,
                 std::shared_ptr<std::atomic<bool>> execution_failed) {
         scheduler.Record([this, descriptors, image, extent, &upscaler, frame,
+                          output_color_encoding,
                           execution_failed = std::move(execution_failed)](vk::CommandBuffer cmd) {
             const auto output = ProbeBarrier(image, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -547,7 +560,8 @@ public:
             cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
             const u32 enabled = !upscaler.EvaluationFailed() &&
                 !(execution_failed && execution_failed->load(std::memory_order_acquire));
-            cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, enabled);
+            cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                              OcarinaCompositeParameters{enabled, output_color_encoding});
             cmd.Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
             const VkMemoryBarrier complete{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -689,6 +703,7 @@ struct OcarinaFrameSlot {
     vk::ImageView color_view;
     vk::Image xess_color;
     vk::ImageView xess_color_view;
+    OcarinaOutputColorEncoding output_color_encoding{OcarinaOutputColorEncoding::SquaredRgb};
     std::shared_ptr<std::atomic<bool>> xess_execution_failed =
         std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<ActorOverlay> overlay;
@@ -915,11 +930,15 @@ void OcarinaUpscaler::CompositeOutput(VkImageView native_composite, VkExtent2D o
     const auto frame_slot = std::ranges::find_if(state.slots, [frame](const auto& entry) {
         return entry && entry->frame == frame;
     });
+    const auto output_color_encoding = frame_slot == state.slots.end()
+        ? OcarinaOutputColorEncoding::SquaredRgb
+        : (*frame_slot)->output_color_encoding;
     const auto execution_failed = frame_slot == state.slots.end()
         ? std::shared_ptr<std::atomic<bool>>{}
         : (*frame_slot)->xess_execution_failed;
     state.composite_pass->Record(state.scheduler, state.queue.UpdateData(), *state.composite,
-                                 output_extent, *this, frame, execution_failed);
+                                 output_extent, *this, frame, output_color_encoding,
+                                 execution_failed);
     state.scheduler.InvalidateState();
     state.composited_frame = frame;
 }
@@ -1005,7 +1024,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     }
     auto& resources = **slot;
     resources.frame = frame;
-    resources.xess_execution_failed->store(false, std::memory_order_relaxed);
+    resources.xess_execution_failed = std::make_shared<std::atomic<bool>>(false);
     const VkSampler sampler = state.PointSampler();
     const ActorTransforms actor_transforms{
         current, previous, mesh.current_origin, mesh.previous_origin,
@@ -1180,6 +1199,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     }
     state.output_fsr4 = used_fsr4;
     state.output_xess = used_xess;
+    resources.output_color_encoding = used_xess ? OcarinaOutputColorEncoding::LinearRgb
+                                                 : OcarinaOutputColorEncoding::SquaredRgb;
     // A resize can submit the inputs before recording evaluation, so keep the later tick.
     resources.tick = state.scheduler.CurrentTick();
     if (target) {

@@ -995,19 +995,83 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
     const u64 local_size{sph.LocalMemorySize()};
     ASSERT(local_size <= (std::numeric_limits<u32>::max)());
     local_memory_size = static_cast<u32>(local_size) + sph.common3.shader_local_memory_crs_size;
+    viewport_transform_state = regs.viewport_scale_offset_enabled;
+    via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
+    tex_header_address = regs.tex_header.Address();
+    tex_header_limit = regs.tex_header.limit;
     is_proprietary_driver = maxwell3d->GetNativeMacroEngine().native_turing || texture_bound == 2;
     has_hle_engine_state =
         maxwell3d->engine_state == Tegra::Engines::Maxwell3D::EngineHint::OnHLEMacro;
 }
 
+void GraphicsEnvironment::DetachFromLiveState() {
+    if (is_detached || maxwell3d == nullptr) {
+        return;
+    }
+    const auto& regs{maxwell3d->regs};
+    viewport_transform_state = regs.viewport_scale_offset_enabled;
+    via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
+    tex_header_address = regs.tex_header.Address();
+    tex_header_limit = regs.tex_header.limit;
+    if (has_hle_engine_state) {
+        detached_replace_table = maxwell3d->replace_table;
+    }
+    const auto& stage_cbufs{maxwell3d->state.shader_stages[stage_index].const_buffers};
+    size_t total_inline_bytes = 0;
+    for (size_t index = 0; index < stage_cbufs.size(); ++index) {
+        const auto& src{stage_cbufs[index]};
+        auto& dst{detached_cbufs[index]};
+        dst.address = src.address;
+        dst.size = src.size;
+        dst.enabled = src.enabled;
+        dst.inline_offset = 0;
+        dst.inline_size = 0;
+        if (src.enabled && src.size > 0) {
+            dst.inline_size = (std::min)(src.size, DetachedCbufInlineBytes);
+            total_inline_bytes += dst.inline_size;
+        }
+    }
+    detached_cbuf_data.resize(total_inline_bytes);
+    size_t cursor = 0;
+    for (auto& dst : detached_cbufs) {
+        if (dst.inline_size == 0) {
+            continue;
+        }
+        dst.inline_offset = static_cast<u32>(cursor);
+        gpu_memory->ReadBlock(dst.address, detached_cbuf_data.data() + cursor, dst.inline_size);
+        cursor += dst.inline_size;
+    }
+    is_detached = true;
+    maxwell3d = nullptr;
+}
+
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
+    const u64 key{MakeCbufKey(cbuf_index, cbuf_offset)};
+    if (const auto it = cbuf_values.find(key); it != cbuf_values.end()) {
+        return it->second;
+    }
+    if (is_detached) {
+        const auto& cbuf{detached_cbufs[cbuf_index]};
+        ASSERT(cbuf.enabled);
+        u32 value{};
+        if (cbuf_offset < cbuf.size) {
+            if (cbuf.inline_size >= sizeof(u32) && cbuf_offset <= cbuf.inline_size - sizeof(u32)) {
+                std::memcpy(&value, detached_cbuf_data.data() + cbuf.inline_offset + cbuf_offset,
+                            sizeof(u32));
+            } else {
+                value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
+            }
+        }
+        cbuf_values.emplace(key, value);
+        return value;
+    }
     const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
     ASSERT(cbuf.enabled);
     u32 value{};
     if (cbuf_offset < cbuf.size) {
         value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
     }
-    cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
+    cbuf_values.emplace(key, value);
     return value;
 }
 
@@ -1017,8 +1081,9 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
         return std::nullopt;
     }
     const u64 key = (static_cast<u64>(bank) << 32) | static_cast<u64>(offset);
-    auto it = maxwell3d->replace_table.find(key);
-    if (it == maxwell3d->replace_table.end()) {
+    const auto& table{is_detached ? detached_replace_table : maxwell3d->replace_table};
+    auto it = table.find(key);
+    if (it == table.end()) {
         return std::nullopt;
     }
     const auto converted_value = [](Tegra::Engines::Maxwell3D::HLEReplacementAttributeType name) {
@@ -1038,20 +1103,26 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 }
 
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
-    const auto& regs{maxwell3d->regs};
-    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
-    auto entry =
-        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
+    if (!is_detached && maxwell3d != nullptr) {
+        const auto& regs{maxwell3d->regs};
+        via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
+        tex_header_address = regs.tex_header.Address();
+        tex_header_limit = regs.tex_header.limit;
+    }
+    auto entry = ReadTextureInfo(tex_header_address, tex_header_limit, via_header_index, handle);
     const Shader::TextureType result{ConvertTextureType(entry)};
     texture_types.emplace(handle, result);
     return result;
 }
 
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
-    const auto& regs{maxwell3d->regs};
-    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
-    auto entry =
-        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
+    if (!is_detached && maxwell3d != nullptr) {
+        const auto& regs{maxwell3d->regs};
+        via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
+        tex_header_address = regs.tex_header.Address();
+        tex_header_limit = regs.tex_header.limit;
+    }
+    auto entry = ReadTextureInfo(tex_header_address, tex_header_limit, via_header_index, handle);
     const Shader::TexturePixelFormat result(ConvertTexturePixelFormat(entry));
     texture_pixel_formats.emplace(handle, result);
     return result;
@@ -1063,8 +1134,9 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
-    const auto& regs{maxwell3d->regs};
-    viewport_transform_state = regs.viewport_scale_offset_enabled;
+    if (!is_detached && maxwell3d != nullptr) {
+        viewport_transform_state = maxwell3d->regs.viewport_scale_offset_enabled;
+    }
     return viewport_transform_state;
 }
 

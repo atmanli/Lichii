@@ -189,9 +189,32 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    /// Captures live Maxwell3D registers, replace table, and active constant buffer slices so
+    /// translation can run on a background worker while the GPU thread continues.
+    void DetachFromLiveState();
+
 private:
+    static constexpr u32 DetachedCbufInlineBytes = 4096;
+
+    struct DetachedConstBuffer {
+        GPUVAddr address = 0;
+        u32 size = 0;
+        u32 inline_offset = 0;
+        u32 inline_size = 0;
+        bool enabled = false;
+    };
+
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    bool via_header_index{};
+    GPUVAddr tex_header_address{};
+    u32 tex_header_limit{};
+    std::array<DetachedConstBuffer, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+        detached_cbufs{};
+    std::vector<u8> detached_cbuf_data;
+    ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType>
+        detached_replace_table;
+    bool is_detached{};
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

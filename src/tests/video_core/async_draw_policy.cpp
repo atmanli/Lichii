@@ -6,6 +6,63 @@
 
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 
+namespace {
+struct BudgetClock {
+    inline static std::chrono::steady_clock::time_point current{};
+    static auto now() {
+        return current;
+    }
+};
+} // namespace
+
+TEST_CASE("Translation and driver waits share the remaining native frame budget",
+          "[video_core][async_draw][native_pending]") {
+    using namespace std::chrono_literals;
+    BudgetClock::current = {};
+    s64 remaining = 8000;
+    s64 used = 0;
+    CHECK(Vulkan::WaitWithinNativeBudget<BudgetClock>(remaining, used, [&](auto timeout) {
+        CHECK(timeout == 8ms);
+        BudgetClock::current += 3ms;
+        return true;
+    }));
+    CHECK_FALSE(Vulkan::WaitWithinNativeBudget<BudgetClock>(remaining, used, [&](auto timeout) {
+        CHECK(timeout == 5ms);
+        BudgetClock::current += 6ms;
+        return false;
+    }));
+    CHECK(remaining == -1000);
+    CHECK(used == 9000);
+    bool called = false;
+    CHECK_FALSE(Vulkan::WaitWithinNativeBudget<BudgetClock>(remaining, used, [&](auto) {
+        called = true;
+        return true;
+    }));
+    CHECK_FALSE(called);
+    CHECK(Vulkan::DecideNativePending(Vulkan::NativePendingMode::Bounded, true, remaining) ==
+          Vulkan::NativeDrawAction::Skip);
+}
+
+TEST_CASE("A pending translation uses a renewed frame budget and rounds partial microseconds up",
+          "[video_core][async_draw][native_pending]") {
+    using namespace std::chrono_literals;
+    BudgetClock::current = {};
+    s64 remaining = 0;
+    s64 used = 100;
+    CHECK(Vulkan::DecideNativePending(Vulkan::NativePendingMode::Bounded, true, remaining) ==
+          Vulkan::NativeDrawAction::Skip);
+    remaining = 8000; // TickFrame renews the budget while the same translation remains pending.
+    CHECK(Vulkan::DecideNativePending(Vulkan::NativePendingMode::Bounded, true, remaining) ==
+          Vulkan::NativeDrawAction::WaitTimed);
+    CHECK_FALSE(Vulkan::WaitWithinNativeBudget<BudgetClock>(remaining, used, [&](auto timeout) {
+        CHECK(timeout == 8ms);
+        BudgetClock::current += 2500ns;
+        return false;
+    }));
+    CHECK(remaining == 7997);
+    CHECK(used == 103);
+}
+
 TEST_CASE("Native pending draws are never discarded", "[video_core][async_draw]") {
     constexpr std::array<u32, 6> counts{0, 1, 6, 7, 4096, std::numeric_limits<u32>::max()};
     for (const bool depth : {false, true}) {

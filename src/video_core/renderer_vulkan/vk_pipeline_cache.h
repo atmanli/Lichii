@@ -241,8 +241,9 @@ private:
     void QueueVulkanPipelineCacheFlush();
 
     /// Queues one write of the driver pipeline cache file on the serialization thread, with no
-    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
-    /// only pipelines built during play.
+    /// throttle, or writes it now where reading the cache during a build crashes. For the end of
+    /// a precache: its builds never reach the timed flush, which counts only pipelines built
+    /// during play.
     void QueueVulkanPipelineCacheSave();
 
     /// One build of the shader precache: a compute pipeline built and destroyed

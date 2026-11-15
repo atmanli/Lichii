@@ -188,3 +188,60 @@ TEST_CASE("A route through a pointer array keeps the bound slots past those sear
     CHECK(std::ranges::find(route, std::pair{1U, 0U}) == route.end());
 }
 
+TEST_CASE("A dynamic global store marks all its bound pointer-array destinations as written",
+          "[shader][global_memory_routes]") {
+    ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    IR::IREmitter ir{block};
+    const auto address = [&](const IR::U32& low, const IR::U32& high) {
+        return IR::U64{ir.PackUint2x32(ir.CompositeConstruct(low, high))};
+    };
+    const auto word = [&](u32 index, u32 offset) {
+        return ir.GetCbuf(ir.Imm32(index), ir.Imm32(offset));
+    };
+
+    // The dynamic store searches only 16 array slots, while a separate load binds slot 16.
+    // That last slot must be marked as written after the route is expanded.
+    const IR::U32 index{word(0, 0x300)};
+    const IR::U32 slot{ir.IAdd(ir.ShiftLeftLogical(index, ir.Imm32(3)), ir.Imm32(0x100))};
+    const IR::U32 high{ir.GetCbuf(ir.Imm32(0), ir.IAdd(slot, ir.Imm32(4)))};
+    const IR::U32 last_slot_value{ir.LoadGlobal32(address(word(0, 0x180), word(0, 0x184)))};
+    const IR::U32 unrelated_value{ir.LoadGlobal32(address(word(1, 0), word(1, 4)))};
+    ir.WriteGlobal32(address(ir.GetCbuf(ir.Imm32(0), slot), high),
+                     ir.IAdd(last_slot_value, unrelated_value));
+    const IR::Inst* const store{&block.Instructions().back()};
+
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
+                           {{}, IR::AbstractSyntaxNode::Type::Return}};
+    HostTranslateInfo host{};
+    host.min_ssbo_alignment = 16;
+    host.support_int64 = true;
+    NativeEnvironment env;
+    Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
+
+    const auto& descriptors{program.info.storage_buffers_descriptors};
+    const auto descriptor = [&](u32 index, u32 offset) {
+        return std::ranges::find_if(descriptors, [&](const auto& d) {
+            return d.cbuf_index == index && d.cbuf_offset == offset;
+        });
+    };
+    const auto last{descriptor(0, 0x180)};
+    REQUIRE(last != descriptors.end());
+    CHECK(last->is_written);
+    const auto unrelated{descriptor(1, 0)};
+    REQUIRE(unrelated != descriptors.end());
+    CHECK_FALSE(unrelated->is_written);
+
+    REQUIRE(store->GetOpcode() == IR::Opcode::WriteGlobal32);
+    REQUIRE(program.global_memory_route.contains(store));
+    const u32 route_index{program.global_memory_route.at(store)};
+    const auto& route{program.global_memory_routes.at(route_index)};
+    CHECK(std::ranges::find(route, static_cast<u32>(last - descriptors.begin())) != route.end());
+    CHECK(std::ranges::find(route, static_cast<u32>(unrelated - descriptors.begin())) ==
+          route.end());
+}

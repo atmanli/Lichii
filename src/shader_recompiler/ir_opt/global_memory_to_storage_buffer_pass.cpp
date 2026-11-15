@@ -2326,6 +2326,18 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                 }
             }
         }
+        // A dynamic store may reach a buffer bound by another instruction, even beyond
+        // the array slots discovered initially. Such destinations must be writable in
+        // the final descriptor metadata, not just present in the routing function.
+        if (IsGlobalMemoryWrite(*routed.inst)) {
+            for (const StorageBufferAddr& buffer : routed.buffers) {
+                const size_t binding{info.set.index_of(info.set.find(buffer))};
+                auto& descriptor{program.info.storage_buffers_descriptors[binding]};
+                descriptor.is_written = true;
+                // A global store routed at runtime has no bounded write extent.
+                descriptor.write_extent = {};
+            }
+        }
         if (routed.buffers.size() == info.set.size()) {
             continue;
         }

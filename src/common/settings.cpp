@@ -46,9 +46,11 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OcarinaRenderScale, false);
 SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
 SWITCHABLE(NvidiaDlssPreset, false);
+SWITCHABLE(XessQuality, false);
 SWITCHABLE(HdrMode, false);
 SWITCHABLE(HdrSwapchain, false);
 SWITCHABLE(AspectRatio, true);
@@ -110,17 +112,17 @@ std::optional<NvidiaDlssQuality> OcarinaDlssRenderScale() {
     return quality;
 }
 
-void SetAppliedOcarinaRenderScale(std::optional<NvidiaDlssQuality> quality) {
-    applied_ocarina_render_scale.store(quality ? static_cast<u32>(*quality) + 1 : 0,
+void SetAppliedOcarinaRenderScale(std::optional<OcarinaRenderScale> scale) {
+    applied_ocarina_render_scale.store(scale ? static_cast<u32>(*scale) + 1 : 0,
                                        std::memory_order_relaxed);
 }
 
-std::optional<NvidiaDlssQuality> AppliedOcarinaRenderScale() {
+std::optional<OcarinaRenderScale> AppliedOcarinaRenderScale() {
     const u32 value = applied_ocarina_render_scale.load(std::memory_order_relaxed);
     if (value == 0) {
         return std::nullopt;
     }
-    return static_cast<NvidiaDlssQuality>(value - 1);
+    return static_cast<OcarinaRenderScale>(value - 1);
 }
 
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {

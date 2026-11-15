@@ -3848,6 +3848,9 @@ void MainWindow::ShowFullscreen() {
             return;
         }
         window->hide();
+        // A maximized window keeps the work area and ignores the new geometry, so the taskbar
+        // stays visible; the saved geometry restores the maximized state afterwards.
+        window->setWindowState(window->windowState() & ~Qt::WindowMaximized);
         window->setWindowFlags(window->windowFlags() | Qt::FramelessWindowHint);
         const auto screen_geometry = GuessCurrentScreen(window)->geometry();
         window->setGeometry(screen_geometry.x(), screen_geometry.y(), screen_geometry.width(),
@@ -4063,6 +4066,7 @@ void MainWindow::OnConfigure() {
         !UISettings::values.reset_to_defaults) {
         // Runs if the user hit Cancel or closed the window, and did not ever press the Apply button
         // or `Reset to Defaults` button
+        configure_dialog.RestoreInputConfiguration();
         return;
     }
     // Applied settings (OK, Apply or Reset to Defaults) replace the speed limit the hotkeys changed.
@@ -4135,6 +4139,11 @@ void MainWindow::OnConfigure() {
     UISettings::values.configuration_applied = false;
 
     config->SaveAllValues();
+
+    if (result != QDialog::Accepted) {
+        // Cancel after Apply: keep what was applied, drop the controller edits made after it
+        configure_dialog.RestoreInputConfiguration();
+    }
 
     if ((UISettings::values.hide_mouse || Settings::values.mouse_panning) && emulation_running) {
         render_window->installEventFilter(render_window);

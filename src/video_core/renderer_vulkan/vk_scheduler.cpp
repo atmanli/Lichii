@@ -143,6 +143,8 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                     .pipelineStatistics = 0,
                 });
                 trace_work_items.resize(TraceMaxWork);
+            }
+            if (Common::DkbFrameTrace::GpuSitesEnabled()) {
                 trace_site_pool = device.GetLogical().CreateQueryPool({
                     .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
                     .pNext = nullptr,

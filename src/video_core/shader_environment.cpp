@@ -45,6 +45,7 @@
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/shader_cache_v2/records.h"
 #include "video_core/shader_environment.h"
+#include "video_core/shader_stage_translation.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
 
@@ -473,8 +474,10 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
-    const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
-                                                       gpu_memory->UsesNativeTiling())};
+    const bool uses_native_tiling =
+        detached_tex_pool ? detached_uses_native_tiling : gpu_memory->UsesNativeTiling();
+    const u32 index{
+        Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit, uses_native_tiling)};
     Tegra::Texture::TICEntry entry;
     const auto null_2d_texture = [&entry] {
         entry.raw.fill(0);
@@ -501,7 +504,16 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         return entry;
     }
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
-    if (texture_pool_flushed) {
+    bool descriptor_mapped = true;
+    if (detached_tex_pool) {
+        const size_t offset = static_cast<size_t>(index) * sizeof(Tegra::Texture::TICEntry);
+        if (offset + sizeof(entry) <= detached_tex_pool->size()) {
+            std::memcpy(&entry, detached_tex_pool->data() + offset, sizeof(entry));
+        } else {
+            null_2d_texture();
+            return entry;
+        }
+    } else if (texture_pool_flushed) {
         gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
     } else {
         gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
@@ -520,16 +532,18 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         std::getenv("EDEN_NX2_RENDER_TRACE")) {
         static std::atomic<u32> traces{};
         if (traces.fetch_add(1, std::memory_order_relaxed) < 64) {
+            if (!detached_tex_pool) {
+                descriptor_mapped = gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry));
+            }
             LOG_WARNING(HW_GPU,
                         "Zero-format shader TIC: program={:#x} stage={} handle={:#x} "
                         "index={} limit={} descriptor={:#x} mapped={} image={:#x} "
                         "size={}x{}x{} header={} type={} raw={:016x}/{:016x}/{:016x}/{:016x}",
                         program_base, static_cast<u32>(stage), raw, index, tic_limit,
-                        descriptor_addr, gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry)),
-                        entry.Address(), entry.Width(), entry.Height(), entry.Depth(),
-                        static_cast<u32>(entry.header_version.Value()),
-                        static_cast<u32>(entry.texture_type.Value()),
-                        entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3]);
+                        descriptor_addr, descriptor_mapped, entry.Address(), entry.Width(),
+                        entry.Height(), entry.Depth(), static_cast<u32>(entry.header_version.Value()),
+                        static_cast<u32>(entry.texture_type.Value()), entry.raw[0], entry.raw[1],
+                        entry.raw[2], entry.raw[3]);
         }
     }
     return entry;
@@ -1004,45 +1018,70 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
         maxwell3d->engine_state == Tegra::Engines::Maxwell3D::EngineHint::OnHLEMacro;
 }
 
-void GraphicsEnvironment::DetachFromLiveState() {
-    if (is_detached || maxwell3d == nullptr) {
-        return;
+bool GraphicsEnvironment::DetachFromLiveState(
+    std::shared_ptr<const std::vector<u8>> tex_pool_snapshot) {
+    if (is_detached) {
+        return true;
+    }
+    if (maxwell3d == nullptr) {
+        return false;
     }
     const auto& regs{maxwell3d->regs};
+    const auto& stage_cbufs{maxwell3d->state.shader_stages[stage_index].const_buffers};
+    size_t total_cbuf_bytes = 0;
+    for (const auto& src : stage_cbufs) {
+        if (!src.enabled || src.size == 0) {
+            continue;
+        }
+        if (src.size > Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize) {
+            return false;
+        }
+        total_cbuf_bytes += src.size;
+    }
+
+    const GPUVAddr header_address = regs.tex_header.Address();
+    const u32 header_limit = regs.tex_header.limit;
+    if (!tex_pool_snapshot) {
+        const u64 pool_bytes = VideoCommon::TexturePoolBytes(header_limit);
+        const std::optional<u64> pool_last =
+            VideoCommon::TexturePoolLastAddress(header_address, header_limit);
+        if (!VideoCommon::CanFlushTexturePool(header_limit) || !pool_last ||
+            !gpu_memory->IsWithinGPUAddressRange(*pool_last)) {
+            return false;
+        }
+        gpu_memory->FlushRegion(header_address, pool_bytes);
+        auto snapshot = std::make_shared<std::vector<u8>>(pool_bytes);
+        gpu_memory->ReadBlockUnsafe(header_address, snapshot->data(), pool_bytes);
+        tex_pool_snapshot = std::move(snapshot);
+    }
+
     viewport_transform_state = regs.viewport_scale_offset_enabled;
     via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
-    tex_header_address = regs.tex_header.Address();
-    tex_header_limit = regs.tex_header.limit;
+    tex_header_address = header_address;
+    tex_header_limit = header_limit;
     if (has_hle_engine_state) {
         detached_replace_table = maxwell3d->replace_table;
     }
-    const auto& stage_cbufs{maxwell3d->state.shader_stages[stage_index].const_buffers};
-    size_t total_inline_bytes = 0;
+    SetDetachedTexturePool(std::move(tex_pool_snapshot), gpu_memory->UsesNativeTiling());
+
+    detached_cbuf_data.resize(total_cbuf_bytes);
+    size_t cursor = 0;
     for (size_t index = 0; index < stage_cbufs.size(); ++index) {
         const auto& src{stage_cbufs[index]};
         auto& dst{detached_cbufs[index]};
         dst.address = src.address;
         dst.size = src.size;
         dst.enabled = src.enabled;
-        dst.inline_offset = 0;
-        dst.inline_size = 0;
+        dst.offset = 0;
         if (src.enabled && src.size > 0) {
-            dst.inline_size = (std::min)(src.size, DetachedCbufInlineBytes);
-            total_inline_bytes += dst.inline_size;
+            dst.offset = static_cast<u32>(cursor);
+            gpu_memory->ReadBlock(dst.address, detached_cbuf_data.data() + cursor, dst.size);
+            cursor += dst.size;
         }
-    }
-    detached_cbuf_data.resize(total_inline_bytes);
-    size_t cursor = 0;
-    for (auto& dst : detached_cbufs) {
-        if (dst.inline_size == 0) {
-            continue;
-        }
-        dst.inline_offset = static_cast<u32>(cursor);
-        gpu_memory->ReadBlock(dst.address, detached_cbuf_data.data() + cursor, dst.inline_size);
-        cursor += dst.inline_size;
     }
     is_detached = true;
     maxwell3d = nullptr;
+    return true;
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -1055,12 +1094,9 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
         ASSERT(cbuf.enabled);
         u32 value{};
         if (cbuf_offset < cbuf.size) {
-            if (cbuf.inline_size >= sizeof(u32) && cbuf_offset <= cbuf.inline_size - sizeof(u32)) {
-                std::memcpy(&value, detached_cbuf_data.data() + cbuf.inline_offset + cbuf_offset,
-                            sizeof(u32));
-            } else {
-                value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
-            }
+            const size_t available =
+                (std::min)(sizeof(u32), static_cast<size_t>(cbuf.size - cbuf_offset));
+            std::memcpy(&value, detached_cbuf_data.data() + cbuf.offset + cbuf_offset, available);
         }
         cbuf_values.emplace(key, value);
         return value;

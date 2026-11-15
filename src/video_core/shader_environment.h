@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include "common/container/unordered_map.h"
 #include <vector>
 
@@ -105,6 +106,30 @@ public:
         texture_pool_flushed = true;
     }
 
+    /// Sets an immutable descriptor pool snapshot and host tiling mode captured on the GPU thread
+    /// so detached background translation reads descriptors without touching live guest memory.
+    void SetDetachedTexturePool(std::shared_ptr<const std::vector<u8>> snapshot,
+                                bool uses_native_tiling) noexcept {
+        detached_tex_pool = std::move(snapshot);
+        detached_uses_native_tiling = uses_native_tiling;
+        texture_pool_flushed = true;
+    }
+
+    [[nodiscard]] std::pair<GPUVAddr, size_t> CodeGuestRange() const noexcept {
+        if (native_source_size != 0) {
+            return {program_base, native_source_size};
+        }
+        if (!has_unbound_instructions && cached_highest > cached_lowest) {
+            return {program_base + cached_lowest,
+                    static_cast<size_t>(cached_highest - cached_lowest)};
+        }
+        return {program_base, 0};
+    }
+
+    [[nodiscard]] bool HasUnboundInstructions() const noexcept {
+        return has_unbound_instructions;
+    }
+
     [[nodiscard]] u64 CalculateHash() const;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
@@ -163,6 +188,8 @@ protected:
     bool has_unbound_instructions = false;
     bool has_hle_engine_state = false;
     bool texture_pool_flushed = false;
+    std::shared_ptr<const std::vector<u8>> detached_tex_pool;
+    bool detached_uses_native_tiling = false;
 };
 
 class GraphicsEnvironment final : public GenericEnvironment {
@@ -189,18 +216,18 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
-    /// Captures live Maxwell3D registers, replace table, and active constant buffer slices so
-    /// translation can run on a background worker while the GPU thread continues.
-    void DetachFromLiveState();
+    /// Captures live Maxwell3D registers, replace table, texture descriptor pool snapshot, and all
+    /// enabled constant buffers so translation can run on a background worker while the GPU thread
+    /// continues. Returns false if any active state exceeds snapshotting limits and synchronous
+    /// translation is required.
+    [[nodiscard]] bool DetachFromLiveState(
+        std::shared_ptr<const std::vector<u8>> tex_pool_snapshot = {});
 
 private:
-    static constexpr u32 DetachedCbufInlineBytes = 4096;
-
     struct DetachedConstBuffer {
         GPUVAddr address = 0;
         u32 size = 0;
-        u32 inline_offset = 0;
-        u32 inline_size = 0;
+        u32 offset = 0;
         bool enabled = false;
     };
 

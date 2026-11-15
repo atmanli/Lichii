@@ -150,6 +150,7 @@ private:
     struct AsyncRuntimeBuild {
         GraphicsPipelineCacheKey key{};
         std::unique_ptr<GraphicsEnvironments> environments;
+        std::shared_ptr<AsyncTranslationActivity> activity;
         VideoCommon::ShaderJobHandle job;
         std::unique_ptr<GraphicsPipeline> pipeline;
         std::chrono::microseconds gpu_setup_us{0};
@@ -181,8 +182,9 @@ private:
     void ApplyKeepPointers(GraphicsEnvironments& environments, const GraphicsPipelineCacheKey& key,
                            const VideoCommon::EvictedPointerSlots::Slots* keep_pointers) const;
 
-    [[nodiscard]] bool TryFlushTexturePoolForWorkers(GraphicsEnvironments& environments,
-                                                     const GraphicsPipelineCacheKey& key) const;
+    [[nodiscard]] bool TryFlushTexturePoolForWorkers(
+        GraphicsEnvironments& environments, const GraphicsPipelineCacheKey& key,
+        std::shared_ptr<const std::vector<u8>>* tex_pool_snapshot = nullptr) const;
 
     void FinalizeGraphicsSerialization(const GraphicsPipelineCacheKey& key,
                                        const GraphicsPipeline* pipeline,

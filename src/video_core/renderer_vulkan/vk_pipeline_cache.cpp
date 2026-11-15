@@ -2326,16 +2326,23 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
     if (const auto async_it = async_runtime_builds.find(graphics_key);
         async_it != async_runtime_builds.end()) {
-        if (!async_it->second->job.Ready()) {
-            if (CanDiscardCurrentDraw()) {
-                RecordSkippedPendingDraw();
-                return nullptr;
-            }
+        if (async_it->second->activity && async_it->second->activity->IsInvalidated()) {
             shader_jobs->RunOrWait(async_it->second->job);
+            async_runtime_builds.erase(async_it);
+        } else {
+            if (!async_it->second->job.Ready()) {
+                if (CanDiscardCurrentDraw()) {
+                    RecordSkippedPendingDraw();
+                    return nullptr;
+                }
+                shader_jobs->RunOrWait(async_it->second->job);
+            }
+            auto entry = std::move(async_it->second);
+            async_runtime_builds.erase(async_it);
+            if (!entry->activity || !entry->activity->IsInvalidated()) {
+                return bind_pipeline(HarvestAsyncRuntimeBuild(*entry));
+            }
         }
-        auto entry = std::move(async_it->second);
-        async_runtime_builds.erase(async_it);
-        return bind_pipeline(HarvestAsyncRuntimeBuild(*entry));
     }
 
     ReportNewPipelineKey(graphics_key);
@@ -3284,8 +3291,9 @@ void PipelineCache::ApplyKeepPointers(
     }
 }
 
-bool PipelineCache::TryFlushTexturePoolForWorkers(GraphicsEnvironments& environments,
-                                                const GraphicsPipelineCacheKey& key) const {
+bool PipelineCache::TryFlushTexturePoolForWorkers(
+    GraphicsEnvironments& environments, const GraphicsPipelineCacheKey& key,
+    std::shared_ptr<const std::vector<u8>>* tex_pool_snapshot) const {
     static_assert(sizeof(Tegra::Texture::TICEntry) == VideoCommon::TextureDescriptorBytes);
     const auto& tex_header = maxwell3d->regs.tex_header;
     const u64 pool_bytes = VideoCommon::TexturePoolBytes(tex_header.limit);
@@ -3305,6 +3313,11 @@ bool PipelineCache::TryFlushTexturePoolForWorkers(GraphicsEnvironments& environm
         return false;
     }
     gpu_memory->FlushRegion(tex_header.Address(), pool_bytes);
+    if (tex_pool_snapshot != nullptr) {
+        auto snapshot = std::make_shared<std::vector<u8>>(pool_bytes);
+        gpu_memory->ReadBlockUnsafe(tex_header.Address(), snapshot->data(), pool_bytes);
+        *tex_pool_snapshot = std::move(snapshot);
+    }
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         if (key.unique_hashes[index] != 0) {
             environments.envs[index].SetTexturePoolFlushed();
@@ -3356,26 +3369,65 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
     auto environments = std::make_unique<GraphicsEnvironments>();
     GetGraphicsEnvironments(*environments, graphics_key.unique_hashes);
     ApplyKeepPointers(*environments, graphics_key, keep_pointers);
-    if (!TryFlushTexturePoolForWorkers(*environments, graphics_key)) {
+    std::shared_ptr<const std::vector<u8>> tex_pool_snapshot;
+    if (!TryFlushTexturePoolForWorkers(*environments, graphics_key, &tex_pool_snapshot)) {
         return false;
     }
+    std::vector<AsyncRange> tracked_ranges;
+    bool unbounded_reads = false;
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-        if (graphics_key.unique_hashes[index] != 0) {
-            environments->envs[index].DetachFromLiveState();
+        if (graphics_key.unique_hashes[index] == 0) {
+            continue;
+        }
+        auto& env = environments->envs[index];
+        if (!env.DetachFromLiveState(tex_pool_snapshot)) {
+            return false;
+        }
+        if (env.HasUnboundInstructions()) {
+            unbounded_reads = true;
+        }
+        const auto [code_addr, code_size] = env.CodeGuestRange();
+        if (code_size == 0) {
+            unbounded_reads = true;
+        } else {
+            const auto spans = gpu_memory->GetSubmappedDeviceRange(code_addr, code_size);
+            if (spans.empty()) {
+                unbounded_reads = true;
+            } else {
+                for (const auto& [daddr, span_size] : spans) {
+                    tracked_ranges.push_back({daddr, span_size});
+                }
+            }
         }
     }
     auto entry = std::make_unique<AsyncRuntimeBuild>();
     entry->key = graphics_key;
     entry->environments = std::move(environments);
     entry->evicted = evicted;
+    entry->activity = RegisterAsyncTranslation(std::move(tracked_ranges), unbounded_reads);
+    struct AsyncCpuGuard {
+        explicit AsyncCpuGuard(std::shared_ptr<AsyncTranslationActivity> activity_)
+            : activity{std::move(activity_)} {}
+        ~AsyncCpuGuard() {
+            if (activity) {
+                activity->MarkCpuDone();
+            }
+        }
+        std::shared_ptr<AsyncTranslationActivity> activity;
+    };
+    auto cpu_guard = std::make_shared<AsyncCpuGuard>(entry->activity);
     entry->gpu_setup_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - setup_begin);
     AsyncRuntimeBuild* const raw_entry = entry.get();
     const bool use_emit_pools = maxwell3d->GetNativeMacroEngine().native_turing;
     entry->job = shader_jobs->Submit({
         .priority = VideoCommon::ShaderJobPriority::Soon,
-        .cpu = [this, raw_entry, use_emit_pools](
-                   VideoCommon::ShaderJobContext&) -> VideoCommon::ShaderDriverStage {
+        .cpu = [this, raw_entry, use_emit_pools, cpu_guard = std::move(cpu_guard)](
+                   VideoCommon::ShaderJobContext& ctx) -> VideoCommon::ShaderDriverStage {
+            if (ctx.StopRequested() ||
+                (raw_entry->activity && raw_entry->activity->IsInvalidated())) {
+                return {};
+            }
             const auto translate_begin = std::chrono::steady_clock::now();
             std::shared_ptr<ShaderPools> emit_pools = TakeSparePools();
             ShaderPools& pools = *emit_pools;
@@ -3395,11 +3447,18 @@ bool PipelineCache::StartAsyncGraphicsPipeline(
             return {};
         },
     });
+    VideoCommon::ShaderJobScheduler* const scheduler_ptr = &*shader_jobs;
+    const VideoCommon::ShaderJobHandle job_handle = entry->job;
+    entry->activity->SetCancelCallback(
+        [scheduler_ptr, job_handle] { scheduler_ptr->Cancel(job_handle); });
     async_runtime_builds.emplace(graphics_key, std::move(entry));
     return true;
 }
 
 GraphicsPipeline* PipelineCache::HarvestAsyncRuntimeBuild(AsyncRuntimeBuild& entry) {
+    if (entry.activity && entry.activity->IsInvalidated()) {
+        return nullptr;
+    }
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     std::string shaders = FormatGraphicsPipelineShaders(entry.key);
     shaders += fmt::format(" translate_wait_ms=0.0 stage_translate_ms={:.1f} async=1",
@@ -3419,6 +3478,7 @@ GraphicsPipeline* PipelineCache::HarvestAsyncRuntimeBuild(AsyncRuntimeBuild& ent
 }
 
 void PipelineCache::DrainAsyncRuntimeBuilds() {
+    ClearAsyncTranslationCallbacks();
     if (!shader_jobs) {
         async_runtime_builds.clear();
         return;

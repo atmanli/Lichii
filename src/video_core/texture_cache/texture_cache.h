@@ -51,6 +51,15 @@ namespace VideoCommon {
     return enabled;
 }
 
+/// EDEN_NX2_TC_TRACE=1: log every image the cache creates, uploads and deletes.
+[[nodiscard]] inline bool TextureCacheTrace() {
+    static const bool enabled = [] {
+        const char* const v = std::getenv("EDEN_NX2_TC_TRACE");
+        return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+}
+
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
 using VideoCore::Surface::GetFormatType;
@@ -2413,10 +2422,34 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
-    if (!UploadInChunks(image)) {
+    using TraceClock = std::chrono::steady_clock;
+    const bool tc_trace = TextureCacheTrace();
+    const auto trace_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
+    const u64 trace_faults = tc_trace ? Common::GetProcessPageFaults() : 0;
+    auto trace_staged = trace_begin;
+    upload_trace = {};
+    const bool chunked = UploadInChunks(image);
+    if (!chunked) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+        if (tc_trace) {
+            trace_staged = TraceClock::now();
+        }
         UploadImageContents(image, staging);
         runtime.InsertUploadMemoryBarrier();
+    }
+    if (tc_trace) {
+        using Ms = std::chrono::duration<double, std::milli>;
+        LOG_WARNING(HW_GPU,
+                    "TCTRACE upload gpu={:#x} fmt={} {}x{}x{} lv={} ly={} guest={}KiB host={}KiB "
+                    "ms={:.2f} staging={:.2f} read={:.2f} untile={:.2f} faults={} chunked={} "
+                    "frame={}",
+                    image.gpu_addr, static_cast<u32>(image.info.format), image.info.size.width,
+                    image.info.size.height, image.info.size.depth, image.info.resources.levels,
+                    image.info.resources.layers, image.guest_size_bytes / 1024,
+                    MapSizeBytes(image) / 1024, Ms(TraceClock::now() - trace_begin).count(),
+                    Ms(trace_staged - trace_begin).count(), upload_trace.read_ms,
+                    upload_trace.untile_ms, Common::GetProcessPageFaults() - trace_faults, chunked,
+                    frame_tick);
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
     // marks it cold, so the OS pages it out before anything else when it needs RAM (title 1
@@ -2730,17 +2763,30 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         return;
     }
 
+    using TraceClock = std::chrono::steady_clock;
+    const bool tc_trace = TextureCacheTrace();
+    const auto read_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+    const auto untile_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
+    const auto trace_untile = [&] {
+        if (tc_trace) {
+            using Ms = std::chrono::duration<double, std::milli>;
+            upload_trace.read_ms = Ms(untile_begin - read_begin).count();
+            upload_trace.untile_ms = Ms(TraceClock::now() - untile_begin).count();
+        }
+    };
     if (True(image.flags & ImageFlagBits::Converted)) {
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data,
                                     unswizzle_data_buffer, &unswizzle_worker);
         ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
+        trace_untile();
         image.UploadMemory(staging, copies);
     } else {
         const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data,
                                           mapped_span, &unswizzle_worker);
+        trace_untile();
         image.UploadMemory(staging, copies);
     }
 }
@@ -3216,11 +3262,7 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                  gpu_addr, info.size.width, info.size.height, info.size.depth, info.resources.levels,
                  static_cast<u32>(info.format), info.block.width, info.block.height, info.block.depth);
     }
-    // EDEN_NX2_TC_TRACE=1: log every image the cache creates (time, format, size, joins) and deletes
-    static const bool tc_trace = [] {
-        const char* const v = std::getenv("EDEN_NX2_TC_TRACE");
-        return v != nullptr && v[0] == '1';
-    }();
+    const bool tc_trace = TextureCacheTrace();
     const auto tc_t0 = tc_trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const ImageId image_id = JoinImages(storage_info, gpu_addr, *cpu_addr);
     if (!image_id) {
@@ -4283,11 +4325,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ++images_deleted;
     ++churn.deleted;
     {
-        static const bool tc_trace = [] {
-            const char* const v = std::getenv("EDEN_NX2_TC_TRACE");
-            return v != nullptr && v[0] == '1';
-        }();
-        if (tc_trace) {
+        if (TextureCacheTrace()) {
             LOG_WARNING(HW_GPU,
                         "TCTRACE delete id={} gpu={:#x} fmt={} {}x{}x{} guest={}KiB immediate={} "
                         "reason={} frame={}",

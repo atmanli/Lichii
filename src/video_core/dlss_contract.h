@@ -12,7 +12,10 @@ namespace VideoCommon::DlssContract {
 constexpr bool ValidColorFormats(VideoCore::Surface::PixelFormat input,
                                   VideoCore::Surface::PixelFormat output, bool use_history) {
     using VideoCore::Surface::PixelFormat;
+    // The Xenoblade Switch 2 Editions upscale their B10G11R11 frame (already in 0..1) into an
+    // RGBA8 output; the history stays half-float whatever the output.
     return (input == PixelFormat::B10G11R11_FLOAT && output == input) ||
+           (input == PixelFormat::B10G11R11_FLOAT && output == PixelFormat::A8B8G8R8_UNORM) ||
            (!use_history && input == PixelFormat::A8B8G8R8_SRGB &&
             output == PixelFormat::R16G16B16A16_FLOAT);
 }

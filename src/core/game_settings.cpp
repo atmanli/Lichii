@@ -123,7 +123,15 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     const auto env = DetectEnvironment(renderer);
 
     Settings::values.force_reactive_flushing = false;
+    Settings::values.nx2_dlss_to_fsr = false;
     switch (static_cast<TitleID>(program_id)) {
+        case TitleID::XenobladeChroniclesDENintendoSwitch2Edition:
+        case TitleID::XenobladeChronicles2NintendoSwitch2Edition:
+        case TitleID::XenobladeChroniclesXDENintendoSwitch2Edition:
+            // Their DLSS network, translated, leaves trails behind moving objects and shakes the
+            // background; FSR 3.1 from the same inputs shows neither.
+            Settings::values.nx2_dlss_to_fsr = true;
+            break;
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
             break;

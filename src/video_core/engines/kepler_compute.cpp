@@ -7,6 +7,7 @@
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -730,6 +731,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         }
     }
     if (BypassOotBaseNetwork()) {
+        return true;
+    }
+    if (Settings::values.nx2_dlss_to_fsr && ReplaceDlssWithFsr()) {
         return true;
     }
     bool dispatched = true;
@@ -1501,6 +1505,204 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
                  input->Height(), output->Width(), output->Height());
     }
     return done;
+}
+
+bool KeplerCompute::ReplaceDlssWithFsr() {
+    if (fsr_dlss_failed) {
+        return false;
+    }
+    // Bounded like the Fortune's Weave chain: a missing output pass must not leave the network
+    // skipped, nor reuse the old inputs.
+    constexpr u32 MaxEvaluationDispatches = 64;
+    if (fsr_dlss.active && ++fsr_dlss.dispatches > MaxEvaluationDispatches) {
+        fsr_dlss = {};
+    }
+    if (!ProgramUsesTensorCores(regs.code_loc.Address() + launch_description.program_start)) {
+        RememberFsrDlssPrepass();
+        return false;
+    }
+    if (!fsr_dlss.active) {
+        return false;
+    }
+    // A spatial network after the evaluation (Xenoblade Chronicles 2's 1080p to 4K, 0x100 bytes
+    // of constants) keeps running.
+    if (launch_description.const_buffer_config[0].size.Value() < 0x300) {
+        fsr_dlss.active = false;
+        return false;
+    }
+    if (UpscaleFsrDlssOutput()) {
+        fsr_dlss.active = false;
+    }
+    return true;
+}
+
+bool KeplerCompute::ProgramUsesTensorCores(GPUVAddr program) {
+    if (!memory_manager.IsFullyMappedRange(program, sizeof(u64))) {
+        return false;
+    }
+    // Keyed by address; the first instruction catches new code loaded at the same address.
+    const u64 first_instruction = memory_manager.Read<u64>(program);
+    if (const auto it = tensor_programs.find(program);
+        it != tensor_programs.end() && it->second.first_instruction == first_instruction) {
+        return it->second.uses_tensor;
+    }
+    bool uses_tensor = false;
+    bool exited = false;
+    std::array<u32, 0x400> block{};
+    for (u64 offset = 0; offset < 0x40000 && !exited && !uses_tensor; offset += sizeof(block)) {
+        if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) {
+            break;
+        }
+        memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+        for (size_t word = 0; word < block.size() && !exited && !uses_tensor; word += 4) {
+            const u32 opcode = block[word] & 0xfff;
+            uses_tensor = opcode == 0x23c; // HMMA
+            exited = opcode == 0x94d && ((block[word] >> 12) & 0xf) == 7;
+        }
+    }
+    tensor_programs.insert_or_assign(program, TensorProgram{first_instruction, uses_tensor});
+    return uses_tensor;
+}
+
+void KeplerCompute::RememberFsrDlssPrepass() {
+    using namespace VideoCommon::FireEmblemUpscale;
+    constexpr u32 MotionOffset = 0x290;
+    constexpr u32 DepthOffset = 0x298;
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    if (cbuf.size.Value() < DepthOffset + 4 ||
+        !memory_manager.IsFullyMappedRange(cbuf_address, DepthOffset + 4)) {
+        return;
+    }
+    const auto color = ConstBuffer0Image(PrepassColorOffset);
+    const auto motion = ConstBuffer0Image(MotionOffset);
+    if (!color || !motion || color->format != Texture::TextureFormat::B10G11R11 ||
+        motion->format != Texture::TextureFormat::R16G16 || color->Address() == 0 ||
+        motion->Address() == 0 || motion->Width() != color->Width() ||
+        motion->Height() != color->Height() || !color->IsBlockLinear() ||
+        !motion->IsBlockLinear()) {
+        return;
+    }
+    const std::array<f32, 2> jitter{
+        std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + JitterOffset)),
+        std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + JitterOffset + 4))};
+    if (!std::isfinite(jitter[0]) || !std::isfinite(jitter[1]) || std::abs(jitter[0]) > 0.5f ||
+        std::abs(jitter[1]) > 0.5f) {
+        return;
+    }
+    // Depth with stencil (Xenoblade Chronicles 2) goes to FSR through its depth-only view.
+    std::optional<Texture::TICEntry> depth = ConstBuffer0Image(DepthOffset);
+    if (depth && ((depth->format != Texture::TextureFormat::Z32 &&
+                   depth->format != Texture::TextureFormat::Z32_X24S8) ||
+                  depth->Address() == 0 || depth->Width() != color->Width() ||
+                  depth->Height() != color->Height() || !depth->IsBlockLinear())) {
+        depth.reset();
+    }
+    fsr_dlss = {
+        .active = true,
+        .color = color->Address(),
+        .motion = *motion,
+        .depth = depth,
+        .jitter = jitter,
+    };
+}
+
+bool KeplerCompute::UpscaleFsrDlssOutput() {
+    using namespace VideoCommon::FireEmblemUpscale;
+    using RTFormat = Tegra::RenderTargetFormat;
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    const auto input = ConstBuffer0Image(OutputColorInputOffset);
+    if (!input || input->Address() != fsr_dlss.color) {
+        // An intermediate pass of the network.
+        return false;
+    }
+    const auto give_up = [this](const char* reason) {
+        fsr_dlss_failed = true;
+        LOG_WARNING(HW_GPU, "DLSS output pass not replaced ({}); the game's network runs again",
+                    reason);
+        return true;
+    };
+    const auto output = ConstBuffer0Image(OutputColorOffset);
+    if (!output || input->format != Texture::TextureFormat::B10G11R11 || output->Address() == 0 ||
+        !output->IsBlockLinear() || cbuf.size.Value() < RenderLastColumnOffset + 4 ||
+        !memory_manager.IsFullyMappedRange(cbuf_address, RenderLastColumnOffset + 4)) {
+        return give_up("unexpected images");
+    }
+    std::optional<RTFormat> output_format;
+    switch (output->format) {
+    case Texture::TextureFormat::A8B8G8R8:
+        output_format = output->srgb_conversion ? RTFormat::A8B8G8R8_SRGB : RTFormat::A8B8G8R8_UNORM;
+        break;
+    case Texture::TextureFormat::A2B10G10R10:
+        output_format = RTFormat::A2B10G10R10_UNORM;
+        break;
+    case Texture::TextureFormat::B10G11R11:
+        output_format = RTFormat::B10G11R11_FLOAT;
+        break;
+    case Texture::TextureFormat::R16G16B16A16:
+        output_format = RTFormat::R16G16B16A16_FLOAT;
+        break;
+    default:
+        return give_up("unsupported output format");
+    }
+    const u32 width = memory_manager.Read<u32>(cbuf_address + RenderLastColumnOffset) + 1;
+    const u32 height = memory_manager.Read<u32>(cbuf_address + RenderLastRowOffset) + 1;
+    const auto& motion = fsr_dlss.motion;
+    if (width == 0 || height == 0 || width > input->Width() || height > input->Height() ||
+        width > motion.Width() || height > motion.Height()) {
+        return give_up("render region out of range");
+    }
+    const auto surface = [](const Texture::TICEntry& tic, RTFormat format) {
+        Fermi2D::Surface result{};
+        result.format = format;
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(tic.block_width);
+        result.block_height.Assign(tic.block_height);
+        result.block_depth.Assign(tic.block_depth);
+        result.depth = 1;
+        result.width = tic.Width();
+        result.height = tic.Height();
+        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+        result.addr_lower = static_cast<u32>(tic.Address());
+        return result;
+    };
+    const auto src = surface(*input, RTFormat::B10G11R11_FLOAT);
+    const auto dst = surface(*output, *output_format);
+    const auto& depth = fsr_dlss.depth;
+    const bool with_depth = depth && width <= depth->Width() && height <= depth->Height();
+    // nvnDlssParametersSetMotionVectorScale(width / 2, height / 2): NDC offsets to the previous
+    // position, so half of them in UV.
+    bool done = rasterizer->AccelerateTemporalUpscale(
+        src, dst, surface(motion, RTFormat::R16G16_FLOAT), with_depth ? &*depth : nullptr,
+        fsr_dlss.jitter, std::array{0.5f, 0.5f}, true, std::array{width, height});
+    const bool temporal = done;
+    if (!done) {
+        const Fermi2D::Config config{
+            .operation = Fermi2D::Operation::SrcCopy,
+            .filter = Fermi2D::Filter::Bilinear,
+            .must_accelerate = true,
+            .dst_x0 = 0,
+            .dst_y0 = 0,
+            .dst_x1 = static_cast<s32>(output->Width()),
+            .dst_y1 = static_cast<s32>(output->Height()),
+            .src_x0 = 0,
+            .src_y0 = 0,
+            .src_x1 = static_cast<s32>(width),
+            .src_y1 = static_cast<s32>(height),
+        };
+        done = rasterizer->AccelerateSurfaceCopy(src, dst, config);
+    }
+    if (!done) {
+        return give_up("upscale and copy unavailable");
+    }
+    static u32 logged{};
+    if (logged++ < 4) {
+        LOG_INFO(HW_GPU, "DLSS replaced by {}: region {}x{} of {}x{} to {}x{}, depth {}",
+                 temporal ? "a temporal upscale" : "a bilinear copy", width, height,
+                 input->Width(), input->Height(), output->Width(), output->Height(), with_depth);
+    }
+    return true;
 }
 
 bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {

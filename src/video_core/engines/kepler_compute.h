@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "common/bit_field.h"
@@ -290,6 +291,27 @@ private:
 
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     bool BypassOotBaseNetwork();
+    /// Skips the tensor-core passes of an NVN2 DLSS evaluation and draws its output with FSR 3.1
+    /// from the prepass inputs (Settings::values.nx2_dlss_to_fsr). Whether the pass was skipped.
+    bool ReplaceDlssWithFsr();
+    bool ProgramUsesTensorCores(GPUVAddr program);
+    void RememberFsrDlssPrepass();
+    bool UpscaleFsrDlssOutput();
+    struct FsrDlssEvaluation {
+        bool active{};
+        GPUVAddr color{};
+        Texture::TICEntry motion{};
+        std::optional<Texture::TICEntry> depth;
+        std::array<f32, 2> jitter{};
+        u32 dispatches{};
+    } fsr_dlss;
+    /// The output pass could not be drawn: the game's network runs again for the session.
+    bool fsr_dlss_failed{};
+    struct TensorProgram {
+        u64 first_instruction{};
+        bool uses_tensor{};
+    };
+    std::unordered_map<GPUVAddr, TensorProgram> tensor_programs;
     void ProcessNativeReportSemaphore(u32 argument);
     void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
     /// Texture descriptor that the handle at `offset` in constant buffer 0 selects.

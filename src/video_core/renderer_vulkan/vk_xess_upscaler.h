@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <memory>
 
 #include "common/common_types.h"
@@ -31,6 +32,7 @@ public:
         VkExtent2D output_size{};
         std::array<f32, 2> jitter{};
         bool reset{};
+        std::shared_ptr<std::atomic<bool>> execution_failed;
     };
 
     XessUpscaler(const Device& device, Scheduler& scheduler, MemoryAllocator& memory_allocator,

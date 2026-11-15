@@ -335,8 +335,8 @@ private:
         /// Whether an image holds the whole scene: the game samples padded targets through
         /// descriptors of the scene's own size.
         [[nodiscard]] bool SceneSized(u32 width, u32 height) const noexcept {
-            return (width == extent.width || width == image_extent.width) &&
-                   (height == extent.height || height == image_extent.height);
+            return (width == extent.width && height == extent.height) ||
+                   (width == image_extent.width && height == image_extent.height);
         }
     } oot_motion;
     std::unique_ptr<class OcarinaUpscaler> oot_live_dlss;

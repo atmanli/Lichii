@@ -146,6 +146,8 @@ struct XessUpscaler::Impl {
         });
         output_size = extent;
 #ifdef _WIN32
+        rejected_input_size = {};
+        rejected_output_size = {};
         output_initialized.store(false, std::memory_order_relaxed);
 #endif
         ready.store(false, std::memory_order_relaxed);
@@ -181,6 +183,8 @@ struct XessUpscaler::Impl {
                      "(optimal {}x{}); using the selected fallback",
                      input_size.width, input_size.height, output_extent.width, output_extent.height,
                      optimal.x, optimal.y);
+            rejected_input_size = input_size;
+            rejected_output_size = output_extent;
             initialization_scheduled.store(false, std::memory_order_release);
             return;
         }
@@ -269,6 +273,9 @@ struct XessUpscaler::Impl {
             params.inputHeight = color_size.height;
             const xess_result_t result = api->execute(context, *cmdbuf, &params);
             if (result < 0) {
+                if (inputs.execution_failed) {
+                    inputs.execution_failed->store(true, std::memory_order_release);
+                }
                 Fail("frame evaluation failed");
             } else {
                 first_execution = false;
@@ -326,6 +333,8 @@ struct XessUpscaler::Impl {
     xess_context_handle_t context{};
     xess_2d_t minimum_input{};
     xess_2d_t maximum_input{};
+    VkExtent2D rejected_input_size{};
+    VkExtent2D rejected_output_size{};
     bool first_execution{true};
     std::atomic<bool> history_reset_pending{};
     std::atomic<bool> output_initialized{};
@@ -385,6 +394,15 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
         return false;
     }
     if (!ready) {
+        const bool same_rejected_dimensions =
+            !state.initialization_scheduled.load(std::memory_order_acquire) &&
+            state.rejected_input_size.width == inputs.render_size.width &&
+            state.rejected_input_size.height == inputs.render_size.height &&
+            state.rejected_output_size.width == inputs.output_size.width &&
+            state.rejected_output_size.height == inputs.output_size.height;
+        if (same_rejected_dimensions) {
+            return false;
+        }
         if (!state.initialization_scheduled.exchange(true, std::memory_order_acq_rel)) {
             state.scheduler.Record([&state, input_size = inputs.render_size,
                                     output_size = inputs.output_size](vk::CommandBuffer) {

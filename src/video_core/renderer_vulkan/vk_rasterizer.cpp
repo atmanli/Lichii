@@ -3262,9 +3262,10 @@ void RasterizerVulkan::TrackOcarinaCamera() {
     }
     VideoCommon::OcarinaCameraBuffer values;
     device_memory.ReadBlockUnsafe(*device_address, values.data(), sizeof(values));
+    const bool allow_padding = oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss ||
+                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr;
     const auto camera = VideoCommon::DecodeOcarinaCamera(
-        values, color.size.width, color.size.height,
-        oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss);
+        values, color.size.width, color.size.height, allow_padding);
     if (camera.issue != VideoCommon::OcarinaCameraIssue::None) {
         return;
     }

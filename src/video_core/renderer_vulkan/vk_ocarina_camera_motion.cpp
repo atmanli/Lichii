@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstring>
@@ -17,6 +18,8 @@
 #include "video_core/renderer_vulkan/vk_xess_upscaler.h"
 #include "video_core/host_shaders/ocarina_dlss_color_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_output_comp_spv.h"
+#include "video_core/host_shaders/ocarina_xess_color_comp_spv.h"
+#include "video_core/host_shaders/ocarina_xess_output_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_4k_composite_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_4k_reference_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_bias_comp_spv.h"
@@ -463,9 +466,11 @@ public:
     }
     void RecordOutput(Scheduler& scheduler, const void* descriptors,
                       const OcarinaUpscaler& upscaler, VkExtent2D extent, u64 frame,
-                      bool reset) {
-        scheduler.Record([this, descriptors, &upscaler, extent, frame, reset](vk::CommandBuffer cmd) {
-            if (upscaler.EvaluationFailed()) {
+                      bool reset, std::shared_ptr<std::atomic<bool>> execution_failed) {
+        scheduler.Record([this, descriptors, &upscaler, extent, frame, reset,
+                          execution_failed = std::move(execution_failed)](vk::CommandBuffer cmd) {
+            if (upscaler.EvaluationFailed() ||
+                (execution_failed && execution_failed->load(std::memory_order_acquire))) {
                 return;
             }
             const VkMemoryBarrier before{
@@ -522,8 +527,10 @@ public:
                       OCARINA_DLSS_4K_COMPOSITE_COMP_SPV) {}
 
     void Record(Scheduler& scheduler, const void* descriptors, VkImage image, VkExtent2D extent,
-                const OcarinaUpscaler& upscaler, u64 frame) {
-        scheduler.Record([this, descriptors, image, extent, &upscaler, frame](vk::CommandBuffer cmd) {
+                const OcarinaUpscaler& upscaler, u64 frame,
+                std::shared_ptr<std::atomic<bool>> execution_failed) {
+        scheduler.Record([this, descriptors, image, extent, &upscaler, frame,
+                          execution_failed = std::move(execution_failed)](vk::CommandBuffer cmd) {
             const auto output = ProbeBarrier(image, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                              VK_IMAGE_LAYOUT_GENERAL);
@@ -538,7 +545,8 @@ public:
             device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptors);
             cmd.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
             cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
-            const u32 enabled = !upscaler.EvaluationFailed();
+            const u32 enabled = !upscaler.EvaluationFailed() &&
+                !(execution_failed && execution_failed->load(std::memory_order_acquire));
             cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, enabled);
             cmd.Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
             const VkMemoryBarrier complete{
@@ -673,11 +681,16 @@ struct OcarinaFrameSlot {
           color_view{CreateOcarinaView(device, *color, LIVE_COLOR_FORMAT)} {}
 
     VkExtent2D extent;
+    u64 frame{};
     u64 tick{};
     vk::Image motion;
     vk::ImageView motion_view;
     vk::Image color;
     vk::ImageView color_view;
+    vk::Image xess_color;
+    vk::ImageView xess_color_view;
+    std::shared_ptr<std::atomic<bool>> xess_execution_failed =
+        std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<ActorOverlay> overlay;
 };
 
@@ -746,6 +759,10 @@ struct OcarinaUpscaler::Impl {
         if (backend == VideoCommon::OcarinaUpscaleBackend::Xess) {
             xess = std::make_unique<XessUpscaler>(device, scheduler, allocator,
                                                   Settings::values.xess_quality.GetValue());
+            xess_color_pass = std::make_unique<OcarinaColorPass>(
+                device, scheduler, pool_, OCARINA_XESS_COLOR_COMP_SPV);
+            xess_output_pass = std::make_unique<OcarinaColorPass>(
+                device, scheduler, pool_, OCARINA_XESS_OUTPUT_COMP_SPV);
         }
     }
 
@@ -796,6 +813,8 @@ struct OcarinaUpscaler::Impl {
     CameraMotionPass motion_pass;
     OcarinaColorPass color_pass;
     OcarinaColorPass output_pass;
+    std::unique_ptr<OcarinaColorPass> xess_color_pass;
+    std::unique_ptr<OcarinaColorPass> xess_output_pass;
     std::array<std::unique_ptr<OcarinaFrameSlot>, 4> slots;
     std::optional<u64> last_frame;
     Matrix last_view_projection{};
@@ -893,8 +912,14 @@ void OcarinaUpscaler::CompositeOutput(VkImageView native_composite, VkExtent2D o
     state.queue.AddSampledImage(*state.native_scene_view, sampler);
     state.queue.AddSampledImage(native_composite, sampler);
     state.queue.AddImage(*state.composite_view);
+    const auto frame_slot = std::ranges::find_if(state.slots, [frame](const auto& entry) {
+        return entry && entry->frame == frame;
+    });
+    const auto execution_failed = frame_slot == state.slots.end()
+        ? std::shared_ptr<std::atomic<bool>>{}
+        : (*frame_slot)->xess_execution_failed;
     state.composite_pass->Record(state.scheduler, state.queue.UpdateData(), *state.composite,
-                                 output_extent, *this, frame);
+                                 output_extent, *this, frame, execution_failed);
     state.scheduler.InvalidateState();
     state.composited_frame = frame;
 }
@@ -979,6 +1004,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         *slot = std::make_unique<OcarinaFrameSlot>(state.device, state.allocator, extent);
     }
     auto& resources = **slot;
+    resources.frame = frame;
+    resources.xess_execution_failed->store(false, std::memory_order_relaxed);
     const VkSampler sampler = state.PointSampler();
     const ActorTransforms actor_transforms{
         current, previous, mesh.current_origin, mesh.previous_origin,
@@ -1005,6 +1032,20 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.queue.AddSampledImage(color, sampler);
     state.queue.AddImage(*resources.color_view);
     state.color_pass.Record(state.scheduler, state.queue.UpdateData(), *resources.color, extent);
+    if (state.xess_color_pass) {
+        if (!resources.xess_color) {
+            resources.xess_color = CreateOcarinaImage(
+                state.allocator, extent, LIVE_COLOR_FORMAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            resources.xess_color_view = CreateOcarinaView(state.device, *resources.xess_color,
+                                                          LIVE_COLOR_FORMAT);
+        }
+        state.queue.Acquire(state.scheduler, 2);
+        state.queue.AddSampledImage(*resources.color_view, sampler);
+        state.queue.AddImage(*resources.xess_color_view);
+        state.xess_color_pass->Record(state.scheduler, state.queue.UpdateData(),
+                                      *resources.xess_color, extent);
+    }
 
     VkImageView bias_view{};
     VkImage bias_image{};
@@ -1053,8 +1094,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     if (state.backend == VideoCommon::OcarinaUpscaleBackend::Xess && state.xess &&
         !state.xess->Failed()) {
         used_xess = state.xess->Upscale({
-            .color_image = *resources.color,
-            .color_view = *resources.color_view,
+            .color_image = *resources.xess_color,
+            .color_view = *resources.xess_color_view,
             .depth_image = depth_image,
             .depth_view = depth,
             .motion_image = *resources.motion,
@@ -1064,6 +1105,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             .output_size = output_extent,
             .jitter = jitter,
             .reset = reset,
+            .execution_failed = resources.xess_execution_failed,
         });
     }
     bool used_fsr4 = false;
@@ -1147,8 +1189,9 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         const auto output_sampler = same_size ? sampler : state.LinearSampler();
         state.queue.AddSampledImage(state.OutputView(), output_sampler);
         state.queue.AddImage(target);
-        state.output_pass.RecordOutput(state.scheduler, state.queue.UpdateData(), *this,
-                                        target_extent, frame, reset);
+        auto& output_pass = used_xess ? *state.xess_output_pass : state.output_pass;
+        output_pass.RecordOutput(state.scheduler, state.queue.UpdateData(), *this, target_extent,
+                                 frame, reset, resources.xess_execution_failed);
     }
     state.scheduler.InvalidateState();
     state.last_frame = frame;

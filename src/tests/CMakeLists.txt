@@ -218,6 +218,7 @@ add_executable(tests
     core/numeric_name_info.cpp
     core/numeric_name_info_ipc.cpp
     core/cmif_out_buffer.cpp
+    core/time_zone_fallback.cpp
     video_core/memory_tracker.cpp
     video_core/invalidation_accumulator.cpp
     video_core/memory_manager_runs.cpp
@@ -260,7 +261,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common tz ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 add_executable(ncz_tests

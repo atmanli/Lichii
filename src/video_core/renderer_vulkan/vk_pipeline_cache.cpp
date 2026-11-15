@@ -2328,24 +2328,43 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (const auto async_it = async_runtime_builds.find(graphics_key);
         async_it != async_runtime_builds.end()) {
         const auto wait_for_translation = [&] {
+            const auto& job = async_it->second->job;
+            if (job.Ready()) {
+                return true;
+            }
+            NativeDrawAction action = NativeDrawAction::Wait;
+            if (use_asynchronous_shaders) {
+                const auto policy = EvaluatePendingDrawPolicy(*maxwell3d);
+                action = policy.native ? DecideNativePending(policy.mode, policy.can_discard,
+                                                             native_wait_budget_us)
+                                       : (policy.can_discard ? NativeDrawAction::Skip
+                                                             : NativeDrawAction::Wait);
+            }
+            if (action == NativeDrawAction::Skip) {
+                return false;
+            }
             const auto begin = std::chrono::steady_clock::now();
-            shader_jobs->RunOrWait(async_it->second->job);
+            bool ready = true;
+            if (action == NativeDrawAction::WaitTimed) {
+                ready = WaitWithinNativeBudget(
+                    native_wait_budget_us, native_wait_used_us,
+                    [&](auto timeout) { return shader_jobs->WaitFor(job, timeout); });
+            } else {
+                shader_jobs->RunOrWait(job);
+            }
             async_it->second->translate_wait += std::chrono::steady_clock::now() - begin;
+            return ready;
         };
+        if (!wait_for_translation()) {
+            RecordSkippedPendingDraw();
+            return nullptr;
+        }
         if (async_it->second->activity && async_it->second->activity->IsInvalidated()) {
-            wait_for_translation();
             synchronous_retry |= async_it->second->requires_synchronous_retry;
             HarvestAsyncRuntimeBuild(*async_it->second);
             synchronous_runtime_retries.erase(graphics_key.Hash());
             async_runtime_builds.erase(async_it);
         } else {
-            if (!async_it->second->job.Ready()) {
-                if (CanDiscardCurrentDraw()) {
-                    RecordSkippedPendingDraw();
-                    return nullptr;
-                }
-                wait_for_translation();
-            }
             auto entry = std::move(async_it->second);
             async_runtime_builds.erase(async_it);
             synchronous_retry = entry->requires_synchronous_retry;
@@ -2556,14 +2575,9 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
             discard = true;
             break;
         case NativeDrawAction::WaitTimed: {
-            const auto begin = std::chrono::steady_clock::now();
             const bool built =
-                pipeline->WaitBuilt(std::chrono::microseconds{native_wait_budget_us});
-            const auto spent = std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::steady_clock::now() - begin)
-                                   .count();
-            native_wait_budget_us -= spent;
-            native_wait_used_us += spent;
+                WaitWithinNativeBudget(native_wait_budget_us, native_wait_used_us,
+                                       [&](auto timeout) { return pipeline->WaitBuilt(timeout); });
             static auto window = std::chrono::steady_clock::now();
             if (std::chrono::steady_clock::now() - window > std::chrono::seconds{10}) {
                 LOG_INFO(Render_Vulkan,

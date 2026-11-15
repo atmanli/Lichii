@@ -171,6 +171,9 @@ public:
     /// the worker running them.
     void RunOrWait(const ShaderJobHandle& handle);
 
+    /// Promotes work for workers, then waits within timeout without running stages on the caller.
+    bool WaitFor(const ShaderJobHandle& handle, std::chrono::nanoseconds timeout);
+
     /// Cancels the queued jobs and joins the workers once their running stages end. A CPU stage
     /// that ends during shutdown gets no driver stage.
     void Shutdown();

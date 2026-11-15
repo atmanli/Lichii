@@ -280,6 +280,16 @@ void ShaderJobScheduler::RunOrWait(const ShaderJobHandle& handle) {
     handle.Wait();
 }
 
+bool ShaderJobScheduler::WaitFor(const ShaderJobHandle& handle, std::chrono::nanoseconds timeout) {
+    if (handle.Ready() || timeout <= std::chrono::nanoseconds::zero()) {
+        return handle.Ready();
+    }
+    const auto begin = Clock::now();
+    Promote(handle, ShaderJobPriority::NeedNow);
+    const auto spent = Clock::now() - begin;
+    return spent >= timeout ? handle.Ready() : handle.WaitFor(timeout - spent);
+}
+
 void ShaderJobScheduler::Shutdown() {
     std::vector<ShaderJob> dead;
     std::vector<std::thread> joining;

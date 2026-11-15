@@ -594,6 +594,35 @@ TEST_CASE("Shader job stage exceptions fail only that job", "[video_core][shader
     REQUIRE(stats.in_flight_bytes == 0);
 }
 
+TEST_CASE("Timed shader waits promote queued work without running it on the caller",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate gate;
+    const auto blocker = Block(scheduler, gate);
+    const auto caller = std::this_thread::get_id();
+    std::atomic<bool> ran{};
+    std::atomic<bool> ran_on_caller{};
+    const auto job = scheduler.Submit(CpuJob(Background, [&] {
+        ran = true;
+        ran_on_caller = std::this_thread::get_id() == caller;
+    }));
+    const bool zero_ready = scheduler.WaitFor(job, 0ns);
+    const auto zero_priority = job.Priority();
+    const bool ready = scheduler.WaitFor(job, 2ms);
+    const bool ran_before_release = ran.load();
+    const auto priority = job.Priority();
+    gate.Open();
+    blocker.Wait();
+    job.Wait();
+    CHECK_FALSE(zero_ready);
+    CHECK(zero_priority == Background);
+    CHECK_FALSE(ready);
+    CHECK_FALSE(ran_before_release);
+    CHECK_FALSE(ran_on_caller.load());
+    CHECK(priority == NeedNow);
+    CHECK(scheduler.WaitFor(job, 0ns));
+}
+
 TEST_CASE("RunOrWait runs a queued job on the waiting thread", "[video_core][shader_jobs]") {
     ShaderJobScheduler scheduler{Config(1, 1)};
     Gate gate;

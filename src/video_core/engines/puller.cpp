@@ -241,8 +241,10 @@ bool Puller::PendingAcquire::WaitsToReach() const {
 Puller::PendingAcquire::EarlyCheck Puller::PendingAcquire::CheckEarly(
     const std::optional<QueuedRelease>& queued, u32 word) const {
     if (queued) {
-        // The last release the front sent to the word decides once it landed.
-        if (queued->known && Matches(queued->payload)) {
+        // The last release the front sent to the word decides once it landed. A lower bound
+        // (`at_least`: a maximum over an unknown value) only decides a greater-or-equal acquire:
+        // the word may end above it, which an equal or mask acquire would not match.
+        if (queued->known && (!queued->at_least || WaitsToReach()) && Matches(queued->payload)) {
             return EarlyCheck::MetByQueued;
         }
         if (!queued->ran) {

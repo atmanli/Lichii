@@ -255,6 +255,10 @@ TEST_CASE("Semaphore acquires pass without a drain only where draining can't cha
         CHECK(queued(acquire, true, operation == mask ? 1 : 5) ==
               (operation == gequal ? Check::NotMet : Check::Drain));
         CHECK(queued(acquire, true, operation == mask ? 1 : 5, true) == Check::Drain);
+        // A lower bound that meets the value: the word may end above it, so it only decides a
+        // greater-or-equal acquire (a maximum over an unknown 8 records 6 and writes 8).
+        CHECK(queued(acquire, true, operation == mask ? 4 : 6, true) ==
+              (operation == gequal ? Check::MetByQueued : Check::Drain));
         CHECK(queued(acquire, false, 6) == Check::Drain);
         CHECK(ran(acquire, operation == mask ? 4 : 6, 0) == Check::MetByQueued);
     }

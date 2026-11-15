@@ -69,6 +69,7 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/aes_ctr_decryptor.cpp
     core/ncz_cache.cpp
     core/ncz_decompressor.cpp
     core/ncz_io_guards.cpp

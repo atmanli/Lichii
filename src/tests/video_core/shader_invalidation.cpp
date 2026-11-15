@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
 #include <random>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include "core/device_memory.h"
@@ -49,6 +51,12 @@ struct ShaderCacheTestAccess {
         } catch (...) {
             cache.RememberRejection(address);
         }
+    }
+    using AsyncRange = ShaderCache::AsyncRange;
+    using AsyncTranslationActivity = ShaderCache::AsyncTranslationActivity;
+    static std::shared_ptr<AsyncTranslationActivity> RegisterAsync(
+        ShaderCache& cache, std::vector<AsyncRange> ranges, bool unbounded = false) {
+        return cache.RegisterAsyncTranslation(std::move(ranges), unbounded);
     }
 };
 } // namespace VideoCommon
@@ -233,4 +241,81 @@ TEST_CASE("Shader invalidation CPU benchmark", "[.][cache_bench]") {
     }
     std::cout << "Shader invalidation: sequential=" << sequential_ms << " ms batched=" << batched_ms
               << " ms (CPU only, not gameplay FPS)\n";
+}
+
+TEST_CASE("Shader OnCacheInvalidation waits only on overlapping async translation builds",
+          "[shader_invalidation]") {
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager device_memory{memory};
+    auto cache = ShaderCacheTestAccess::Create(device_memory);
+
+    auto overlapping = ShaderCacheTestAccess::RegisterAsync(
+        *cache, {{0x200000, 0x1000}, {0x201000, 0x1000}}, false);
+    auto disjoint = ShaderCacheTestAccess::RegisterAsync(*cache, {{0x800000, 0x2000}}, false);
+
+    std::atomic<bool> overlapping_cancelled{false};
+    std::atomic<bool> disjoint_cancelled{false};
+    overlapping->SetCancelCallback([&] { overlapping_cancelled.store(true); });
+    disjoint->SetCancelCallback([&] { disjoint_cancelled.store(true); });
+
+    std::jthread worker([&](std::stop_token) {
+        while (!overlapping_cancelled.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        CHECK_FALSE(disjoint_cancelled.load());
+        CHECK_FALSE(disjoint->IsInvalidated());
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        overlapping->MarkCpuDone();
+    });
+
+    cache->OnCacheInvalidation(0x201800, 0x800);
+
+    CHECK(overlapping_cancelled.load());
+    CHECK(overlapping->IsCpuDone());
+    CHECK(overlapping->IsInvalidated());
+    CHECK_FALSE(disjoint_cancelled.load());
+    CHECK_FALSE(disjoint->IsCpuDone());
+    CHECK_FALSE(disjoint->IsInvalidated());
+
+    disjoint->MarkCpuDone();
+}
+
+TEST_CASE("Shader invalidation batches and unbounded async builds synchronize before return",
+          "[shader_invalidation]") {
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager device_memory{memory};
+    auto cache = ShaderCacheTestAccess::Create(device_memory);
+
+    auto unbounded = ShaderCacheTestAccess::RegisterAsync(*cache, {}, true);
+    std::atomic<bool> unbounded_cancelled{false};
+    unbounded->SetCancelCallback([&] { unbounded_cancelled.store(true); });
+
+    std::jthread worker([&](std::stop_token) {
+        while (!unbounded_cancelled.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        unbounded->MarkCpuDone();
+    });
+
+    // Unbounded reads conservatively synchronize on arbitrary ranges (e.g. unmap of unknown target).
+    cache->OnCacheInvalidation(0x500000, 0x100);
+    CHECK(unbounded_cancelled.load());
+    CHECK(unbounded->IsCpuDone());
+    CHECK(unbounded->IsInvalidated());
+
+    auto queued_hit = ShaderCacheTestAccess::RegisterAsync(*cache, {{0x300000, 0x1000}}, false);
+    auto queued_miss = ShaderCacheTestAccess::RegisterAsync(*cache, {{0x900000, 0x1000}}, false);
+    queued_hit->SetCancelCallback([&] { queued_hit->MarkCpuDone(); });
+    queued_miss->SetCancelCallback([&] { queued_miss->MarkCpuDone(); });
+
+    const std::array<std::pair<DAddr, size_t>, 2> batch{{{0x100000, 0x1000}, {0x300400, 0x400}}};
+    cache->InvalidateRegions(batch);
+
+    CHECK(queued_hit->IsCpuDone());
+    CHECK(queued_hit->IsInvalidated());
+    CHECK_FALSE(queued_miss->IsCpuDone());
+    CHECK_FALSE(queued_miss->IsInvalidated());
+
+    queued_miss->MarkCpuDone();
 }

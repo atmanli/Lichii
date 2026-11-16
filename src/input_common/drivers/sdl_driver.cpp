@@ -22,6 +22,7 @@
 #include "input_common/drivers/sdl_driver.h"
 #include "input_common/helpers/dualsense_haptics.h"
 #include "input_common/helpers/rumble_mapping.h"
+#include "input_common/helpers/steam_controller_haptics.h"
 
 namespace InputCommon {
 
@@ -224,6 +225,7 @@ public:
                 : guid{guid_}, port{port_}, sdl_joystick{joystick, &SDL_CloseJoystick},
                     sdl_controller{game_controller, &SDL_CloseGamepad},
                     reversed_axes{GetReversedStickAxes(GetBindings(game_controller))} {
+        InitializeSteamHaptics();
         EnableMotion();
     }
 
@@ -358,6 +360,9 @@ public:
     }
 
     bool RumblePlay(const Common::Input::VibrationStatus& vibration, f32 curve_factor) {
+        if (SteamControllerHapticsPlay(vibration)) {
+            return true;
+        }
         constexpr u32 rumble_max_duration_ms = 2000;
         std::scoped_lock lock{rumble_mutex};
         // Both sides of the emulated controller can land on this pad. Keep each side's latest
@@ -425,9 +430,11 @@ public:
         triggers_rumbling = left_trigger != 0 || right_trigger != 0;
     }
 
-    /// Plays the vibration on the DualSense haptics. Returns false when the controller uses
-    /// standard rumble instead.
+    /// Plays detailed haptics when the controller supports them. Returns false for standard rumble.
     bool HapticsPlay(const Common::Input::VibrationStatus& vibration) {
+        if (SteamControllerHapticsPlay(vibration)) {
+            return true;
+        }
         if (!UseDualSenseHaptics()) {
             return false;
         }
@@ -436,6 +443,11 @@ public:
     }
 
     bool IsHapticsOpen() {
+        const auto steam_haptics = GetSteamHaptics();
+        if (steam_haptics && Settings::values.enable_steam_controller_hd_rumble.GetValue() &&
+            steam_haptics->IsStreaming()) {
+            return true;
+        }
         std::scoped_lock lock{haptics_mutex};
         return haptics.IsOpen();
     }
@@ -562,6 +574,14 @@ public:
     }
 
     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
+        std::shared_ptr<SteamControllerHaptics> retired_steam_haptics;
+        {
+            std::scoped_lock lock{steam_haptics_mutex};
+            retired_steam_haptics = std::move(steam_haptics);
+        }
+        if (retired_steam_haptics) {
+            retired_steam_haptics->Disconnect();
+        }
         {
             std::scoped_lock lock{haptics_mutex};
             haptics.Close();
@@ -580,6 +600,7 @@ public:
         sdl_joystick.reset(joystick);
         sdl_controller.reset(controller);
         reversed_axes = GetReversedStickAxes(GetBindings(controller));
+        InitializeSteamHaptics();
     }
 
     bool IsJoyconLeft() const {
@@ -672,6 +693,37 @@ public:
     }
 
 private:
+    std::shared_ptr<SteamControllerHaptics> GetSteamHaptics() const {
+        std::scoped_lock lock{steam_haptics_mutex};
+        return steam_haptics;
+    }
+
+    bool SteamControllerHapticsPlay(const Common::Input::VibrationStatus& vibration) {
+        const auto steam_haptics = GetSteamHaptics();
+        if (!steam_haptics) {
+            return false;
+        }
+        const bool enabled = Settings::values.enable_steam_controller_hd_rumble.GetValue();
+        return steam_haptics->SetVibration(vibration, enabled);
+    }
+
+    void InitializeSteamHaptics() {
+#ifdef _WIN32
+        constexpr Uint16 valve_vendor_id = 0x28DE;
+        if (!sdl_joystick || SDL_GetJoystickVendor(sdl_joystick.get()) != valve_vendor_id) {
+            return;
+        }
+        const Uint16 product_id = SDL_GetJoystickProduct(sdl_joystick.get());
+        if (!SteamHaptics::IsSupportedProduct(product_id)) {
+            return;
+        }
+        const char* const path = SDL_GetJoystickPath(sdl_joystick.get());
+        auto haptics = std::make_shared<SteamControllerHaptics>(path ? path : "", product_id);
+        std::scoped_lock lock{steam_haptics_mutex};
+        steam_haptics = std::move(haptics);
+#endif
+    }
+
     bool UseDualSenseHaptics() {
         if (!Settings::values.enable_dualsense_haptics.GetValue()) {
             std::scoped_lock lock{haptics_mutex};
@@ -720,6 +772,8 @@ private:
     std::unique_ptr<SDL_Joystick, decltype(&SDL_CloseJoystick)> sdl_joystick;
     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
     std::atomic<u64> reversed_axes;
+    mutable std::mutex steam_haptics_mutex;
+    std::shared_ptr<SteamControllerHaptics> steam_haptics;
     mutable std::mutex mutex;
 
     u64 last_motion_update{};

@@ -527,6 +527,15 @@ void EmulatedController::ReloadInput() {
 }
 
 void EmulatedController::UnloadInput() {
+    for (std::size_t index = 0; index < 2; ++index) {
+        if (output_devices[index]) {
+            output_devices[index]->SetVibration({
+                .type = Common::Input::VibrationAmplificationType::Linear,
+                .side = index == 0 ? Common::Input::VibrationSide::Left
+                                   : Common::Input::VibrationSide::Right,
+            });
+        }
+    }
     is_initialized = false;
     for (auto& button : button_devices) {
         button.reset();

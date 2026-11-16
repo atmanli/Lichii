@@ -60,6 +60,9 @@ else()
         drivers/sdl_driver.h
         helpers/dualsense_haptics.cpp
         helpers/dualsense_haptics.h
+        helpers/steam_controller_haptics.cpp
+        helpers/steam_controller_haptics.h
+        helpers/steam_controller_protocol.h
         helpers/joycon_driver.cpp
         helpers/joycon_driver.h
         helpers/rumble_mapping.cpp

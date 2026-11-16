@@ -301,6 +301,10 @@ add_executable(tests
     input_common/steam_controller_signal.cpp
 )
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    target_sources(tests PRIVATE input_common/any_input.cpp input_common/any_input_sdl.cpp)
+endif()
+
 create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common tz ZLIB::ZLIB)

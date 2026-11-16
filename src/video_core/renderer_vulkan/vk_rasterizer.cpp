@@ -3438,8 +3438,8 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
         const auto& targets = texture_cache.GetRenderTargets();
         if (targets.depth_buffer_id) {
             const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
-            if (depth.size.width == oot_motion.extent.width &&
-                depth.size.height == oot_motion.extent.height && !depth.IsRescaled()) {
+            if (oot_motion.SceneSized(depth.size.width, depth.size.height) &&
+                !depth.IsRescaled()) {
                 // Halton (2, 3) with the temporal upscaler's phase count for the prior frame's scale.
                 // AMD's phase count for the last FSR frame's scale.
                 const u32 index = static_cast<u32>(render_trace_frame % oot_jitter_phases) + 1;
@@ -3703,6 +3703,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
         const auto& screen = emu_window.GetFramebufferLayout().screen;
         const VkExtent2D window_extent{screen.GetWidth(), screen.GetHeight()};
         const bool window_sized_output =
+            upscale_4k &&
             (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
              oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
             window_extent.width != 0 && window_extent.height != 0;

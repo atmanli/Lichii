@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <cctype>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -38,6 +40,10 @@
 #include "video_core/shader_cache_v2/cache.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
 #endif
 
 #if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
@@ -1216,11 +1222,26 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 }
 
 void Device::ReportLoss() const {
+    static std::atomic_flag reported;
+    if (reported.test_and_set()) {
+        // The first thread to see the loss reports it and ends the process.
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::hours{1});
+        }
+    }
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     ReportDeviceFault();
-
-    // Wait for the log to flush and for Nsight Aftermath to dump the results
-    std::this_thread::sleep_for(std::chrono::seconds{15});
+    if (nsight_aftermath_tracker) {
+        // Give Nsight Aftermath time to write its dump.
+        std::this_thread::sleep_for(std::chrono::seconds{15});
+    }
+    LOG_CRITICAL(Render_Vulkan, "Closing Lichii: the GPU driver lost the Vulkan device");
+    Common::Log::Flush();
+#ifdef _WIN32
+    // Skips DLL detach, which runs the GPU driver's teardown on the lost device.
+    TerminateProcess(GetCurrentProcess(), EXIT_FAILURE);
+#endif
+    std::_Exit(EXIT_FAILURE);
 }
 
 void Device::ReportDeviceFault() const {

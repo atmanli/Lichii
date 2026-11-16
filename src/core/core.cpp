@@ -420,6 +420,8 @@ struct System::Impl {
         host1x_core.emplace(system);
         VideoCore::CreateGPU(gpu_core, emu_window, system);
         if (!gpu_core) {
+            // As Load does: the kernel is up, and destroying it without its shutdown crashes.
+            ShutdownMainProcess();
             return SystemResultStatus::ErrorVideoCore;
         }
         is_powered_on = true;

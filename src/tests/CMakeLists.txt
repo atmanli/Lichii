@@ -30,6 +30,7 @@ add_executable(tests
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
     core/perf_stats.cpp
+    core/service_auto_stub.cpp
     core/key_derivation.cpp
     common/display_hdr.cpp
     common/dkb_cpu_trace.cpp

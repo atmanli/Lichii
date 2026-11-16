@@ -1272,7 +1272,7 @@ FN_MAX_LIMIT_LIST
                features.bit16_storage.storageBuffer16BitAccess;
     }
 
-    /// What the fsr4-vk FSR 4 port needs, as enabled on this device.
+    /// What the fsr4up-vk FSR 4 port needs, as enabled on this device.
     [[nodiscard]] VideoCommon::Fsr4PortDevice Fsr4PortDevice() const;
 
     [[nodiscard]] static constexpr bool CheckBrokenCompute(VkDriverId driver_id,
@@ -1452,7 +1452,7 @@ private:
     bool float16_math{};                       ///< Shaders may do float16 arithmetic.
     bool cooperative_hmma_16x8x16{};           ///< HMMA runs on the guest's matrix shape.
     bool cooperative_hmma_16x16x16{};          ///< HMMA runs on 16x16x16 matrices.
-    bool fp8_matrix_shapes{}; ///< 16x16x16 FP16 and FP8 matrices with FP32 results (fsr4-vk).
+    bool fsr4_fp8_offered{}; ///< The GPU has what fsr4up-vk runs its FP8 network on.
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.

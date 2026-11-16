@@ -284,6 +284,51 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
              device.IsPatchListPrimitiveRestartSupported()));
 }
 
+/// Polygon offset the game enabled for the primitive type of the draw
+bool PolygonOffsetEnabled(const Maxwell& regs, Maxwell::PrimitiveTopology topology) {
+    constexpr size_t POINT = 0;
+    constexpr size_t LINE = 1;
+    constexpr size_t POLYGON = 2;
+    static constexpr std::array POLYGON_OFFSET_ENABLE_LUT = {
+        POINT,   // Points
+        LINE,    // Lines
+        LINE,    // LineLoop
+        LINE,    // LineStrip
+        POLYGON, // Triangles
+        POLYGON, // TriangleStrip
+        POLYGON, // TriangleFan
+        POLYGON, // Quads
+        POLYGON, // QuadStrip
+        POLYGON, // Polygon
+        LINE,    // LinesAdjacency
+        LINE,    // LineStripAdjacency
+        POLYGON, // TrianglesAdjacency
+        POLYGON, // TriangleStripAdjacency
+        POLYGON, // Patches
+    };
+    const std::array enabled_lut{
+        regs.polygon_offset_point_enable,
+        regs.polygon_offset_line_enable,
+        regs.polygon_offset_fill_enable,
+    };
+    return enabled_lut[POLYGON_OFFSET_ENABLE_LUT[static_cast<u32>(topology)]] != 0;
+}
+
+/// Viewport 0 passes position z and w through unswizzled
+bool ViewportKeepsDepth(const Maxwell& regs) {
+    const auto& swizzle = regs.viewport_transform[0].swizzle;
+    return swizzle.z == Maxwell::ViewportSwizzle::PositiveZ &&
+           swizzle.w == Maxwell::ViewportSwizzle::PositiveW;
+}
+
+/// Depth bias, in units of the depth format, that pushes far plane draws past the far value so
+/// that depth clamping puts them exactly on it. A vertex shader that stores one value to position
+/// z and w puts every vertex on the far plane, the usual way to draw a sky. NVIDIA fills such a
+/// triangle with exactly the far value; AMD's rasterizer lands some pixels a step short, so two
+/// sky meshes fight and a dome tested EQUAL or LEQUAL against an earlier one loses in blocks
+/// (Mario Kart 8 Deluxe's Sky-High Sundae, #1905).
+constexpr float FAR_PLANE_DEPTH_BIAS = 16.0f;
+
 /// Earlier writes must be visible to a dispatch, including its indirect arguments.
 void RecordDispatchBarrier(vk::CommandBuffer cmdbuf) {
     static constexpr VkMemoryBarrier READ_BARRIER{
@@ -4217,6 +4262,16 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         flags[Dirty::DepthBiasEnable] = true;
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
+    const bool far_plane = pipeline != nullptr && pipeline->OnFarPlane() &&
+                           !PolygonOffsetEnabled(regs, topology) && ViewportKeepsDepth(regs);
+    if (far_plane || far_plane != far_plane_draw) {
+        flags[Dirty::DepthBias] = true;
+    }
+    if (far_plane != far_plane_draw) {
+        far_plane_draw = far_plane;
+        flags[Dirty::DepthBiasEnable] = true;
+        flags[Dirty::DepthClampEnable] = true;
+    }
 
     UpdateViewportsState(regs);
     UpdateScissorsState(regs);
@@ -4467,9 +4522,17 @@ void RasterizerVulkan::UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs) {
             units = static_cast<float>(static_cast<double>(units) * rescale_factor);
         }
     }
+    float clamp = regs.depth_bias_clamp;
+    float factor = regs.slope_scale_depth_bias;
+    if (far_plane_draw) {
+        const bool reversed =
+            regs.viewport_scale_offset_enabled && regs.viewport_transform[0].scale_z < 0.0f;
+        units = reversed ? -FAR_PLANE_DEPTH_BIAS : FAR_PLANE_DEPTH_BIAS;
+        clamp = 0.0f;
+        factor = 0.0f;
+    }
 
-    scheduler.Record([constant = units, clamp = regs.depth_bias_clamp,
-                      factor = regs.slope_scale_depth_bias, this](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([constant = units, clamp, factor, this](vk::CommandBuffer cmdbuf) {
         if (device.IsExtDepthBiasControlSupported()) {
             static VkDepthBiasRepresentationInfoEXT bias_info{
                 .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
@@ -4766,34 +4829,9 @@ void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& re
     if (!state_tracker.TouchDepthBiasEnable()) {
         return;
     }
-    constexpr size_t POINT = 0;
-    constexpr size_t LINE = 1;
-    constexpr size_t POLYGON = 2;
-    static constexpr std::array POLYGON_OFFSET_ENABLE_LUT = {
-        POINT,   // Points
-        LINE,    // Lines
-        LINE,    // LineLoop
-        LINE,    // LineStrip
-        POLYGON, // Triangles
-        POLYGON, // TriangleStrip
-        POLYGON, // TriangleFan
-        POLYGON, // Quads
-        POLYGON, // QuadStrip
-        POLYGON, // Polygon
-        LINE,    // LinesAdjacency
-        LINE,    // LineStripAdjacency
-        POLYGON, // TrianglesAdjacency
-        POLYGON, // TriangleStripAdjacency
-        POLYGON, // Patches
-    };
-    const std::array enabled_lut{
-        regs.polygon_offset_point_enable,
-        regs.polygon_offset_line_enable,
-        regs.polygon_offset_fill_enable,
-    };
-    const u32 topology_index = u32(maxwell3d->draw_manager.draw_state.topology);
-    const u32 enable = enabled_lut[POLYGON_OFFSET_ENABLE_LUT[topology_index]];
-    scheduler.Record([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable != 0); });
+    const bool enable =
+        far_plane_draw || PolygonOffsetEnabled(regs, maxwell3d->draw_manager.draw_state.topology);
+    scheduler.Record([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable); });
 }
 
 void RasterizerVulkan::UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
@@ -4815,7 +4853,8 @@ void RasterizerVulkan::UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& r
     if (!device.SupportsDynamicState3DepthClampEnable()) {
         return;
     }
-    bool is_enabled = !(regs.viewport_clip_control.geometry_clip ==
+    bool is_enabled = far_plane_draw ||
+                      !(regs.viewport_clip_control.geometry_clip ==
                             Maxwell::ViewportClipControl::GeometryClip::Passthrough ||
                         regs.viewport_clip_control.geometry_clip ==
                             Maxwell::ViewportClipControl::GeometryClip::FrustumXYZ ||

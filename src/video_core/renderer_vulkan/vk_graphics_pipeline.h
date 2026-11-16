@@ -183,6 +183,13 @@ public:
         return fragment_has_color0_output;
     }
 
+    /// The vertex shader is the last pre-rasterization stage and puts every vertex on the far
+    /// plane, and depth bias enable is a dynamic state. Without a dynamic depth clamp enable the
+    /// pipeline clamps depth.
+    bool OnFarPlane() const noexcept {
+        return on_far_plane;
+    }
+
     /// Color components of a render target the fragment shader writes, as VkColorComponentFlags
     VkColorComponentFlags ColorOutputMask(size_t render_target) const noexcept {
         return (color_output_mask >> (render_target * 4)) & 0xF;
@@ -456,6 +463,7 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    bool on_far_plane{};
     u32 color_output_mask{};
     bool writes_storage{};
     /// Every texture is sampled with a handle read from a constant buffer: ConfigureImpl can

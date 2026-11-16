@@ -61,8 +61,8 @@ private:
     std::optional<AudioManager> audio_manager;
     /// Sink used for audio renderer and audio out
     std::unique_ptr<Sink::Sink> output_sink;
-    /// Sink used for audio input
-    std::unique_ptr<Sink::Sink> input_sink;
+    /// Sink used for audio input. Shared: a microphone open on a helper thread keeps it alive.
+    std::shared_ptr<Sink::Sink> input_sink;
     /// The ADSP in the sysmodule
     std::optional<ADSP::ADSP> adsp;
 };

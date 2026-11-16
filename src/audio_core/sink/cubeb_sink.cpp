@@ -3,7 +3,10 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <mutex>
 #include <span>
+#include <thread>
 #include <vector>
 
 #include "audio_core/common/common.h"
@@ -43,6 +46,7 @@ public:
         : SinkStream(system_, type_), ctx{ctx_} {
 #ifdef _WIN32
         com_init_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        com_thread = std::this_thread::get_id();
 #endif
         name = name_;
         device_channels = device_channels_;
@@ -113,7 +117,9 @@ public:
         }
 
 #ifdef _WIN32
-        if (SUCCEEDED(com_init_result)) {
+        // Only the thread that set COM up may balance it: a microphone opened on a helper thread
+        // is closed on another one.
+        if (SUCCEEDED(com_init_result) && std::this_thread::get_id() == com_thread) {
             CoUninitialize();
         }
 #endif
@@ -224,6 +230,8 @@ private:
 #ifdef _WIN32
     /// Result of this stream's COM initialization, balanced only when it succeeded
     HRESULT com_init_result{};
+    /// The thread that initialized COM for this stream
+    std::thread::id com_thread{};
 #endif
 };
 
@@ -288,35 +296,48 @@ CubebSink::~CubebSink() {
 /// Open a unidirectional stream with only its matching device ID and channel layout.
 SinkStream* CubebSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                          const std::string& name, StreamType type) {
-    system_channels = system_channels_;
-    SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<CubebSinkStream>(
-        ctx, type == StreamType::In ? 2U : device_channels, system_channels,
+    // Build the stream outside the lock: opening a microphone can wait on a permission prompt.
+    auto stream = std::make_unique<CubebSinkStream>(
+        ctx, type == StreamType::In ? 2U : device_channels, system_channels_,
         type == StreamType::In ? nullptr : output_device,
-        type == StreamType::In ? input_device : nullptr, name, type, system));
+        type == StreamType::In ? input_device : nullptr, name, type, system);
+    std::scoped_lock lock{streams_mutex};
+    system_channels = system_channels_;
     stream->SetDeviceVolume(device_volume);
-
-    return stream.get();
+    return sink_streams.emplace_back(std::move(stream)).get();
 }
 
 void CubebSink::CloseStream(SinkStream* stream) {
-    for (size_t i = 0; i < sink_streams.size(); i++) {
-        if (sink_streams[i].get() == stream) {
-            sink_streams[i].reset();
-            sink_streams.erase(sink_streams.begin() + i);
-            break;
+    SinkStreamPtr closed;
+    {
+        std::scoped_lock lock{streams_mutex};
+        const auto it = std::ranges::find_if(
+            sink_streams, [stream](const SinkStreamPtr& owned) { return owned.get() == stream; });
+        if (it == sink_streams.end()) {
+            return;
         }
+        closed = std::move(*it);
+        sink_streams.erase(it);
     }
+    // Stop and destroy it outside the lock.
+    closed.reset();
 }
 
 void CubebSink::CloseStreams() {
-    sink_streams.clear();
+    std::vector<SinkStreamPtr> closed;
+    {
+        std::scoped_lock lock{streams_mutex};
+        closed.swap(sink_streams);
+    }
 }
 
 f32 CubebSink::GetDeviceVolume() const {
+    std::scoped_lock lock{streams_mutex};
     return device_volume;
 }
 
 void CubebSink::SetDeviceVolume(f32 volume) {
+    std::scoped_lock lock{streams_mutex};
     device_volume = volume;
     for (auto& stream : sink_streams) {
         stream->SetDeviceVolume(volume);
@@ -324,6 +345,7 @@ void CubebSink::SetDeviceVolume(f32 volume) {
 }
 
 void CubebSink::SetSystemVolume(f32 volume) {
+    std::scoped_lock lock{streams_mutex};
     for (auto& stream : sink_streams) {
         stream->SetSystemVolume(volume);
     }

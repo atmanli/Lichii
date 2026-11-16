@@ -38,6 +38,7 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 04003F40232DE000 | Hyrule Warriors: Age of Imprisonment |
 | 040015100B514001 | Super Mario Bros. Wonder - Nintendo Switch 2 Edition + Meetup in Bellabel Park |
 | 01004D300C5AE000 | Kirby and the Forgotten Land (Switch 1) |
+| 04004D300C5AE001 | Kirby and the Forgotten Land - Nintendo Switch 2 Edition |
 | 01007EF00011E000 | The Legend of Zelda: Breath of the Wild (Switch 1) |
 | 0100F2C0115B6000 | The Legend of Zelda: Tears of the Kingdom (Switch 1) |
 | 01006D0017F7A000 | Mario & Luigi: Brothership (Switch 1) |

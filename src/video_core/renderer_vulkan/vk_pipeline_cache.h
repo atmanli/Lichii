@@ -146,11 +146,53 @@ public:
                            const VideoCore::DiskResourceLoadCallback& callback);
 
 private:
+    /// In-flight asynchronous runtime graphics pipeline translation submitted from the GPU thread
+    /// when the current draw may be skipped while unbuilt.
+    struct AsyncRuntimeBuild {
+        GraphicsPipelineCacheKey key{};
+        std::unique_ptr<GraphicsEnvironments> environments;
+        std::shared_ptr<AsyncTranslationActivity> activity;
+        VideoCommon::ShaderJobHandle job;
+        std::unique_ptr<GraphicsPipeline> pipeline;
+        std::chrono::microseconds gpu_setup_us{0};
+        std::chrono::microseconds stage_translate_worker_us{0};
+        std::chrono::steady_clock::duration translate_wait{};
+        VideoCommon::EvictedPointerSlots::Slots keep_pointers;
+        bool requires_synchronous_retry{false};
+        bool evicted{false};
+    };
+
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
+
+    /// Returns whether an unbuilt pipeline for the current draw may be discarded right now under
+    /// the active async-shader policy (`use_asynchronous_shaders` / `EDEN_NX2_ASYNC_DISCARD`).
+    [[nodiscard]] bool CanDiscardCurrentDraw() const noexcept;
 
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
+
+    /// Queues translation and creation of `graphics_key` onto `shader_jobs` after snapshotting
+    /// live Maxwell3D/cbuf state on the GPU thread. Returns false if synchronous build is required.
+    bool StartAsyncGraphicsPipeline(const VideoCommon::EvictedPointerSlots::Slots* keep_pointers,
+                                    bool evicted = false);
+
+    /// Finalizes a ready `AsyncRuntimeBuild` into `graphics_cache` and queues disk serialization.
+    GraphicsPipeline* HarvestAsyncRuntimeBuild(AsyncRuntimeBuild& entry);
+
+    /// Completes and harvests all pending async runtime builds before shutting down `shader_jobs`.
+    void DrainAsyncRuntimeBuilds();
+
+    void ApplyKeepPointers(GraphicsEnvironments& environments, const GraphicsPipelineCacheKey& key,
+                           const VideoCommon::EvictedPointerSlots::Slots* keep_pointers) const;
+
+    [[nodiscard]] bool TryFlushTexturePoolForWorkers(
+        GraphicsEnvironments& environments, const GraphicsPipelineCacheKey& key,
+        std::shared_ptr<const std::vector<u8>>* tex_pool_snapshot = nullptr) const;
+
+    void FinalizeGraphicsSerialization(const GraphicsPipelineCacheKey& key,
+                                       const GraphicsPipeline* pipeline,
+                                       GraphicsEnvironments& environments);
 
     /// With `keep_pointers`, the slots an evicted pipeline of this key bound stay storage buffer
     /// pointers whatever they hold now. `evicted`: a pipeline of this key was evicted.
@@ -303,6 +345,7 @@ private:
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
     std::unordered_set<u64> evicted_hashes;   ///< Key hashes of evicted pipelines not created again
+    std::unordered_set<u64> synchronous_runtime_retries;
     VideoCommon::EvictedPointerSlots evicted_pointer_slots;
     /// The SPIR-V and stage infos of evicted pipelines, which build them again when used again
     VideoCommon::BoundedStore<GraphicsPipelineCacheKey, KeptGraphicsStages> kept_stages{0};
@@ -314,6 +357,8 @@ private:
     /// them (tick, pipeline)
     std::deque<std::pair<u64, std::unique_ptr<ComputePipeline>>> retired_compute_pipelines;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
+    ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<AsyncRuntimeBuild>>
+        async_runtime_builds;
 
     ShaderPools main_pools;
     std::mutex spare_pools_mutex;

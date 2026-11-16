@@ -40,8 +40,181 @@
 
 namespace VideoCommon {
 
+namespace {
+
+[[nodiscard]] u64 SaturatingEnd(VAddr addr, size_t size) noexcept {
+    if (size > (std::numeric_limits<u64>::max)() - addr) {
+        return (std::numeric_limits<u64>::max)();
+    }
+    return addr + size;
+}
+
+} // Anonymous namespace
+
+void ShaderCache::CoalesceRanges(std::vector<AsyncRange>& ranges) {
+    std::erase_if(ranges, [](const AsyncRange& range) { return range.size == 0; });
+    if (ranges.size() <= 1) {
+        return;
+    }
+    std::ranges::sort(ranges, [](const AsyncRange& a, const AsyncRange& b) {
+        if (a.addr != b.addr) {
+            return a.addr < b.addr;
+        }
+        return a.size < b.size;
+    });
+    size_t write = 0;
+    for (size_t read = 1; read < ranges.size(); ++read) {
+        auto& back = ranges[write];
+        const auto& next = ranges[read];
+        const u64 back_end = SaturatingEnd(back.addr, back.size);
+        if (next.addr <= back_end) {
+            const u64 next_end = SaturatingEnd(next.addr, next.size);
+            if (next_end > back_end) {
+                back.size = static_cast<size_t>(next_end - back.addr);
+            }
+        } else {
+            ranges[++write] = next;
+        }
+    }
+    ranges.resize(write + 1);
+}
+
+bool ShaderCache::AsyncTranslationActivity::Overlaps(VAddr addr, size_t size) const noexcept {
+    if (unbounded_reads) {
+        return true;
+    }
+    if (size == 0) {
+        return false;
+    }
+    const u64 end = SaturatingEnd(addr, size);
+    for (const auto& range : tracked_ranges) {
+        if (range.size == 0) {
+            continue;
+        }
+        const u64 range_end = SaturatingEnd(range.addr, range.size);
+        if (addr < range_end && range.addr < end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ShaderCache::AsyncTranslationActivity::SetCancelCallback(std::function<void()> callback) {
+    std::function<void()> immediate_cancel;
+    {
+        std::scoped_lock lock{mutex};
+        if (cpu_done) {
+            return;
+        }
+        if (stop_requested) {
+            immediate_cancel = std::move(callback);
+        } else {
+            cancel_callback = std::move(callback);
+        }
+    }
+    if (immediate_cancel) {
+        immediate_cancel();
+    }
+}
+
+void ShaderCache::AsyncTranslationActivity::ClearCancelCallback() noexcept {
+    std::function<void()> old_callback;
+    {
+        std::scoped_lock lock{mutex};
+        old_callback = std::move(cancel_callback);
+        cancel_callback = nullptr;
+    }
+}
+
+void ShaderCache::AsyncTranslationActivity::MarkCpuDone() noexcept {
+    std::function<void()> old_callback;
+    {
+        std::scoped_lock lock{mutex};
+        cpu_done = true;
+        old_callback = std::move(cancel_callback);
+        cancel_callback = nullptr;
+    }
+    cv.notify_all();
+}
+
+bool ShaderCache::AsyncTranslationActivity::IsCpuDone() const noexcept {
+    std::scoped_lock lock{mutex};
+    return cpu_done;
+}
+
+bool ShaderCache::AsyncTranslationActivity::IsInvalidated() const noexcept {
+    std::scoped_lock lock{mutex};
+    return invalidated;
+}
+
+std::shared_ptr<ShaderCache::AsyncTranslationActivity> ShaderCache::RegisterAsyncTranslation(
+    std::vector<AsyncRange> tracked_ranges, bool unbounded_reads) {
+    CoalesceRanges(tracked_ranges);
+    auto activity =
+        std::make_shared<AsyncTranslationActivity>(std::move(tracked_ranges), unbounded_reads);
+    std::scoped_lock lock{async_translations_mutex};
+    std::erase_if(async_translations,
+                  [](const auto& existing) { return existing->IsCpuDone(); });
+    async_translations.push_back(activity);
+    return activity;
+}
+
+void ShaderCache::WaitForInvalidatedAsyncTranslations(
+    std::span<const std::pair<DAddr, size_t>> ranges) {
+    std::vector<std::shared_ptr<AsyncTranslationActivity>> matches;
+    {
+        std::scoped_lock lock{async_translations_mutex};
+        std::erase_if(async_translations,
+                      [](const auto& existing) { return existing->IsCpuDone(); });
+        for (const auto& activity : async_translations) {
+            if (std::ranges::any_of(ranges, [&](const auto& range) {
+                    return activity->Overlaps(range.first, range.second);
+                })) {
+                matches.push_back(activity);
+            }
+        }
+    }
+    if (matches.empty()) {
+        return;
+    }
+    for (const auto& activity : matches) {
+        std::function<void()> cancel;
+        {
+            std::scoped_lock lock{activity->mutex};
+            activity->invalidated = true;
+            activity->stop_requested = true;
+            if (!activity->cpu_done && activity->cancel_callback) {
+                cancel = std::move(activity->cancel_callback);
+                activity->cancel_callback = nullptr;
+            }
+        }
+        if (cancel) {
+            cancel();
+        }
+        std::unique_lock lock{activity->mutex};
+        activity->cv.wait(lock, [&] { return activity->cpu_done; });
+    }
+    std::scoped_lock lock{async_translations_mutex};
+    std::erase_if(async_translations, [](const auto& existing) { return existing->IsCpuDone(); });
+}
+
+void ShaderCache::ClearAsyncTranslationCallbacks() {
+    std::vector<std::shared_ptr<AsyncTranslationActivity>> active;
+    {
+        std::scoped_lock lock{async_translations_mutex};
+        std::erase_if(async_translations,
+                      [](const auto& existing) { return existing->IsCpuDone(); });
+        active = async_translations;
+    }
+    for (const auto& activity : active) {
+        activity->ClearCancelCallback();
+    }
+}
+
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
+    const std::array<std::pair<DAddr, size_t>, 1> ranges{{{addr, size}}};
+    WaitForInvalidatedAsyncTranslations(ranges);
     InvalidatePagesInRegion(addr, size);
     RemovePendingShaders();
 }
@@ -51,6 +224,7 @@ void ShaderCache::InvalidateRegions(std::span<const std::pair<DAddr, size_t>> se
         return;
     }
     std::scoped_lock lock{invalidation_mutex};
+    WaitForInvalidatedAsyncTranslations(sequences);
     for (const auto& [addr, size] : sequences) {
         InvalidatePagesInRegion(addr, size);
     }
@@ -59,6 +233,8 @@ void ShaderCache::InvalidateRegions(std::span<const std::pair<DAddr, size_t>> se
 
 void ShaderCache::OnCacheInvalidation(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
+    const std::array<std::pair<DAddr, size_t>, 1> ranges{{{addr, size}}};
+    WaitForInvalidatedAsyncTranslations(ranges);
     InvalidatePagesInRegion(addr, size);
 }
 

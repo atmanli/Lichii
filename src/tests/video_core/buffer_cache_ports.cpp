@@ -2878,3 +2878,23 @@ TEST_CASE("A DMA clear finds buffers past the first quarter of its range", "[buf
     REQUIRE_FALSE(f.cache->DMAClear(0x200000, 0x200, 0x09090909));
     REQUIRE(f.cache->DMAClear(0x200000, 0x201, 0x09090909));
 }
+
+
+TEST_CASE("A DMA clear reaches a tracked buffer in a discontiguous device run",
+          "[buffer_ports]") {
+    KeepFixture f{nullptr};
+    f.Draw(nullptr); // Bind a channel for FindBuffer and possible overlap cleanup.
+    constexpr GPUVAddr gpu_begin = 0x200000;
+    constexpr u64 page_size = 0x10000;
+    // Two adjacent GPU pages, backed by nonadjacent physical allocations.
+    f.memory->Map(gpu_begin, 0x20000, page_size, Tegra::PTEKind::PITCH, true);
+    f.memory->Map(gpu_begin + page_size, 0x40000, page_size, Tegra::PTEKind::PITCH, true);
+    const auto second = Access::Add(*f.cache, 0x40000, page_size);
+    auto& bytes = Access::Get(*f.cache, second).bytes;
+    std::ranges::fill(bytes, 0x42);
+
+    // The previous one-translation implementation checked 0x20000..0x40000 for
+    // registered buffers, missing the tracked page at 0x40000 altogether.
+    REQUIRE(f.cache->DMAClear(gpu_begin, 2 * page_size / sizeof(u32), 0x09090909));
+    REQUIRE(std::ranges::all_of(bytes, [](u8 byte) { return byte == 0x09; }));
+}

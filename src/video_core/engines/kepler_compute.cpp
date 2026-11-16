@@ -530,6 +530,12 @@ void KeplerCompute::CallMethod(Core::System& system, u32 method, u32 method_argu
                         .exec_address = upload_state.ExecTargetAddress(),
                         .copy_size = upload_state.GetUploadSize(),
                         .was_dirty = upload_dirty};
+        // Only the register launch below reads and clears this list. Native (QMD) launches never
+        // do, so in Ocarina it grew by one entry per upload for the whole session (768 MiB after
+        // ~90 minutes). A launch only looks at uploads since the previous one: keep the newest.
+        if (uploads.size() >= MaxPendingUploads) {
+            uploads.erase(uploads.begin(), uploads.begin() + MaxPendingUploads / 2);
+        }
         uploads.push_back(info);
         upload_state.ProcessExec(regs.exec_upload.linear != 0);
         break;
@@ -586,6 +592,8 @@ void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32*
 /// Set up the compute registers from the native descriptor and submit the dispatch.
 /// Returns true if the dispatch was submitted, skipped, or replaced.
 bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor) {
+    // A native launch consumes the uploads made for it (the register launch does the same).
+    uploads.clear();
     // A grid of GPU-written list words (Nx2ListIndirect): one slot's three words, which the host
     // GPU dispatches from, or placeholders of several, whose words the back reads.
     NativeQmdScheduler::Descriptor resolved;

@@ -243,6 +243,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_fsr4_upscaler.h
     renderer_vulkan/vk_xess_upscaler.cpp
     renderer_vulkan/vk_xess_upscaler.h
+    vulkan_common/descriptor_limits.h
     vulkan_common/ffx_files.h
     vulkan_common/ffx_runtime.cpp
     vulkan_common/ffx_runtime.h

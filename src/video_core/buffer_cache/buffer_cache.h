@@ -77,9 +77,9 @@ BufferCache<P>::~BufferCache() {
 }
 
 template <class P>
-void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
+void BufferCache<P>::RunGarbageCollector(bool aggressive_gc, u64 idle_frames) {
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferCollect};
-    const u64 ticks_to_destroy = aggressive_gc ? 60 : 120;
+    const u64 ticks_to_destroy = idle_frames != 0 ? idle_frames : aggressive_gc ? 60 : 120;
     int num_iterations = aggressive_gc ? 64 : 32;
     // Their GPU-written data is downloaded first, all with one wait for the GPU: one wait per
     // buffer stalled the GPU thread every frame on title 1 (an 8 GB GPU near its budget, no
@@ -209,6 +209,12 @@ void BufferCache<P>::TickFrame() {
         // long gone: title 1's title screen grew to ~0.9 GB of buffers in ten minutes.
         if (buffer_bytes >= 512_MiB) {
             RunGarbageCollector(buffer_bytes >= 1_GiB);
+        } else {
+            // Below that, buffers unused for a minute or more (3600 frames) go too: Mario Kart
+            // World's race kept 21-80 MiB of menu, video and loading buffers nothing used again,
+            // as the cache was under 512 MiB. Their contents are in guest memory, as for any
+            // collected buffer; GPU-written ones stay.
+            RunGarbageCollector(false, 3600);
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
@@ -3082,8 +3088,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
-            ++buffer_deletions;
-            slot_buffers.erase(inline_buffer_id);
+            DeleteBuffer(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         channel_state->index_buffer = Binding{
@@ -4280,6 +4285,9 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     }
 
     Unregister(buffer_id);
+    if (buffer_id == inline_buffer_id) {
+        inline_buffer_id = NULL_BUFFER_ID;
+    }
 
 #ifdef LICHII_LEGACY
     if (!do_not_mark || !immediately_free)

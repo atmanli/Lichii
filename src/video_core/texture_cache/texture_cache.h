@@ -643,6 +643,11 @@ void TextureCache<P>::TickFrame() {
                                     image_bytes += GetScaledImageSizeBytes(*image);
                                 }
                             }
+                            if constexpr (requires { runtime.PooledImageBytes(); }) {
+                                // The pool's host images are in the driver's usage: they are
+                                // images, not other memory (EDEN_NX2_IMAGE_POOL).
+                                image_bytes += runtime.PooledImageBytes();
+                            }
                             other_memory =
                                 total_used_memory - (std::min)(total_used_memory, image_bytes);
                         }

@@ -507,6 +507,7 @@ private:
     void UpdateAAText();
     void UpdatePostShaderText();
     void UpdateFrameGenButton();
+
     void UpdateVolumeUI();
     void UpdateStatusBar();
     void UpdateGPUAccuracyButton();
@@ -616,6 +617,7 @@ private:
     QPushButton* aa_status_button = nullptr;
     QPushButton* post_shader_status_button = nullptr;
     QPushButton* frame_gen_status_button = nullptr;
+
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;
     u64 dlss_evaluations = 0;

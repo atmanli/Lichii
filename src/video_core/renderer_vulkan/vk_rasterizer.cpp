@@ -486,8 +486,6 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
-    oot_performance_scale =
-        Settings::AppliedOcarinaRenderScale() == Settings::OcarinaRenderScale::Scale75;
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -2393,9 +2391,12 @@ void RasterizerVulkan::DispatchCompute() {
     };
     const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
     const auto list_slot = kepler_compute->GetIndirectListSlot();
+    const auto oot_pass = VideoCommon::FindOcarinaUpscalePass(native_key, pipeline->ShaderHash());
     // The full-size 1080p pass is replaced by FSR/XeSS (native AA); DLAA through it is untested.
-    const bool can_replace = OcarinaTemporalEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
-                             (pipeline->ShaderHash() != ComputePipeline::OcarinaFullSizeShader ||
+    const bool can_replace = OcarinaTemporalEnabled() &&
+                             oot_pass != VideoCommon::OcarinaUpscalePass::None &&
+                             pipeline->CanReplaceOcarinaUpscale() &&
+                             (oot_pass != VideoCommon::OcarinaUpscalePass::FullSize ||
                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
                              !indirect_address && !list_slot && !frame_dump.Capturing();
@@ -3663,8 +3664,10 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
     // At the DLSS Performance render scale (1920x1080) the game upscales to 2560x1440 with its
     // 3/4 pass instead (QuincyForbes' f7d0938b5b). The scale is the one the game started with,
     // whatever quality is chosen since.
-    const bool three_quarter_1440p = pass == ThreeQuarter &&
-                                     oot_performance_scale && target.size.width == 2560 &&
+    const bool three_quarter_1440p =
+        pass == ThreeQuarter &&
+        Settings::AppliedOcarinaRenderScale() == Settings::OcarinaRenderScale::Scale75 &&
+        target.size.width == 2560 &&
                                      target.size.height == 1440;
     const bool pass_1440p = pass == Pass1440p || three_quarter_1440p;
     const bool upscale_4k = pass_1440p && !native_resolution;

@@ -86,6 +86,7 @@ add_executable(tests
     core/fs_read_throttle.cpp
     core/npdm_kac.cpp
     core/nx_archive.cpp
+    frontend_common/mod_manager.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
     core/kip_ini.cpp

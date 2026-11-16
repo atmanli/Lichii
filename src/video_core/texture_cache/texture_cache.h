@@ -329,6 +329,22 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         Configure(true);
         Collect();
     }
+    if constexpr (requires { runtime.PooledImageBytes(); }) {
+        // Host images kept for reuse (EDEN_NX2_IMAGE_POOL), after the collection: all of them when
+        // memory runs out or stays critical. Past the expected budget (where a device with little
+        // memory sits while the collector keeps up) the pool keeps at most half the room left under
+        // critical: emptying it there would only make the next frame's images again.
+        // The cap: a quarter of the room under the expected budget, between 64 MiB and 1 GiB.
+        const u64 room = expected_memory > total_used_memory ? expected_memory - total_used_memory : 0;
+        runtime.SetImagePoolCap(std::clamp<u64>(room / 4, 64ULL << 20, 1ULL << 30));
+        if (const u64 pooled = runtime.PooledImageBytes(); pooled != 0) {
+            if (out_of_memory || total_used_memory >= critical_memory) {
+                runtime.TrimImagePool(0);
+            } else if (total_used_memory + pooled > expected_memory) {
+                runtime.TrimImagePool((critical_memory - total_used_memory) / 2);
+            }
+        }
+    }
 }
 
 template <class P>
@@ -4430,6 +4446,10 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         LOG_INFO(Render_Vulkan, "Retained image for queued download: id={}", image_id.Value());
     } else if (!immediate_delete) {
         if constexpr (requires { runtime.CurrentTick(); }) {
+            if constexpr (requires { slot_images[image_id].AllowPooling(); }) {
+                // Destroyed once the host GPU is past its last use: its host image may be reused.
+                slot_images[image_id].AllowPooling();
+            }
             gpu_sentenced_images.push_back(
                 {runtime.CurrentTick(), freed_bytes, std::move(slot_images[image_id])});
             gpu_sentenced_bytes += freed_bytes;

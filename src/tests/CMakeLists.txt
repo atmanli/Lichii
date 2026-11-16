@@ -49,6 +49,7 @@ add_executable(tests
     audio_core/microphone.cpp
     audio_core/hardware_audio_codec.cpp
     core/gpu_dirty_memory.cpp
+    core/nso_loader.cpp
     core/memory_acquire.cpp
     core/kip_sections.cpp
     core/memory_span.cpp
@@ -75,6 +76,7 @@ add_executable(tests
     core/vfs_vector.cpp
     core/kip_ini.cpp
     core/ncz_cache.cpp
+    core/kip_truncated.cpp
     core/ncz_decompressor.cpp
     core/ncz_io_guards.cpp
     core/ncz_container.cpp

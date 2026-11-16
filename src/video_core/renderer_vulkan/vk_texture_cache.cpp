@@ -597,18 +597,19 @@ struct ImagePool {
         }
     }
 
-    /// Destroys up to `count` doomed images, outside the lock.
+    /// Destroys up to `count` doomed images, outside the lock, and more while the doomed ones
+    /// hold more than the cap: the pool's own bytes and those still to destroy stay within twice
+    /// the cap however the images that leave it are sized.
     void DestroyDoomed(size_t count) {
-        std::array<vk::Image, DestroysPerCall> images;
-        size_t taken = 0;
+        boost::container::small_vector<vk::Image, DestroysPerCall> images;
         {
             std::scoped_lock lock{mutex};
-            while (taken < count && taken < images.size() && !doomed.empty()) {
+            while (!doomed.empty() && (images.size() < count || doomed_bytes > cap)) {
                 doomed_bytes -= doomed.front().bytes;
-                images[taken++] = std::move(doomed.front().image);
+                images.push_back(std::move(doomed.front().image));
                 doomed.pop_front();
             }
-            destroyed += taken;
+            destroyed += images.size();
         }
         // `images` destroys them here.
     }
@@ -668,8 +669,9 @@ struct ImagePool {
         DestroyDoomed(DestroysPerCall);
     }
 
-    /// Drops the oldest until at most target bytes are kept. With 0 (memory ran out, or the
-    /// device goes) every image that left is destroyed at once.
+    /// Drops the oldest until at most target bytes are kept, those still to destroy included:
+    /// the texture cache asks when it needs the memory, so they are destroyed now (outside the
+    /// lock). With 0 (memory ran out, or the device goes) every image that left goes.
     void Trim(u64 target) {
         std::deque<Entry> now_destroyed;
         {
@@ -678,11 +680,12 @@ struct ImagePool {
                 ++trimmed;
                 Doom();
             }
-            if (target == 0) {
-                destroyed += doomed.size();
-                now_destroyed.swap(doomed);
-                doomed_bytes = 0;
+            while (!doomed.empty() && bytes + doomed_bytes > target) {
+                doomed_bytes -= doomed.front().bytes;
+                now_destroyed.push_back(std::move(doomed.front()));
+                doomed.pop_front();
             }
+            destroyed += now_destroyed.size();
         }
     }
 };
@@ -3194,6 +3197,10 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    if (ImagePoolEnabled()) {
+        // Images that left the pool are destroyed also when no image is made or collected.
+        GetImagePool().DestroyDoomed(ImagePool::DestroysPerCall);
+    }
     while (!pending_byte_addressed_shadows.empty() &&
            scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
         pending_byte_addressed_shadows.pop_front();

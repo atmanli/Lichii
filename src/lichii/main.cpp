@@ -7,6 +7,7 @@
 #include <exception>
 #include <filesystem>
 #include <system_error>
+#include <utility>
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
@@ -29,9 +30,47 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <QFileOpenEvent>
 #endif
 
 #include "main_window.h"
+
+#ifdef __APPLE__
+namespace {
+// Finder hands the files it opens with Lichii (double-click, Open With, a drop on the Dock icon)
+// over as QFileOpenEvent, not as arguments. Those that come before the main window wait for it.
+class FileOpenFilter : public QObject {
+public:
+    void SetWindow(MainWindow* main_window) {
+        window = main_window;
+        for (const QString& file : std::exchange(pending, {})) {
+            window->QueueOpenFile(file);
+        }
+    }
+
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override {
+        if (event->type() != QEvent::FileOpen) {
+            return QObject::eventFilter(object, event);
+        }
+        const QString file = static_cast<QFileOpenEvent*>(event)->file();
+        if (file.isEmpty()) {
+            return QObject::eventFilter(object, event);
+        }
+        if (window) {
+            window->QueueOpenFile(file);
+        } else {
+            pending.push_back(file);
+        }
+        return true;
+    }
+
+private:
+    MainWindow* window{};
+    QStringList pending;
+};
+} // namespace
+#endif
 
 #ifdef _WIN32
 #include <QScreen>
@@ -251,9 +290,17 @@ int main(int argc, char* argv[]) {
     // generating shaders
     setlocale(LC_ALL, "C");
 
+#ifdef __APPLE__
+    FileOpenFilter file_open_filter;
+    app.installEventFilter(&file_open_filter);
+#endif
+
     try {
         MainWindow main_window{has_broken_vulkan};
         main_window.show();
+#ifdef __APPLE__
+        file_open_filter.SetWindow(&main_window);
+#endif
         app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window,
                     &MainWindow::OnAppFocusStateChanged);
         return app.exec();

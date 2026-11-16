@@ -338,9 +338,12 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         const u64 room = expected_memory > total_used_memory ? expected_memory - total_used_memory : 0;
         runtime.SetImagePoolCap(std::clamp<u64>(room / 4, 64ULL << 20, 1ULL << 30));
         if (const u64 pooled = runtime.PooledImageBytes(); pooled != 0) {
+            // The driver's usage already holds the pool's images; the estimate does not.
+            const u64 with_pool =
+                total_used_memory + (runtime.CanReportMemoryUsage() ? 0 : pooled);
             if (out_of_memory || total_used_memory >= critical_memory) {
                 runtime.TrimImagePool(0);
-            } else if (total_used_memory + pooled > expected_memory) {
+            } else if (with_pool > expected_memory) {
                 runtime.TrimImagePool((critical_memory - total_used_memory) / 2);
             }
         }

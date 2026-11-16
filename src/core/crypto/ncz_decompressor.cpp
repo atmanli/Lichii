@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -108,6 +109,12 @@ std::optional<std::pair<std::vector<Section>, std::optional<BlockHeader>>> Parse
             static_cast<u64>(n) * 4 > fsize - block_start - BlockFixed)
             return std::nullopt;
         b.decompressed_size = Le(fixed.data() + 16, 8);
+        // nsz writes ceil(decompressed_size / block_size) blocks, the last one short. Any other
+        // count makes a non-final block claim a whole block of output, up to 4 GiB.
+        const u64 block_size = u64{1} << b.exponent;
+        if (static_cast<u64>(n) !=
+            b.decompressed_size / block_size + (b.decompressed_size % block_size != 0 ? 1 : 0))
+            return std::nullopt;
         const auto sizes = f->ReadBytes(static_cast<u64>(n) * 4, block_start + BlockFixed);
         if (sizes.size() != static_cast<u64>(n) * 4) return std::nullopt;
         b.sizes.resize(n);
@@ -265,6 +272,9 @@ constexpr int SolidWindowLogMax = 27; // 128 MiB, sufficient for ordinary nsz co
 std::atomic<std::size_t> solid_memory_used{};
 // Size of the last allocation the budget refused on this thread, for the failure's log line.
 thread_local std::size_t solid_refused_size{};
+// Wait between attempts to decode again after a full disk or a budget held by decoding readers.
+constexpr std::chrono::milliseconds SolidRetryDelayMin{250};
+constexpr std::chrono::milliseconds SolidRetryDelayMax{32000};
 
 struct alignas(std::max_align_t) SolidAllocation {
     std::size_t size;
@@ -349,6 +359,8 @@ std::mutex solid_readers_mutex;
 std::vector<const SolidNczFile*> solid_readers;
 
 // A single forward decode populates a private disk file; random/backward reads reuse it.
+// A full disk or an exhausted decoder budget is temporary: later reads decode again. Only
+// corrupt or changed data fails the reader for good.
 class SolidNczFile final : public FileSys::VfsFile {
 public:
     SolidNczFile(std::string name_, FileSys::VirtualFile source_, std::vector<Section> sections_,
@@ -356,9 +368,8 @@ public:
         : name{std::move(name_)}, source{std::move(source_)}, sections{std::move(sections_)},
           payload_start{payload_start_}, nca_size{size_}, read_pos{payload_start_} {
         solid_refused_size = 0;
-        const auto raw_header = source->ReadBytes(HeaderSize, 0);
         cache = backing ? std::move(backing) : std::make_unique<NczCache>();
-        if (raw_header.size() != HeaderSize || !cache->IsOpen() || !cache->Write(raw_header, 0)) {
+        if (!WriteHeader()) {
             Fail("cannot create/write private temporary cache");
         }
         std::scoped_lock registry{solid_readers_mutex};
@@ -391,10 +402,20 @@ public:
             return 0;
         len = static_cast<std::size_t>(std::min<u64>(len, nca_size - off));
         const u64 needed = off + len;
-        if (needed > frontier && !DecodeTo(needed)) return 0;
-        if (cache->Read(std::span{out, len}, off) != len) {
-            Fail("temporary cache read failed");
-            return 0;
+        const bool retrying = needed > frontier && retry_delay.count() != 0;
+        if (needed > frontier) {
+            if (std::chrono::steady_clock::now() < retry_at)
+                return 0;
+            if (frontier == 0 && !(cache->Open() && WriteHeader()))
+                return CacheFault("cannot create/write private temporary cache");
+            if (needed > frontier && !DecodeTo(needed))
+                return 0;
+        }
+        if (cache->Read(std::span{out, len}, off) != len)
+            return CacheFault("temporary cache read failed");
+        if (retrying) {
+            LOG_INFO(Crypto, "Solid NCZ {}: reads work again", name);
+            retry_delay = {};
         }
         return len;
     }
@@ -423,6 +444,33 @@ private:
         }
     }
 
+    bool WriteHeader() const {
+        const auto raw_header = source->ReadBytes(HeaderSize, 0);
+        if (raw_header.size() != HeaderSize || !cache->IsOpen() || !cache->Write(raw_header, 0))
+            return false;
+        frontier = HeaderSize;
+        return true;
+    }
+
+    // Later reads wait for retry_at, so a lasting condition doesn't redo the decode every read.
+    void Backoff() const {
+        retry_at = std::chrono::steady_clock::now() + retry_delay;
+        retry_delay = std::clamp(retry_delay * 2, SolidRetryDelayMin, SolidRetryDelayMax);
+    }
+
+    // The disk may be full: free the cache's space and decode into a new one later.
+    std::size_t CacheFault(const char* reason) const {
+        if (retry_delay.count() == 0)
+            LOG_ERROR(Crypto, "Solid NCZ {}: {}; retrying on later reads", name, reason);
+        ReleaseDecoder();
+        cache->Close();
+        frontier = 0;
+        section_index = 0;
+        frame_ended = false;
+        Backoff();
+        return 0;
+    }
+
     bool Fail(const char* reason) const {
         if (solid_refused_size != 0 && budget_retry) {
             // DecodeTo takes the memory of idle readers and resumes from the frontier.
@@ -430,16 +478,21 @@ private:
             return false;
         }
         if (solid_refused_size != 0) {
-            // Idle readers were already released, so the budget is held by decoding ones.
-            LOG_ERROR(Crypto,
-                      "Solid NCZ {}: {}: the decoder memory budget is used up ({} KiB refused, {} "
-                      "of {} MiB held by open solid readers)",
-                      name, reason, solid_refused_size >> 10, solid_memory_used.load() >> 20,
-                      SolidMemoryLimit >> 20);
+            // Idle readers were already released, so the budget is held by decoding ones. The
+            // cache stays valid, and a later read resumes like a released reader.
+            if (retry_delay.count() == 0)
+                LOG_ERROR(Crypto,
+                          "Solid NCZ {}: {}: the decoder memory budget is used up ({} KiB "
+                          "refused, {} of {} MiB held by open solid readers); retrying on later "
+                          "reads",
+                          name, reason, solid_refused_size >> 10,
+                          solid_memory_used.load() >> 20, SolidMemoryLimit >> 20);
             solid_refused_size = 0;
-        } else {
-            LOG_ERROR(Crypto, "Solid NCZ {}: {}", name, reason);
+            ReleaseDecoder();
+            Backoff();
+            return false;
         }
+        LOG_ERROR(Crypto, "Solid NCZ {}: {}", name, reason);
         failed = true;
         ReleaseDecoder();
         cache.reset();
@@ -495,7 +548,7 @@ private:
         budget_retry = true;
         const bool decoded = Decode(needed);
         budget_retry = false;
-        if (decoded || failed)
+        if (decoded || solid_refused_size == 0)
             return decoded;
         ReleaseIdleReaders();
         solid_refused_size = 0;
@@ -574,11 +627,12 @@ private:
                 Key128 iv{};
                 SetIv(iv, section.counter, frontier);
                 cipher.SetIV(iv);
-                std::fill_n(output.get(), prefix, 0);
+                std::fill_n(output.get(), prefix, u8{0});
                 cipher.Transcode(output.get(), prefix + produced, output.get(), Op::Encrypt);
             }
             if (!cache->Write(std::span{output.get() + prefix, produced}, frontier)) {
-                return Fail("temporary cache write failed (disk full or I/O error)");
+                CacheFault("temporary cache write failed (disk full or I/O error)");
+                return false;
             }
             frontier += produced;
             if (frontier == nca_size) {
@@ -601,11 +655,13 @@ private:
     mutable std::unique_ptr<u8, SolidBufferDeleter> output;
     mutable ZSTD_DStream* stream = nullptr;
     mutable u64 read_pos;
-    mutable u64 frontier = HeaderSize;
+    mutable u64 frontier{};
     mutable std::size_t section_index{};
     mutable bool frame_ended{};
     mutable bool failed{};
     mutable bool budget_retry{};
+    mutable std::chrono::steady_clock::time_point retry_at{};
+    mutable std::chrono::milliseconds retry_delay{};
     mutable ZSTD_inBuffer in{nullptr, 0, 0};
 };
 

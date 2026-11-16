@@ -682,6 +682,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsUniformTexelBufferArrayNonUniformIndexingSupported(),
         .support_storage_texel_buffer_array_nonuniform_indexing =
             device.IsStorageTexelBufferArrayNonUniformIndexingSupported(),
+        .select_global_memory_buffer = driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+                                       device.IsNonUniformStorageBufferPointerSupported(),
 
         .warp_size_potentially_larger_than_guest = device.IsWarpSizePotentiallyBiggerThanGuest(),
 
@@ -744,6 +746,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_descriptor_set_sampled_images = device.GetMaxDescriptorSetSampledImages(),
         .max_descriptor_set_storage_images = device.GetMaxDescriptorSetStorageImages(),
         .max_descriptor_set_input_attachements = device.GetMaxDescriptorSetInputAttachments(),
+        .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
         .support_float64 = device.IsFloat64Supported(),
         .support_float16 = device.IsFloat16Supported(),
         .support_int64 = device.IsShaderInt64Supported(),
@@ -761,13 +764,28 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_handle_table_arrays = device.IsSampledImageArrayNonUniformIndexingSupported(),
         .needs_lrz_disable = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
     };
+    // MoltenVK allows 16 samplers a stage, but more in sets from update-after-bind pools, which
+    // it puts in Metal argument buffers. Layouts over the core limits take such a pool
+    // (DescriptorLayoutBuilder).
+    if (const auto limits = device.UpdateAfterBindSampledLimits()) {
+        host_info.max_per_stage_descriptor_samplers = limits->per_stage_samplers;
+        host_info.max_per_stage_descriptor_sampled_images = limits->per_stage_sampled_images;
+        host_info.max_per_stage_resources = limits->per_stage_resources;
+        host_info.max_descriptor_set_samplers = limits->set_samplers;
+        host_info.max_descriptor_set_sampled_images = limits->set_sampled_images;
+        LOG_INFO(Render_Vulkan,
+                 "Descriptor sets over the core limits ({} samplers a stage) use update-after-bind "
+                 "pools: up to {} samplers and {} sampled images a stage",
+                 device.GetMaxPerStageDescriptorSamplers(), limits->per_stage_samplers,
+                 limits->per_stage_sampled_images);
+    }
     host_info.ApplyDescriptorLimitPolicy();
 
     LOG_INFO(Render_Vulkan,
              "Bindless handle tables: sampled image arrays indexed per invocation {}, up to {} "
              "sampled images per stage",
              device.IsSampledImageArrayNonUniformIndexingSupported() ? "supported" : "unsupported",
-             device.GetMaxPerStageDescriptorSampledImages());
+             host_info.max_per_stage_descriptor_sampled_images);
 
     if (device.GetMaxVertexInputAttributes() < Maxwell::NumVertexAttributes) {
         LOG_WARNING(Render_Vulkan, "maxVertexInputAttributes is too low: {} < {}",
@@ -857,6 +875,14 @@ namespace {
 // keep sixteen (#161).
 constexpr u8 UsedPipelinesMaxAge = 16;
 constexpr u8 UsedPipelinesMaxAgeMoltenVK = 8;
+
+// Loading Shaders always waits for the pipelines the last two sessions used. Those of older
+// sessions go first in the background prebuild, and the load waits for them only while it has
+// run less than OlderUsedPipelinesWait: where the driver's cache misses
+// (AMD's Windows driver after a new build or driver changed the SPIR-V: ~70 ms a pipeline, an
+// Ocarina used list of 14,687 took ~18 min) the game starts and they keep building.
+constexpr u8 AwaitedUsedSessions = 2;
+constexpr std::chrono::seconds OlderUsedPipelinesWait{60};
 
 u8 MaxUsedPipelineAge(const Device& device) {
     if (device.IsMoltenVK()) {
@@ -1408,6 +1434,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         size_t built{};
         size_t compute_built{};
         size_t graphics_built{};
+        /// Older sessions' used pipelines in the prebuild, shown in the load's progress
+        size_t older_used{};
         bool has_loaded{};
         std::unique_ptr<PipelineStatistics> statistics;
         /// Records the load never chooses, as in the old cache; begin is the index in records
@@ -1422,7 +1450,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     const auto built_one = [&state, &callback] {
         ++state.built;
         if (state.has_loaded) {
-            callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+            callback(VideoCore::LoadCallbackStage::Build, state.built,
+                     state.total + state.older_used);
         }
     };
     // The graphics and compute records read, by the index a PipelineRecord's begin stands for
@@ -1442,6 +1471,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<size_t>> compute_keys;
     std::vector<std::pair<size_t, GraphicsPipelineCacheKey>> boot_graphics;
     std::vector<std::pair<size_t, GraphicsPipelineCacheKey>> skipped_graphics;
+    struct OlderUsed {
+        size_t index;
+        GraphicsPipelineCacheKey key;
+        u8 age;
+    };
+    std::vector<OlderUsed> older_used;
     std::vector<CacheV2::ProgramRecord> stale_programs;
     for (const CacheV2::LogRecord& record : log->parsed.live) {
         if (record.kind != RecordKind::Program) {
@@ -1575,8 +1610,14 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             ++skipped_pipelines;
             continue;
         }
+        const auto used_age = used_pipelines.find(hash);
+        if (!build_all && used_age != used_pipelines.end() &&
+            used_age->second >= AwaitedUsedSessions) {
+            older_used.push_back({index, *key, used_age->second});
+            continue;
+        }
         const bool used = used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
-                                                 : used_pipelines.contains(hash);
+                                                 : used_age != used_pipelines.end();
         const bool spare = !used && build_all && queued_spare < spare_pipelines;
         if (used || spare) {
             queued_spare += spare ? 1 : 0;
@@ -1588,9 +1629,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         skipped_graphics.emplace_back(index, *key);
     }
 
-    // The skipped records go to the background prebuild, which holds each built until a draw takes
-    // it: as many as the kept limit leaves past the boot builds. A job reads its record again from
-    // the file, except one this boot wrote again (relinked), which isn't there yet (offset 0).
+    // Older sessions' used pipelines and the skipped records go to the background prebuild, which
+    // holds each built until a draw takes it: as many as the kept limit leaves past the boot
+    // builds, the used ones first (most recent session first), the rest left for their first draw.
+    // A job reads its record again from the file, except one this boot wrote again (relinked),
+    // which isn't there yet (offset 0).
     struct PrebuildRecord {
         GraphicsPipelineCacheKey key;
         u64 record_key;
@@ -1598,11 +1641,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         u64 payload_size;
         std::vector<u8> payload;
     };
-    std::vector<PrebuildRecord> prebuild;
-    for (const auto& [index, key] : NewestFirst(std::move(skipped_graphics),
-                                                PrebuildLimit(kept_pipelines, queued_graphics))) {
+    const auto prebuild_record = [&records](size_t index, const GraphicsPipelineCacheKey& key) {
         const CacheV2::LogRecord& record = *records[index];
-        prebuild.push_back({
+        return PrebuildRecord{
             .key = key,
             .record_key = record.key,
             .offset = record.offset,
@@ -1610,7 +1651,21 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             .payload = record.offset == 0 ? std::vector<u8>(record.payload.begin(),
                                                             record.payload.end())
                                           : std::vector<u8>{},
-        });
+        };
+    };
+    std::ranges::reverse(older_used);
+    std::ranges::stable_sort(older_used, {}, &OlderUsed::age);
+    const size_t prebuild_limit = PrebuildLimit(kept_pipelines, queued_graphics);
+    const size_t older_admitted = std::min(older_used.size(), prebuild_limit);
+    const size_t older_left = older_used.size() - older_admitted;
+    std::vector<PrebuildRecord> prebuild;
+    for (size_t older = 0; older < older_admitted; ++older) {
+        prebuild.push_back(prebuild_record(older_used[older].index, older_used[older].key));
+    }
+    older_used.clear();
+    for (const auto& [index, key] :
+         NewestFirst(std::move(skipped_graphics), prebuild_limit - older_admitted)) {
+        prebuild.push_back(prebuild_record(index, key));
     }
 
     for (auto& [key, indices] : compute_keys) {
@@ -1726,35 +1781,74 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     boot_graphics.clear();
 
-    // With the precache, the prebuild starts after it.
-    const size_t deferred_pipelines = prebuild.size();
-    const auto start_prebuild = [&] {
-        for (PrebuildRecord& record : prebuild) {
-            scheduled_prebuild->Add(
-                record.key, TranslationBytes(record.payload_size), DriverCompileBytes,
-                [this, record = std::move(record)]() mutable {
-                    if (record.payload.empty()) {
-                        auto read = CacheV2::ReadRecordPayload(
-                            cache_v2->Writer().File(), RecordKind::Graphics, record.record_key,
-                            record.offset, record.payload_size);
-                        if (!read) {
-                            return std::unique_ptr<GraphicsPipeline>{};
-                        }
-                        record.payload = std::move(*read);
-                    }
-                    bool incomplete{};
-                    try {
-                        return TranslateCachedGraphics(record.payload, record.key, nullptr,
-                                                       incomplete);
-                    } catch (const std::ios_base::failure&) {
+    const auto add_to_prebuild = [this](PrebuildRecord& record,
+                                        VideoCommon::ShaderJobHandle* job = nullptr) {
+        const GraphicsPipelineCacheKey key = record.key;
+        const u64 cpu_bytes = TranslationBytes(record.payload_size);
+        scheduled_prebuild->Add(
+            key, cpu_bytes, DriverCompileBytes,
+            [this, record = std::move(record)]() mutable {
+                if (record.payload.empty()) {
+                    auto read = CacheV2::ReadRecordPayload(cache_v2->Writer().File(),
+                                                           RecordKind::Graphics, record.record_key,
+                                                           record.offset, record.payload_size);
+                    if (!read) {
                         return std::unique_ptr<GraphicsPipeline>{};
                     }
-                });
+                    record.payload = std::move(*read);
+                }
+                bool incomplete{};
+                try {
+                    return TranslateCachedGraphics(record.payload, record.key, nullptr,
+                                                   incomplete);
+                } catch (const std::ios_base::failure&) {
+                    return std::unique_ptr<GraphicsPipeline>{};
+                }
+            },
+            job);
+    };
+    // With the precache, the prebuild starts after it, as its jobs would queue ahead of the
+    // precache's. The older sessions' pipelines come first.
+    const size_t deferred_pipelines = prebuild.size();
+    std::vector<VideoCommon::ShaderJobHandle> older_jobs;
+    const auto start_prebuild = [&] {
+        for (size_t index = 0; index < prebuild.size(); ++index) {
+            VideoCommon::ShaderJobHandle job;
+            add_to_prebuild(prebuild[index], index < older_admitted ? &job : nullptr);
+            if (job) {
+                older_jobs.push_back(std::move(job));
+            }
         }
         prebuild.clear();
         if (deferred_pipelines != 0) {
             prebuild_load_begin = load_begin;
         }
+    };
+    // Loading Shaders goes on while the older sessions' pipelines build, until the load has run
+    // OlderUsedPipelinesWait.
+    const auto await_older = [&] {
+        if (older_jobs.empty()) {
+            return;
+        }
+        size_t older_built = 0;
+        while (!stop_loading.stop_requested()) {
+            older_built = static_cast<size_t>(std::ranges::count_if(
+                older_jobs, [](const VideoCommon::ShaderJobHandle& job) { return job.Ready(); }));
+            callback(VideoCore::LoadCallbackStage::Build, state.built + older_built,
+                     state.total + older_jobs.size());
+            if (older_built == older_jobs.size() ||
+                std::chrono::steady_clock::now() - load_begin >= OlderUsedPipelinesWait) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2: {} of the {} pipelines only older sessions used built before "
+                 "the game started, {:.1f} s into the load; the rest keep building in the "
+                 "background",
+                 older_built, older_jobs.size(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
+                     .count());
     };
     if (!precache) {
         start_prebuild();
@@ -1768,10 +1862,14 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     {
         std::scoped_lock lock{state.mutex};
-        callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+        state.older_used = older_jobs.size();
+        callback(VideoCore::LoadCallbackStage::Build, state.built, state.total + state.older_used);
         state.has_loaded = true;
     }
     boot.Wait();
+    if (!precache) {
+        await_older();
+    }
     {
         const size_t used_sessions = std::min<size_t>(
             static_cast<size_t>(std::ranges::count_if(
@@ -1786,16 +1884,17 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         LOG_INFO(
             Render_Vulkan,
             "Shader cache v2 boot load{}: {:.1f} s, {} of {} compute and {} of {} graphics "
-            "pipelines built ({}{}), {} cached graphics pipelines skipped at boot, {} admitted "
-            "for background prebuild (newest first), {} left for their first draw (prebuild "
-            "limit {})",
+            "pipelines built ({}{}), {} only older sessions used and {} more cached graphics "
+            "pipelines skipped at boot, {} admitted for background prebuild (older sessions' "
+            "first, then newest first), {} left for their first draw (prebuild limit {})",
             stop_loading.stop_requested() ? " stopped" : "",
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin).count(),
             state.compute_built, state.total - queued_graphics, state.graphics_built,
             queued_graphics, chosen,
             build_all ? fmt::format(", {} more by build_all_cached_shaders", queued_spare) : "",
-            skipped_pipelines, deferred_pipelines, skipped_pipelines - deferred_pipelines,
-            PrebuildLimit(kept_pipelines, queued_graphics));
+            older_admitted + older_left, skipped_pipelines, deferred_pipelines,
+            older_left + skipped_pipelines - (deferred_pipelines - older_admitted),
+            prebuild_limit);
     }
 
     std::vector<DuplicateGraphicsRecord> no_duplicates;
@@ -1845,11 +1944,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         StutterTrace::BootMarker(
             "shader_load_end",
             fmt::format("seconds={:.3f} graphics_records={} compute_records={} queued={} skipped={} "
-                        "deferred={} cache_bytes={} driver_cache_bytes={}",
+                        "deferred={} older_used={} cache_bytes={} driver_cache_bytes={}",
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
                             .count(),
                         graphics_records, compute_records, state.total, skipped_pipelines,
-                        deferred_pipelines,
+                        deferred_pipelines, older_admitted + older_left,
                         bytes(pipeline_cache_filename), bytes(vulkan_pipeline_cache_filename)));
     }
     if (precache && !stop_loading.stop_requested()) {
@@ -1861,6 +1960,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     if (precache) {
         start_prebuild();
+        await_older();
     }
     if (compact) {
         scheduled_prebuild->AfterTranslations([this] { cache_v2->Writer().Compact(); });
@@ -2216,20 +2316,24 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
             others += fmt::format(" {}", line);
         }
     }
+    std::string primitive_attributes;
+    for (const u32 line : info.primitive_lines) {
+        primitive_attributes += fmt::format(" {}", line);
+    }
     with_task += task != nullptr;
     per_primitive += !info.primitive_lines.empty();
     non_triangle += info.topology != 4;
     LOG_WARNING(Render_Vulkan,
                 "Mesh emulation survey #{}: task={} (payload {} words, wg {}x{}x{}) mesh wg "
                 "{}x{}x{} max_vertices={} max_primitives={} topology={} vertex_lines={} "
-                "(position {} generic {} other {}:{}) primitive_lines={} pixel={} | totals: "
+                "(position {} generic {} other {}:{}) primitive_lines={}:{} pixel={} | totals: "
                 "task {} per-primitive {} non-triangle {}",
                 total, task != nullptr, info.payload_words, task ? task->workgroup_size[0] : 0,
                 task ? task->workgroup_size[1] : 0, task ? task->workgroup_size[2] : 0,
                 mesh->workgroup_size[0], mesh->workgroup_size[1], mesh->workgroup_size[2],
                 info.max_vertices, info.max_primitives, info.topology, info.vertex_lines.size(),
-                position, generic, other, others, info.primitive_lines.size(), has_pixel,
-                with_task, per_primitive, non_triangle);
+                position, generic, other, others, info.primitive_lines.size(), primitive_attributes,
+                has_pixel, with_task, per_primitive, non_triangle);
 }
 } // Anonymous namespace
 
@@ -2661,7 +2765,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             std::span{stages.data(), num_stages}, host_info);
     }
     // Mesh emulation without VK_EXT_mesh_shader (prototype): a mesh program, after an optional
-    // task program, drawing triangles without per-primitive outputs, before a pixel program only.
+    // task program, before a pixel program only.
     std::optional<MeshEmulationSetup> mesh_emulation;
     size_t mesh_index{};
     if (mesh_unsupported) {
@@ -2680,7 +2784,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         // Points (0), lines (1) and triangles (4).
         const u32 topology{mesh.mesh.topology};
         eligible = eligible && (topology == 0 || topology == 1 || topology == 4) &&
-                   mesh.mesh.primitive_lines.empty() &&
                    !mesh.mesh.vertex_lines.empty() && mesh.mesh.max_vertices != 0 &&
                    mesh.mesh.max_primitives != 0;
         for (size_t index = 1; index < Maxwell::MaxShaderProgram && eligible; ++index) {
@@ -2689,6 +2792,56 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                        programs[index].stage == Shader::Stage::Fragment;
         }
         if (!eligible) {
+            return nullptr;
+        }
+        // Per-primitive outputs reach the pixel program flat through the vertex shader. A vertex
+        // shader writes Layer and ViewportIndex only with VK_EXT_shader_viewport_index_layer, and
+        // PrimitiveId goes through a generic location nothing else uses.
+        std::bitset<Shader::IR::NUM_GENERICS> vertex_generics, primitive_generics;
+        for (const u32 line : mesh.mesh.vertex_lines) {
+            const auto attribute{static_cast<Shader::IR::Attribute>(line)};
+            if (Shader::IR::IsGeneric(attribute)) {
+                vertex_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+            }
+        }
+        bool writes_primitive_id{};
+        const char* primitive_reason{};
+        for (const u32 line : mesh.mesh.primitive_lines) {
+            const auto attribute{static_cast<Shader::IR::Attribute>(line)};
+            if (Shader::IR::IsGeneric(attribute)) {
+                primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+            } else if (attribute == Shader::IR::Attribute::PrimitiveId) {
+                writes_primitive_id = true;
+            } else if ((attribute == Shader::IR::Attribute::Layer ||
+                        attribute == Shader::IR::Attribute::ViewportIndex) &&
+                       !profile.support_viewport_index_layer_non_geometry) {
+                primitive_reason =
+                    "Layer or ViewportIndex without VK_EXT_shader_viewport_index_layer";
+            }
+        }
+        if ((vertex_generics & primitive_generics).any()) {
+            primitive_reason = "a generic written both per vertex and per primitive";
+        }
+        const size_t pixel_index{static_cast<size_t>(Maxwell::ShaderType::Pixel)};
+        const Shader::Info* const pixel{
+            key.unique_hashes[pixel_index] != 0 ? &programs[pixel_index].info : nullptr};
+        u32 primitive_id_location{~0U};
+        if (writes_primitive_id && pixel && pixel->loads[Shader::IR::Attribute::PrimitiveId]) {
+            const auto used{vertex_generics | primitive_generics};
+            for (u32 index = 0; index < Shader::IR::NUM_GENERICS && !pixel->loads.Legacy();
+                 ++index) {
+                if (!used[index] && !pixel->loads.Generic(index)) {
+                    primitive_id_location = index;
+                    break;
+                }
+            }
+            if (primitive_id_location == ~0U) {
+                primitive_reason = "no free generic location for PrimitiveId";
+            }
+        }
+        if (primitive_reason) {
+            LOG_WARNING(Render_Vulkan, "Mesh emulation skipped for pipeline {:016x}: {}", hash,
+                        primitive_reason);
             return nullptr;
         }
         // Task and mesh share the compute stage, including the fallback's storage buffers.
@@ -2730,9 +2883,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
         if (compute_storage_buffers > device.GetMaxPerStageDescriptorStorageBuffers() ||
-            compute_sampled_images > device.GetMaxPerStageDescriptorSampledImages() ||
-            compute_samplers > device.GetMaxPerStageDescriptorSamplers() ||
-            compute_resources > device.GetMaxPerStageResources()) {
+            compute_sampled_images > host_info.max_per_stage_descriptor_sampled_images ||
+            compute_samplers > host_info.max_per_stage_descriptor_samplers ||
+            compute_resources > host_info.max_per_stage_resources) {
             LOG_WARNING(
                 Render_Vulkan,
                 "Mesh emulation skipped: {} storage buffers, {} sampled images, {} samplers "
@@ -2743,6 +2896,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         mesh_emulation.emplace();
         mesh_emulation->output_binding = output_binding;
+        mesh_emulation->primitive_id_location = primitive_id_location;
         if (has_task) {
             // After the output: the task payload, offset and argument buffers.
             mesh_emulation->has_task = true;
@@ -2901,8 +3055,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     profile, program.mesh, mesh_emulation->output_binding,
                     mesh_emulation->has_task ? mesh_emulation->args_binding : ~0U,
                     runtime_info.convert_depth_mode && !profile.support_native_ndc,
-                    runtime_info.fixed_state_point_size.value_or(1.0f));
+                    runtime_info.fixed_state_point_size.value_or(1.0f),
+                    mesh_emulation->primitive_id_location);
             }
+        }
+        if (mesh_emulation && program.stage == Shader::Stage::Fragment) {
+            runtime_info.per_primitive_flat = true;
+            runtime_info.primitive_id_location = mesh_emulation->primitive_id_location;
         }
         ConvertLegacyToGeneric(program, runtime_info);
         if (index == static_cast<size_t>(Maxwell::ShaderType::Geometry)) {

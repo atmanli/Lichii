@@ -8,6 +8,8 @@
 
 #include <memory>
 #include <optional>
+#include <string>
+#include <utility>
 
 #include <filesystem>
 #include <QElapsedTimer>
@@ -21,6 +23,8 @@
 #include <qaction.h>
 
 #include "common/common_types.h"
+#include "common/nextendo.h"
+#include "common/nextendo_game_catalog.h"
 #include "common/settings_enums.h"
 #include "core/file_sys/nup_writer.h"
 #include "frontend_common/content_manager.h"
@@ -471,9 +475,16 @@ private slots:
     bool EmulationShutdownProgressing();
 
 #ifdef ENABLE_UPDATE_CHECKER
+    // A manual check reports every outcome and ignores the skipped release and remind-later time.
+    void CheckForUpdates(bool manual);
     void OnEmulatorUpdateAvailable();
 #endif
     void KeepNextendoSessionAlive();
+    // When a game boots with online play on: says why nextendo.network refuses it, if it does.
+    void CheckNextendoOnlineStatus();
+    // When a game boots with online play on: says when the signed game catalogue doesn't accept
+    // its version.
+    void CheckNextendoGameVersion(u64 title_id, std::string version);
 
 private:
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
@@ -535,6 +546,8 @@ private:
 #ifdef ENABLE_UPDATE_CHECKER
     QFuture<UpdateChecker::CheckResult> update_future;
     QFutureWatcher<UpdateChecker::CheckResult> update_watcher;
+    bool update_check_running{};
+    bool update_check_manual{};
 #endif
 
     MultiplayerState* multiplayer_state = nullptr;
@@ -557,7 +570,10 @@ private:
     QElapsedTimer emu_force_stop_clock;
     u64 shutdown_progress_seen{};
     QTimer nextendo_session_timer;
-    QFutureWatcher<bool> nextendo_session_watcher;
+    QFutureWatcher<Common::Nextendo::SignOutReason> nextendo_session_watcher;
+    QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>> nextendo_status_watcher;
+    QFutureWatcher<std::optional<Common::Nextendo::GameCatalog>> nextendo_catalog_watcher;
+    std::optional<std::pair<u64, std::string>> nextendo_version_check;
     OverlayDialog* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;

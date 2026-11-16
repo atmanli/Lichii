@@ -7,6 +7,12 @@
 #include <array>
 #include <numbers>
 #include <optional>
+#ifdef __linux__
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
+#include <unistd.h>
+#endif
 #include "common/logging.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
@@ -65,6 +71,66 @@ SDL_GamepadBinding FindBinding(const GamepadBindings& bindings, Predicate matche
     return it != bindings.end() ? *it : EmptyBinding();
 }
 
+/// Bit mask of the joystick axes the gamepad mapping reads reversed for a stick. Apple's
+/// GameController backend reports stick Y up-positive and reverses it in the mapping it
+/// generates, while Lichii reads joystick axes in SDL's down-positive convention (#1399).
+u64 GetReversedStickAxes([[maybe_unused]] const GamepadBindings& bindings) {
+#ifdef __APPLE__
+    u64 reversed = 0;
+    for (const auto& binding : bindings) {
+        if (binding.input_type != SDL_GAMEPAD_BINDTYPE_AXIS ||
+            binding.output_type != SDL_GAMEPAD_BINDTYPE_AXIS) {
+            continue;
+        }
+        const auto& input = binding.input.axis;
+        const auto& output = binding.output.axis;
+        if (output.axis_min == SDL_JOYSTICK_AXIS_MIN && output.axis_max == SDL_JOYSTICK_AXIS_MAX &&
+            input.axis_min == SDL_JOYSTICK_AXIS_MAX && input.axis_max == SDL_JOYSTICK_AXIS_MIN &&
+            input.axis >= 0 && input.axis < 64) {
+            reversed |= u64{1} << input.axis;
+        }
+    }
+    return reversed;
+#else
+    return 0;
+#endif
+}
+
+std::string_view GetJoystickBackend(const SDL_GUID& guid) {
+    switch (guid.data[14]) {
+    case 'h':
+        return "HIDAPI";
+    case 'm':
+        return "GameController";
+    case 'r':
+        return "RawInput";
+    case 'w':
+        return "WGI";
+    case 'x':
+        return "XInput";
+    case 'v':
+        return "virtual";
+    default:
+        return "native";
+    }
+}
+
+void LogJoystickDetails(SDL_Joystick* joystick, SDL_Gamepad* gamepad, u64 reversed_axes) {
+    const SDL_GUID guid = SDL_GetJoystickGUID(joystick);
+    std::array<char, 33> guid_string{};
+    SDL_GUIDToString(guid, guid_string.data(), static_cast<int>(guid_string.size()));
+    std::string axes;
+    const int axis_count = SDL_GetNumJoystickAxes(joystick);
+    for (int axis = 0; axis < axis_count; ++axis) {
+        axes += fmt::format("{}{}", axis == 0 ? "" : " ", SDL_GetJoystickAxis(joystick, axis));
+    }
+    char* const mapping = gamepad != nullptr ? SDL_GetGamepadMapping(gamepad) : nullptr;
+    LOG_INFO(Input, "SDL GUID {}, backend {}, axes [{}], reversed stick axes {:#x}, mapping: {}",
+             guid_string.data(), GetJoystickBackend(guid), axes, reversed_axes,
+             mapping != nullptr ? mapping : "none");
+    SDL_free(mapping);
+}
+
 SDL_GamepadBinding GetBindingForButton(const GamepadBindings& bindings, SDL_GamepadButton button) {
     return FindBinding(bindings, [button](const SDL_GamepadBinding& current) {
         return current.output_type == SDL_GAMEPAD_BINDTYPE_BUTTON &&
@@ -97,6 +163,50 @@ int CountWiredDualSenses() {
     SDL_free(gamepads);
     return count;
 }
+
+constexpr std::chrono::seconds SilentConnectionTimeout{10};
+
+/// The warning for a controller that sent no input since it connected, when the raw HID device
+/// behind its evdev node (the path SDL_GetJoystickPath returns) can't be opened. Empty otherwise.
+std::string DescribeUnreadableHidraw([[maybe_unused]] const std::string& name,
+                                     [[maybe_unused]] const std::string& joystick_path) {
+#ifdef __linux__
+    constexpr std::string_view input_dir = "/dev/input/";
+    if (!joystick_path.starts_with(input_dir)) {
+        return {};
+    }
+    // /sys/class/input/eventN/device is the input device, and its device is the HID device
+    std::error_code ec;
+    const auto hid_device = std::filesystem::canonical(
+        std::filesystem::path{"/sys/class/input"} / joystick_path.substr(input_dir.size()) /
+            "device" / "device",
+        ec);
+    if (ec) {
+        return {};
+    }
+    for (const auto& entry : std::filesystem::directory_iterator{hid_device / "hidraw", ec}) {
+        const std::string node = "/dev/" + entry.path().filename().string();
+        if (access(node.c_str(), R_OK | W_OK) == 0) {
+            continue;
+        }
+        const std::string error = std::strerror(errno);
+        // HID devices are named BUS:VENDOR:PRODUCT.INSTANCE, and the instance changes on reconnect
+        std::string hid_name = hid_device.filename().string();
+        hid_name = hid_name.substr(0, hid_name.rfind('.'));
+        return fmt::format(
+            "{} has sent no input in the {} s since it connected, and its raw HID device {} "
+            "can't be opened ({}). Bluetooth LE controllers come up through uhid, where logind "
+            "often doesn't give your user access to the hidraw node. If the controller does "
+            "nothing, allow access with a udev rule, for example in "
+            "/etc/udev/rules.d/72-lichii-hidraw.rules: "
+            "KERNEL==\"hidraw*\", KERNELS==\"{}.*\", MODE=\"0666\" (then run "
+            "\"sudo udevadm control --reload && sudo udevadm trigger\" and reconnect the "
+            "controller).",
+            name, SilentConnectionTimeout.count(), node, error, hid_name);
+    }
+#endif
+    return {};
+}
 } // Anonymous namespace
 
 static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
@@ -112,8 +222,19 @@ public:
     SDLJoystick(Common::UUID guid_, int port_, SDL_Joystick* joystick,
                                 SDL_Gamepad* game_controller)
                 : guid{guid_}, port{port_}, sdl_joystick{joystick, &SDL_CloseJoystick},
-                    sdl_controller{game_controller, &SDL_CloseGamepad} {
+                    sdl_controller{game_controller, &SDL_CloseGamepad},
+                    reversed_axes{GetReversedStickAxes(GetBindings(game_controller))} {
         EnableMotion();
+    }
+
+    f32 GetAxisValue(int axis, s16 value) const {
+        const f32 axis_value = value / 32767.0f;
+        const bool reversed = axis >= 0 && axis < 64 && ((reversed_axes >> axis) & 1) != 0;
+        return reversed ? -axis_value : axis_value;
+    }
+
+    u64 GetReversedAxes() const {
+        return reversed_axes;
     }
 
     void EnableMotion() {
@@ -180,6 +301,9 @@ public:
             return false;
         }
         if (sensor_timestamp < last_motion_update) {
+            // The sensor clock went back (a reconnected controller starts it again from zero).
+            // Follow it instead of dropping every report until it passes the old value.
+            last_motion_update = sensor_timestamp;
             return false;
         }
 
@@ -366,6 +490,44 @@ public:
         return is_vibration_tested;
     }
 
+    /// Starts the silent connection check for a new connection at joystick_path.
+    void StartSilenceCheck(std::string joystick_path) {
+        std::string name = GetControllerName();
+        std::scoped_lock lock{silence_mutex};
+        silence = SilenceCheck{
+            .name = std::move(name),
+            .path = std::move(joystick_path),
+            .connected_at = std::chrono::steady_clock::now(),
+        };
+        input_seen = false;
+    }
+
+    void MarkInput() {
+        input_seen.store(true, std::memory_order_relaxed);
+    }
+
+    /// Once per connection, SilentConnectionTimeout after it connected without input: returns
+    /// the warning when its raw HID device can't be opened, empty otherwise.
+    std::string CheckSilentConnection(std::chrono::steady_clock::time_point now) {
+        std::scoped_lock lock{silence_mutex};
+        if (!silence || silence->checked || input_seen ||
+            now - silence->connected_at < SilentConnectionTimeout) {
+            return {};
+        }
+        silence->checked = true;
+        silence->warning = DescribeUnreadableHidraw(silence->name, silence->path);
+        return silence->warning;
+    }
+
+    /// The silent connection warning, until the controller sends input.
+    std::string GetSilenceWarning() const {
+        std::scoped_lock lock{silence_mutex};
+        if (!silence || input_seen) {
+            return {};
+        }
+        return silence->warning;
+    }
+
     /**
      * The Pad identifier of the joystick
      */
@@ -405,8 +567,19 @@ public:
             haptics.Close();
             last_haptics_open_attempt.reset();
         }
+        {
+            std::scoped_lock lock{silence_mutex};
+            silence.reset();
+        }
+        {
+            std::scoped_lock lock{mutex};
+            last_motion_update = 0;
+            motion_error_count = 0;
+            motion_restart_threshold = InitialMotionRestartThreshold;
+        }
         sdl_joystick.reset(joystick);
         sdl_controller.reset(controller);
+        reversed_axes = GetReversedStickAxes(GetBindings(controller));
     }
 
     bool IsJoyconLeft() const {
@@ -546,6 +719,7 @@ private:
     int port;
     std::unique_ptr<SDL_Joystick, decltype(&SDL_CloseJoystick)> sdl_joystick;
     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+    std::atomic<u64> reversed_axes;
     mutable std::mutex mutex;
 
     u64 last_motion_update{};
@@ -569,6 +743,18 @@ private:
     std::mutex haptics_mutex;
     DualSenseHaptics haptics;
     std::optional<u64> last_haptics_open_attempt;
+
+    struct SilenceCheck {
+        std::string name;
+        std::string path;
+        std::chrono::steady_clock::time_point connected_at;
+        bool checked{};
+        std::string warning;
+    };
+    // No SDL calls under silence_mutex: the event watcher holds SDL's joystick lock
+    mutable std::mutex silence_mutex;
+    std::optional<SilenceCheck> silence; // (under silence_mutex) the current connection
+    std::atomic<bool> input_seen{};
 
     std::mutex rumble_mutex;
     std::array<Common::Input::VibrationStatus, 2> side_vibrations{};
@@ -693,40 +879,38 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
         }
     }
 
-    std::scoped_lock lock{joystick_map_mutex};
-    if (joystick_map.find(guid) == joystick_map.end()) {
-        auto joystick = std::make_shared<SDLJoystick>(guid, 0, sdl_joystick, sdl_gamecontroller);
-        PreSetController(joystick->GetPadIdentifier());
-        joystick->EnableMotion();
-        SetBattery(joystick->GetPadIdentifier(),
-                   joystick->GetBatteryLevel(battery_state, battery_percent));
-        joystick_map[guid].emplace_back(std::move(joystick));
-        return;
-    }
+    const char* const path = SDL_GetJoystickPath(sdl_joystick);
+    std::string joystick_path = path != nullptr ? path : "";
 
+    std::scoped_lock lock{joystick_map_mutex};
     auto& joystick_guid_list = joystick_map[guid];
     const auto joystick_it =
         std::find_if(joystick_guid_list.begin(), joystick_guid_list.end(),
                      [](const auto& joystick) { return !joystick->GetSDLJoystick(); });
 
+    std::shared_ptr<SDLJoystick> joystick;
     if (joystick_it != joystick_guid_list.end()) {
-        (*joystick_it)->SetSDLJoystick(sdl_joystick, sdl_gamecontroller);
-        (*joystick_it)->EnableMotion();
-        SetBattery((*joystick_it)->GetPadIdentifier(),
-                   (*joystick_it)->GetBatteryLevel(battery_state, battery_percent));
-        return;
+        joystick = *joystick_it;
+        joystick->SetSDLJoystick(sdl_joystick, sdl_gamecontroller);
+    } else {
+        const int port = static_cast<int>(joystick_guid_list.size());
+        joystick = std::make_shared<SDLJoystick>(guid, port, sdl_joystick, sdl_gamecontroller);
+        PreSetController(joystick->GetPadIdentifier());
+        joystick_guid_list.emplace_back(joystick);
     }
-
-    const int port = static_cast<int>(joystick_guid_list.size());
-    auto joystick = std::make_shared<SDLJoystick>(guid, port, sdl_joystick, sdl_gamecontroller);
-    PreSetController(joystick->GetPadIdentifier());
     joystick->EnableMotion();
     SetBattery(joystick->GetPadIdentifier(),
                joystick->GetBatteryLevel(battery_state, battery_percent));
-    joystick_guid_list.emplace_back(std::move(joystick));
+    LOG_INFO(Input, "{} connected on port {} (instance {}, {})", joystick->GetControllerName(),
+             joystick->GetPort(), joystick_id, joystick_path);
+    LogJoystickDetails(sdl_joystick, sdl_gamecontroller, joystick->GetReversedAxes());
+    joystick->StartSilenceCheck(std::move(joystick_path));
 }
 
 void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
+    if (sdl_joystick == nullptr) {
+        return;
+    }
     const auto guid = GetGUID(sdl_joystick);
 
     std::scoped_lock lock{joystick_map_mutex};
@@ -738,6 +922,9 @@ void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
                                           });
 
     if (joystick_it != joystick_guid_list.end()) {
+        LOG_INFO(Input, "{} on port {} disconnected (instance {})",
+                 (*joystick_it)->GetControllerName(), (*joystick_it)->GetPort(),
+                 SDL_GetJoystickID(sdl_joystick));
         (*joystick_it)->SetSDLJoystick(nullptr, nullptr);
     }
 }
@@ -760,6 +947,9 @@ void SDLDriver::PumpEvents() {
                          joystick->GetControllerName(), joystick->GetPort());
                 joystick->EnableMotion();
             }
+            if (const auto warning = joystick->CheckSilentConnection(now); !warning.empty()) {
+                LOG_WARNING(Input, "{}", warning);
+            }
         }
     }
 }
@@ -768,6 +958,7 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     switch (event.type) {
     case SDL_EVENT_JOYSTICK_BUTTON_UP: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
+            joystick->MarkInput();
             const PadIdentifier identifier = joystick->GetPadIdentifier();
             SetButton(identifier, event.jbutton.button, false);
         }
@@ -775,6 +966,7 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_JOYSTICK_BUTTON_DOWN: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
+            joystick->MarkInput();
             const PadIdentifier identifier = joystick->GetPadIdentifier();
             SetButton(identifier, event.jbutton.button, true);
         }
@@ -782,6 +974,7 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_JOYSTICK_HAT_MOTION: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jhat.which)) {
+            joystick->MarkInput();
             const PadIdentifier identifier = joystick->GetPadIdentifier();
             SetHatButton(identifier, event.jhat.hat, event.jhat.value);
         }
@@ -789,8 +982,10 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_JOYSTICK_AXIS_MOTION: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jaxis.which)) {
+            joystick->MarkInput();
             const PadIdentifier identifier = joystick->GetPadIdentifier();
-            SetAxis(identifier, event.jaxis.axis, event.jaxis.value / 32767.0f);
+            SetAxis(identifier, event.jaxis.axis,
+                    joystick->GetAxisValue(event.jaxis.axis, event.jaxis.value));
         }
         break;
     }
@@ -800,6 +995,7 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
             joystick = GetSDLJoystickBySDLID(event.gsensor.which);
         }
         if (joystick) {
+            joystick->MarkInput();
             if (joystick->UpdateMotion(event.gsensor)) {
                 const PadIdentifier identifier = joystick->GetPadIdentifier();
                 SetMotion(identifier, 0, joystick->GetMotion());
@@ -816,11 +1012,9 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         break;
     }
     case SDL_EVENT_JOYSTICK_REMOVED:
-        LOG_DEBUG(Input, "Controller removed with Instance_ID {}", event.jdevice.which);
         CloseJoystick(SDL_GetJoystickFromID(event.jdevice.which));
         break;
     case SDL_EVENT_JOYSTICK_ADDED:
-        LOG_DEBUG(Input, "Controller connected with device index {}", event.jdevice.which);
         InitJoystick(event.jdevice.which);
         break;
     case SDL_EVENT_AUDIO_DEVICE_REMOVED: {
@@ -836,6 +1030,16 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         break;
     }
     }
+}
+
+std::string SDLDriver::GetSilenceWarning(const Common::ParamPackage& params) {
+    std::scoped_lock lock{joystick_map_mutex};
+    const auto it = joystick_map.find(Common::UUID{params.Get("guid", "")});
+    const auto port = static_cast<std::size_t>(params.Get("port", 0));
+    if (it == joystick_map.end() || port >= it->second.size()) {
+        return {};
+    }
+    return it->second[port]->GetSilenceWarning();
 }
 
 void SDLDriver::CloseJoysticks() {

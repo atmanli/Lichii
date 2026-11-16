@@ -669,6 +669,16 @@ struct ImagePool {
         DestroyDoomed(DestroysPerCall);
     }
 
+    /// Once a frame: expires what is past MaxAge, then destroys a few that left, so the pool
+    /// lets go of its images also when no image is made or collected.
+    void Maintain() {
+        {
+            std::scoped_lock lock{mutex};
+            DropOld(std::chrono::steady_clock::now());
+        }
+        DestroyDoomed(DestroysPerCall);
+    }
+
     /// Drops the oldest until at most target bytes are kept, those still to destroy included:
     /// the texture cache asks when it needs the memory, so they are destroyed now (outside the
     /// lock). With 0 (memory ran out, or the device goes) every image that left goes.
@@ -3198,8 +3208,7 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 
 void TextureCacheRuntime::TickFrame() {
     if (ImagePoolEnabled()) {
-        // Images that left the pool are destroyed also when no image is made or collected.
-        GetImagePool().DestroyDoomed(ImagePool::DestroysPerCall);
+        GetImagePool().Maintain();
     }
     while (!pending_byte_addressed_shadows.empty() &&
            scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {

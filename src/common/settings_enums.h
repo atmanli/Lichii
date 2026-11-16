@@ -151,7 +151,9 @@ ENUM(ResolutionSetup, Res1_4X, Res1_2X, Res3_4X, Res1X, Res5_4X, Res3_2X, Res2X,
 ENUM(ScalingFilter, NearestNeighbor, Bilinear, Bicubic, Gaussian, Lanczos, ScaleForce, Fsr, Area, ZeroTangent, BSpline, Mitchell, Spline1, Mmpx, Sgsr, SgsrEdge, Fsr3);
 ENUM(AntiAliasing, None, Fxaa, Smaa);
 ENUM(OotAntiAliasing, Game, NoSharpening);
+ENUM(OcarinaRenderScale, Automatic, Scale100, Scale87, Scale75, Scale50);
 ENUM(NvidiaDlssQuality, Automatic, Native, Quality, Balanced, Performance, UltraPerformance);
+ENUM(XessQuality, UltraQuality, Quality, Balanced, Performance, UltraPerformance);
 ENUM(NvidiaDlssPreset, M, NvidiaDefault, E, F, J, K, L);
 ENUM(HdrMode, Off, On, Auto);
 ENUM(HdrSwapchain, Hdr10, Scrgb);

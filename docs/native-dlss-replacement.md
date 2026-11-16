@@ -54,15 +54,16 @@ matched by shader hash, and stop matching when the lowering of their program cha
   `e40f5efb5480e692`; also shader `ef542df87cacfe9e`, same contract) is replaced and FSR/DLSS
   writes the game's output size (1080p to 1440p docked, 810p to 1080p handheld).
 - Max Resolution add-on on, docked: the full-size pass (native program `da6df3e54c716df2`,
-  shader `6bd913e1f34e83eb`) at 2560x1440 is replaced by a 3840x2160 temporal image. The game
-  still finishes its 1440p frame. At presentation,
+  shader `6bd913e1f34e83eb`) at 2560x1440 is replaced by a 3840x2160 temporal image. At 50%
+  render scale, the scene is 1280x720. The game still finishes its 1440p frame. At presentation,
   the HUD is taken from the difference between that frame and a 1440p copy of the temporal scene,
-  and composited over the 4K scene. The 4K image skips the presentation's post-processing and
+  then composited over the 4K scene. The 4K image skips the presentation's post-processing and
   upscale filters.
-- Max Resolution add-on on, handheld: the scene renders at 1920x1080 and the same output pass
-  runs at 1:1 (`c033c3ddc9f0897b`, 1920x1080 to 1920x1080); the game's final pass then scales to
-  its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
-  game's pass there (DLAA through it is untested).
+- Max Resolution add-on on, handheld: at the default render scale, the scene and FullSize pass
+  are 1920x1080 (1:1). An explicitly selected render scale changes both sizes; at 50%, they are
+  1280x720. The game's final pass then scales to its 2560x1440 output. FSR replaces the FullSize
+  pass as native anti-aliasing (1:1, no upscale). DLSS leaves the game's pass there (DLAA through
+  it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame
@@ -72,12 +73,12 @@ matched by shader hash, and stop matching when the lowering of their program cha
   Its shaders use `HDR_COLOR_INPUT=0` and `INVERTED_DEPTH=0`. Camera reconstruction alone
   converts the stored [0,1] depth to GL [-1,1] clip coordinates. Motion is previous minus
   current in render pixels, with screen-down Y, so FSR's scale is `(1,1)` before normalization.
-- Jitter (FSR only, on by default): the game has no subpixel sample sequence, so the host adds
-  one. While FSR replaced the previous frame's upscale, every draw that depth-tests against the
-  scene depth at the scene size has its viewport offset by a Halton (2,3) sub-pixel amount
-  (AMD's phase count, 8 x (output / render width)^2: 18 for 1440p -> 4K, 8 for native AA), and
-  FSR gets the same offset as the frame's jitter. Shadow maps, half-size passes, full-screen
-  passes and frames the game upscales itself are not offset. A full-screen pass with depth
+- Jitter (FSR and XeSS): the game has no subpixel sample sequence, so the host adds one. While
+  either backend replaced the previous frame's upscale, every draw that depth-tests against the
+  scene depth (including a padded scene-sized image) has its viewport offset by a Halton (2,3)
+  sub-pixel amount (AMD's phase count, 8 x (output / render width)^2: 18 for 1440p -> 4K, 8 for
+  native AA), and both FSR and XeSS get the same offset as the frame's jitter. Shadow maps,
+  half-size passes, full-screen passes and frames the game upscales itself are not offset. A full-screen pass with depth
   writes on but the test off writes no depth (Vulkan disables writes with the test), so the
   depth-write flag alone doesn't count. DLSS gets no jitter.
 - Motion with jitter: FSR is told the motion vectors carry no jitter (no jitter-cancellation
@@ -136,6 +137,34 @@ matched by shader hash, and stop matching when the lowering of their program cha
   `Ocarina temporal: the game's upscale draws frame N (reason)`.
   `EDEN_NX2_DLSS_CONTRACT_TRACE=1` logs every FSR evaluation and scheduler writeback;
   otherwise periodic evaluation/writeback messages avoid a per-frame logging cost.
+
+## XeSS-SR
+
+On Windows with Vulkan, **Use Intel XeSS upscaling in Ocarina of Time** selects Intel's official
+XeSS-SR Vulkan runtime instead of the game's native network. This is a separate choice from FSR;
+it does not automatically replace FSR. When NVIDIA DLSS is enabled and available, DLSS takes
+precedence. XeSS uses the host-reconstructed camera motion, scene depth and the same host jitter
+applied to the scene. The SDK's `Ultra Quality`, `Quality`, `Balanced`, `Performance` and
+`Ultra Performance` presets are available. The selected preset is used only when the game's
+render/output sizes fall within XeSS's reported input range; otherwise XeSS falls back.
+
+The public headers are fetched from Intel's MIT-licensed XeSS repository at commit
+`de0fb9c1c510661c571164e1418ceca8101dab69`. The proprietary runtime is not bundled. Download the
+official [XeSS SDK 3.0.2 release](https://github.com/intel/xess/releases/tag/v3.0.2) and place
+`libxess.dll` from its `bin` directory in the `xess` directory under Lichii's user data folder, or
+next to the executable. That SDK's DLL reports runtime version 2.0.2 (the SDK and runtime versions
+are distinct). Restart Lichii after adding the runtime. At startup the log reports the runtime
+version and whether Vulkan requirements were enabled; when it is absent, incompatible, or
+unsupported by the device, FSR 3.1 is used when available, otherwise the native game path remains
+active. XeSS is a temporal output upscaler and does not accelerate the guest's HMMA instructions
+themselves.
+
+XeSS Frame Generation is not implemented in this Vulkan path. Intel's XeSS 3.0.2 FG API is a
+Direct3D 12 proxy-swapchain integration that requires XeLL and replaces the application's DXGI
+swap chain; it does not provide a Vulkan FG API. Lichii's Vulkan renderer and existing frame
+generation backends do not expose that D3D12 swap-chain contract, so routing XeSS-FG through them
+would not be a valid integration. XeSS support here is XeSS-SR only; FSR 3 frame generation remains
+a separate option.
 
 Shader hashes, buffer offsets and Link's mesh shape are taken from the game's current build.
 A game update that changes them disables the replacement and leaves the game's pass in place.

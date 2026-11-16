@@ -35,6 +35,7 @@
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "core/frontend/emu_window.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
@@ -498,7 +499,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                    const Device& device_, MemoryAllocator& memory_allocator_,
                                    StateTracker& state_tracker_, Scheduler& scheduler_)
-    : gpu{gpu_}, device_memory{device_memory_}, device{device_},
+    : emu_window{emu_window_}, gpu{gpu_}, device_memory{device_memory_}, device{device_},
       memory_allocator{memory_allocator_}, state_tracker{state_tracker_}, scheduler{scheduler_},
       staging_pool(device, memory_allocator, scheduler), descriptor_pool(device, scheduler),
       guest_descriptor_queue(device, UpdateDescriptorQueue::GUEST_FRAME_PAYLOAD_SIZE,
@@ -530,8 +531,6 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
-    oot_performance_scale =
-        Settings::AppliedOcarinaRenderScale() == Settings::NvidiaDlssQuality::Performance;
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -2417,13 +2416,14 @@ void RasterizerVulkan::DispatchCompute() {
     };
     const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
     const auto list_slot = kepler_compute->GetIndirectListSlot();
-    // The full-size 1080p pass is replaced only by FSR (native AA); DLAA through it is untested.
     const auto oot_pass = VideoCommon::FindOcarinaUpscalePass(native_key, pipeline->ShaderHash());
+    // The full-size 1080p pass is replaced by FSR/XeSS (native AA); DLAA through it is untested.
     const bool can_replace = OcarinaTemporalEnabled() &&
                              oot_pass != VideoCommon::OcarinaUpscalePass::None &&
                              pipeline->CanReplaceOcarinaUpscale() &&
                              (oot_pass != VideoCommon::OcarinaUpscalePass::FullSize ||
-                              oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr) &&
+                              oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
+                              oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
                              !indirect_address && !list_slot && !frame_dump.Capturing();
     // Until a dispatch overwrites the scene, each direct one binds only after the effects are
     // marked. The indirect path records its bind at once.
@@ -3446,9 +3446,10 @@ void RasterizerVulkan::TrackOcarinaCamera() {
     }
     VideoCommon::OcarinaCameraBuffer values;
     device_memory.ReadBlockUnsafe(*device_address, values.data(), sizeof(values));
+    const bool allow_padding = oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss ||
+                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr;
     const auto camera = VideoCommon::DecodeOcarinaCamera(
-        values, color.size.width, color.size.height,
-        oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss);
+        values, color.size.width, color.size.height, allow_padding);
     if (camera.issue != VideoCommon::OcarinaCameraIssue::None) {
         return;
     }
@@ -3462,19 +3463,22 @@ void RasterizerVulkan::TrackOcarinaCamera() {
 
 void RasterizerVulkan::UpdateOcarinaJitter() {
     std::array<f32, 2> want{};
-    // Only while FSR replaced the previous frame's upscale: a frame the game upscales itself
+    // Only while FSR or XeSS replaced the previous frame's upscale: a frame the game upscales itself
     // would show the offset as a shake. Only draws that depth-test against the scene depth at
     // the scene size, so a depth pre-pass and the colour passes move together; shadow maps,
     // half-size passes and full-screen passes (which keep the depth bound without using it, as
     // #678 found, some with depth writes on: with the test off nothing writes depth) stay put.
     const auto& regs = maxwell3d->regs;
-    if (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr && oot_motion.extent.width != 0 &&
+    if ((oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
+         oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
+        oot_motion.extent.width != 0 &&
         oot_dlss_frame && *oot_dlss_frame + 1 >= render_trace_frame && regs.depth_test_enable) {
         const auto& targets = texture_cache.GetRenderTargets();
         if (targets.depth_buffer_id) {
             const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
-            if (depth.size.width == oot_motion.extent.width &&
-                depth.size.height == oot_motion.extent.height && !depth.IsRescaled()) {
+            if (oot_motion.SceneSized(depth.size.width, depth.size.height) &&
+                !depth.IsRescaled()) {
+                // Halton (2, 3) with the temporal upscaler's phase count for the prior frame's scale.
                 // AMD's phase count for the last FSR frame's scale.
                 const u32 index = static_cast<u32>(render_trace_frame % oot_jitter_phases) + 1;
                 const auto driver = device.GetDriverID();
@@ -3685,8 +3689,10 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
     // At the DLSS Performance render scale (1920x1080) the game upscales to 2560x1440 with its
     // 3/4 pass instead (QuincyForbes' f7d0938b5b). The scale is the one the game started with,
     // whatever quality is chosen since.
-    const bool three_quarter_1440p = pass == ThreeQuarter &&
-                                     oot_performance_scale && target.size.width == 2560 &&
+    const bool three_quarter_1440p =
+        pass == ThreeQuarter &&
+        Settings::AppliedOcarinaRenderScale() == Settings::OcarinaRenderScale::Scale75 &&
+        target.size.width == 2560 &&
                                      target.size.height == 1440;
     const bool pass_1440p = pass == Pass1440p || three_quarter_1440p;
     const bool upscale_4k = pass_1440p && !native_resolution;
@@ -3734,14 +3740,23 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
                 staging_pool, *oot_backend);
         }
         const VkExtent2D target_extent{target.size.width, target.size.height};
+        const auto& screen = emu_window.GetFramebufferLayout().screen;
+        const VkExtent2D window_extent{screen.GetWidth(), screen.GetHeight()};
+        const bool window_sized_output =
+            upscale_4k &&
+            (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
+             oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
+            window_extent.width != 0 && window_extent.height != 0;
         // The offset this frame's scene was drawn with (none when no scene draw was offset).
         std::array<f32, 2> jitter{};
         if (oot_jitter_frame == render_trace_frame) {
             jitter = oot_jitter_offset;
         }
-        const VkExtent2D output_extent = native_resolution ? extent
-                                         : upscale_4k      ? VkExtent2D{3840, 2160}
-                                                           : target_extent;
+        const VkExtent2D output_extent =
+            native_resolution ? extent
+            : window_sized_output ? window_extent
+            : upscale_4k ? VkExtent2D{3840, 2160}
+                         : target_extent;
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
@@ -3754,6 +3769,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
             oot_live_dlss->SaveSceneReference(scene_reference);
             oot_4k_scene_frame = render_trace_frame;
             oot_4k_guest_present = VK_NULL_HANDLE;
+            oot_temporal_output_extent = output_extent;
         }
         oot_dlss_frame = render_trace_frame;
         // AMD's jitter phase count for FSR: 8 * (output / render width)^2, so 18 for 1440p -> 4K
@@ -4098,14 +4114,15 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
         image_view->format == VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM &&
         !oot_live_dlss->EvaluationFailed() && !frame_dump.Capturing()) {
         try {
-            oot_live_dlss->Composite4k(info.image_view, render_trace_frame);
+            oot_live_dlss->CompositeOutput(info.image_view, oot_temporal_output_extent,
+                                           render_trace_frame);
             info.image = oot_live_dlss->CompositedImage();
             info.image_view = oot_live_dlss->CompositedView();
-            info.scaled_width = 3840;
-            info.scaled_height = 2160;
+            info.scaled_width = oot_temporal_output_extent.width;
+            info.scaled_height = oot_temporal_output_extent.height;
             info.already_upscaled = true;
         } catch (const vk::Exception& error) {
-            LOG_WARNING(Render_Vulkan, "Ocarina temporal 4K presentation unavailable: {}", error.what());
+            LOG_WARNING(Render_Vulkan, "Ocarina temporal presentation unavailable: {}", error.what());
             oot_live_failed = true;
             texture_cache_runtime.ocarina_fsr_failed = true; // samplers drop the FSR LOD bias
         }

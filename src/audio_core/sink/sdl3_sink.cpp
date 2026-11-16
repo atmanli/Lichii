@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -253,34 +255,51 @@ SDLSink::SDLSink(std::string_view target_device_name) {
 
 SDLSink::~SDLSink() = default;
 
+// InputOpenMayBlock stays false: SDL's WASAPI backend opens every device on one management
+// thread, so a microphone open held by the permission prompt would also hold the next playback
+// open, on any thread. The open waits on the caller as before; the lock keeps the list safe.
 SinkStream* SDLSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                        const std::string&, StreamType type) {
+    // Build the stream outside the lock: opening a microphone can wait on a permission prompt.
+    auto stream = std::make_unique<SDLSinkStream>(device_channels, system_channels_,
+                                                  output_device, input_device, type, system);
+    std::scoped_lock lock{streams_mutex};
     system_channels = system_channels_;
-    SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<SDLSinkStream>(
-        device_channels, system_channels, output_device, input_device, type, system));
     stream->SetDeviceVolume(device_volume);
-    return stream.get();
+    return sink_streams.emplace_back(std::move(stream)).get();
 }
 
 void SDLSink::CloseStream(SinkStream* stream) {
-    for (size_t i = 0; i < sink_streams.size(); i++) {
-        if (sink_streams[i].get() == stream) {
-            sink_streams[i].reset();
-            sink_streams.erase(sink_streams.begin() + i);
-            break;
+    SinkStreamPtr closed;
+    {
+        std::scoped_lock lock{streams_mutex};
+        const auto it = std::ranges::find_if(
+            sink_streams, [stream](const SinkStreamPtr& owned) { return owned.get() == stream; });
+        if (it == sink_streams.end()) {
+            return;
         }
+        closed = std::move(*it);
+        sink_streams.erase(it);
     }
+    // Stop and destroy it outside the lock.
+    closed.reset();
 }
 
 void SDLSink::CloseStreams() {
-    sink_streams.clear();
+    std::vector<SinkStreamPtr> closed;
+    {
+        std::scoped_lock lock{streams_mutex};
+        closed.swap(sink_streams);
+    }
 }
 
 f32 SDLSink::GetDeviceVolume() const {
+    std::scoped_lock lock{streams_mutex};
     return device_volume;
 }
 
 void SDLSink::SetDeviceVolume(f32 volume) {
+    std::scoped_lock lock{streams_mutex};
     device_volume = volume;
     for (auto& stream : sink_streams) {
         stream->SetDeviceVolume(volume);
@@ -288,6 +307,7 @@ void SDLSink::SetDeviceVolume(f32 volume) {
 }
 
 void SDLSink::SetSystemVolume(f32 volume) {
+    std::scoped_lock lock{streams_mutex};
     for (auto& stream : sink_streams) {
         stream->SetSystemVolume(volume);
     }

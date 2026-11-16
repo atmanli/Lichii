@@ -134,6 +134,8 @@ struct ImageBase {
     /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
     u64 newest_alias_tick = 0;
     size_t lru_index = SIZE_MAX;
+    /// The tick lru_index's entry was last inserted or touched with (TouchLru).
+    u64 lru_tick = 0;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
 

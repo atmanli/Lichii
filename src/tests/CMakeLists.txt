@@ -415,7 +415,8 @@ add_test(NAME shader_translation_tests COMMAND shader_translation_tests)
 
 if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp
-                                 input_common/rumble_mapping.cpp)
+                                 input_common/rumble_mapping.cpp
+                                 input_common/switch2_protocol.cpp)
     target_link_libraries(tests PRIVATE SDL3::SDL3)
 
     add_executable(config_tests

@@ -797,8 +797,10 @@ private:
 
     Common::ScratchBuffer<u8> swizzle_data_buffer;
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
-    /// What the last CPU upload spent reading guest memory and untiling it, for EDEN_NX2_TC_TRACE.
+    /// What the last CPU upload spent touching, reading and untiling guest memory, for
+    /// EDEN_NX2_TC_TRACE.
     struct {
+        double prefault_ms{};
         double read_ms{};
         double untile_ms{};
     } upload_trace;

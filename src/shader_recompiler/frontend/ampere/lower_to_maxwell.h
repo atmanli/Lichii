@@ -1530,9 +1530,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
             if ((insn.words[1] & ~(store ? 0xe00000ffU : 0xe0000000U)) ||
                 (insn.words[2] & ~0xfffU) != (store ? 0x00100000U : 0x001e0000U) ||
-                (insn.words[3] & 0xc00001ffU) || dimension < 3 || dimension > 5 ||
+                (insn.words[3] & 0xc00001ffU) || (dimension != 1 && (dimension < 3 || dimension > 5)) ||
                 channels == 0 || handle >= reserved || data + count > reserved ||
-                coordinate + (dimension >= 4 ? 3U : 2U) > reserved ||
+                coordinate + (dimension >= 4 ? 3U : dimension == 3 ? 2U : 1U) > reserved ||
                 (store && (dest != 0 || (channels != 1 && channels != 3 && channels != 15))) ||
                 (!store && (data % (count == 3 ? 4U : count))))
                 return fail(index, "native bindless formatted surface mode");
@@ -1602,43 +1602,58 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (strong) emit(0xef98000000000000ULL | predicate | (u64{1} << 8));
             break;
         }
-        case 0x593: {
-            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
+        case 0x593:
+        case 0x394: { // SUATOM.D, direct descriptor, or (0x394) a handle in the register at 64-71.
+            const bool register_handle = opcode == 0x394;
+            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14), handle = insn.Bits(64, 8);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3), operation = insn.Bits(87, 4);
             const u32 coordinates = dimension >= 4 ? 3U : dimension == 3 ? 2U : 1U;
             const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
-            if ((insn.words[2] & ~0x07800000U) != 0x001ee000 || operation > 8 ||
-                dimension == 2 || dimension > 5 || binding >= 18 || offset > 0x1fff ||
-                insn.Bits(59, 2) || coordinate + coordinates > reserved ||
+            if ((insn.words[2] & ~(0x07800000U | (register_handle ? 0xffU : 0U))) != 0x001ee000 ||
+                operation > 8 || dimension == 2 || dimension > 5 ||
+                (register_handle ? insn.Bits(40, 21) != 0 || handle >= reserved
+                                 : binding >= 18 || offset > 0x1fff || insn.Bits(59, 2)) ||
+                coordinate + coordinates > reserved ||
                 (data != 255 && data >= reserved) || (dest != 255 && dest >= reserved) ||
                 (insn.words[3] & 0xc00001ffU))
                 return fail(index, "native formatted surface atomic mode");
-            if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
-                return fail(index, "native surface descriptor buffer conflict");
-            result.required_texture_buffer = binding;
+            if (!register_handle) {
+                if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
+                    return fail(index, "native surface descriptor buffer conflict");
+                result.required_texture_buffer = binding;
+            }
+            // Maxwell SUATOM: bindless 54 with the handle register at 39, else bound offset 36.
             emit(base(0xea00000000000000ULL) | (u64{coordinate} << 8) | (u64{data} << 20) |
-                 (u64{operation} << 29) | (u64{dimension} << 33) | (u64{offset} << 36));
+                 (u64{operation} << 29) | (u64{dimension} << 33) |
+                 (register_handle ? (u64{1} << 54) | (u64{handle} << 39) : u64{offset} << 36));
             break;
         }
-        case 0x59f: { // SURED.D.STRONG.GPU.IGN U32, direct descriptor, buffer, 2D or 3D.
-            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
+        case 0x59f: // SURED.D.STRONG.GPU.IGN U32, direct descriptor, buffer, 2D or 3D.
+        case 0x3a0: { // The same with a handle in the register at 64-71.
+            const bool register_handle = opcode == 0x3a0;
+            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14), handle = insn.Bits(64, 8);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
             const u32 coordinates = dimension == 1 ? 1U : dimension == 5 ? 3U : 2U;
             const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
             // 3D (5, as in Orchid) reads x, y, z from three consecutive registers.
-            if ((insn.words[2] & ~0x03800000U) != 0x0010e000 ||
-                (dimension != 1 && dimension != 3 && dimension != 5) || binding >= 18 ||
-                offset > 0x1fff || insn.Bits(59, 2) || coordinate + coordinates > reserved)
+            if ((insn.words[2] & ~(0x03800000U | (register_handle ? 0xffU : 0U))) != 0x0010e000 ||
+                (dimension != 1 && dimension != 3 && dimension != 5) ||
+                (register_handle ? insn.Bits(40, 21) != 0 || handle >= reserved
+                                 : binding >= 18 || offset > 0x1fff || insn.Bits(59, 2)) ||
+                coordinate + coordinates > reserved)
                 return fail(index, "native surface reduction mode");
-            if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
-                return fail(index, "native surface descriptor buffer conflict");
-            result.required_texture_buffer = binding;
+            if (!register_handle) {
+                if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
+                    return fail(index, "native surface descriptor buffer conflict");
+                result.required_texture_buffer = binding;
+            }
             // Maxwell SURED: operand 0-7, coordinates 8-15, op 24, U32 zero at 20,
-            // type 33 (1 = buffer, 3 = 2D, 5 = 3D), bound offset 36, bound 51.
+            // type 33 (1 = buffer, 3 = 2D, 5 = 3D), bound offset 36, bound 51, else handle register 39.
             emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
+                (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) |
+                (register_handle ? u64{handle} << 39 : (u64{offset} << 36) | (u64{1} << 51)));
             break;
         }
         case 0x301: // BREV register.

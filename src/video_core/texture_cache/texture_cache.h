@@ -10,11 +10,14 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <mutex>
+#include <span>
 #include <vector>
 #include <tuple>
 #include <optional>
 #include <bit>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
@@ -34,6 +37,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"
 #include "video_core/texture_cache/conversion.h"
+#include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/eviction_age.h"
 #include "video_core/texture_cache/host_memory_limit.h"
 #include "video_core/texture_cache/host_mip_limits.h"
@@ -49,6 +53,65 @@ namespace VideoCommon {
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
     static const bool enabled = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
     return enabled;
+}
+
+/// EDEN_NX2_GPU_PROFILE: alias copies by destination and source image, logged every 10 s.
+inline void CountAliasCopy(const ImageBase& dst, const ImageBase& src,
+                           std::span<const ImageCopy> copies) {
+    struct Entry {
+        u64 count = 0;
+        u64 texels = 0;
+    };
+    static std::mutex mutex;
+    static std::map<std::string, Entry> entries;
+    static u64 window_start = 0;
+    u64 texels = 0;
+    for (const ImageCopy& copy : copies) {
+        texels += u64{copy.extent.width} * copy.extent.height * copy.extent.depth *
+                  static_cast<u64>(copy.dst_subresource.num_layers);
+    }
+    const auto describe = [](const ImageBase& image) {
+        const ImageInfo& info = image.info;
+        return fmt::format("{} {}x{}x{} {}L {}M at {:#x}+{:#x}", static_cast<u32>(info.format),
+                           info.size.width, info.size.height, info.size.depth,
+                           info.resources.layers, info.resources.levels, image.gpu_addr,
+                           image.guest_size_bytes);
+    };
+    std::string key = fmt::format("{} <- {}:", describe(dst), describe(src));
+    for (const ImageCopy& copy : copies) {
+        key += fmt::format(" [level {}->{} layer {}->{} x{} ({},{})->({},{}) {}x{}]",
+                           copy.src_subresource.base_level, copy.dst_subresource.base_level,
+                           copy.src_subresource.base_layer, copy.dst_subresource.base_layer,
+                           copy.dst_subresource.num_layers, copy.src_offset.x,
+                           copy.src_offset.y, copy.dst_offset.x, copy.dst_offset.y,
+                           copy.extent.width, copy.extent.height);
+    }
+    std::scoped_lock lock{mutex};
+    Entry& entry = entries[key];
+    ++entry.count;
+    entry.texels += texels;
+    const u64 now = Nx2Profile::Now();
+    if (window_start == 0) {
+        window_start = now;
+        return;
+    }
+    if (now - window_start < 10'000'000'000ULL) {
+        return;
+    }
+    const double seconds = static_cast<double>(now - window_start) / 1e9;
+    window_start = now;
+    std::vector<std::pair<u64, std::string>> sorted;
+    for (const auto& [key, value] : entries) {
+        sorted.emplace_back(value.count, key);
+    }
+    std::sort(sorted.rbegin(), sorted.rend());
+    for (size_t i = 0; i < sorted.size() && i < 16; ++i) {
+        const Entry& value = entries[sorted[i].second];
+        LOG_INFO(HW_GPU, "Alias copies {:.0f}/s, {:.1f} Mtexels/s: {}",
+                 static_cast<double>(value.count) / seconds,
+                 static_cast<double>(value.texels) / 1e6 / seconds, sorted[i].second);
+    }
+    entries.clear();
 }
 
 /// EDEN_NX2_TC_TRACE=1: log every image the cache creates, uploads and deletes.
@@ -637,11 +700,16 @@ void TextureCache<P>::TickFrame() {
                     critical_memory = budget - (std::min)(reserved, budget / 2);
                     // The device's budget is not all the room there is: see HostCriticalMemory.
                     // The usage is the driver's, which still counts images waiting to be freed.
-                    const std::optional<u64> commit_room = Common::GetSystemCommitRoom();
-                    const u64 host_critical =
-                        commit_room
-                            ? HostCriticalMemory(runtime.GetDeviceMemoryUsage(), *commit_room)
-                            : (std::numeric_limits<u64>::max)();
+                    const std::optional<s64> commit_room = Common::GetSystemCommitRoom();
+                    u64 host_critical = (std::numeric_limits<u64>::max)();
+                    if (commit_room) {
+                        // Under zero, the cache gives back what the host is short of.
+                        const u64 usage = runtime.GetDeviceMemoryUsage();
+                        const u64 short_of = static_cast<u64>(-(std::min)(*commit_room, s64{0}));
+                        host_critical =
+                            HostCriticalMemory(usage - (std::min)(usage, short_of),
+                                               static_cast<u64>((std::max)(*commit_room, s64{0})));
+                    }
                     critical_memory = (std::min)(critical_memory, host_critical);
                     retention_budget = RetentionBudget(retention_budget, budget);
                     const u64 room_margin =
@@ -717,7 +785,7 @@ void TextureCache<P>::TickFrame() {
                                  retention_limit >> 20, retention_budget >> 20);
                         if (commit_room) {
                             LOG_INFO(HW_GPU, "Host memory: {} MiB of commit left, {}",
-                                     *commit_room >> 20,
+                                     *commit_room / s64{1_MiB},
                                      critical_memory == host_critical
                                          ? "which bounds the thresholds"
                                          : "the device budget bounds the thresholds");
@@ -1344,8 +1412,84 @@ bool TextureCache<P>::RescaleRenderTargets() {
         set_rating(tmp_color_images[index]);
     }
     set_rating(tmp_depth_image);
+    if (Nx2Profile::Enabled() && Settings::values.resolution_info.active) {
+        CountRescaleDecision(tmp_color_images, tmp_depth_image, rescaled);
+    }
 
     return rescaled;
+}
+
+template <class P>
+void TextureCache<P>::CountRescaleDecision(std::span<const ImageId> color_images,
+                                           ImageId depth_image, bool rescaled) {
+    // EDEN_NX2_GPU_PROFILE with a resolution scale: every 10 s, the render target sets by how
+    // often they were bound, with whether they render scaled and what keeps them from it.
+    const auto reason = [this](ImageBase& image) -> const char* {
+        const ImageInfo& info = image.info;
+        if (!info.rescaleable) {
+            return info.resources.levels != 1 ? "has mip levels"
+                   : info.size.height <= 288  ? "288 high or less"
+                                              : "not rescaleable";
+        }
+        if (Settings::values.resolution_info.downscale && !info.downscaleable) {
+            return "512 high or less";
+        }
+        if (!ImageCanRescale(image)) {
+            return image.aliased_images.empty() ? "mip count" : "an alias cannot";
+        }
+        return nullptr;
+    };
+    struct Entry {
+        u64 binds = 0;
+    };
+    static std::map<std::string, Entry> entries;
+    static u64 window_start = 0;
+    std::string key;
+    const char* why = nullptr;
+    const auto add = [&](ImageId image_id, const char* kind) {
+        if (image_id == CORRUPT_ID || !image_id) {
+            return;
+        }
+        ImageBase& image = slot_images[image_id];
+        key += fmt::format("{}{} {}x{} {}L {}M{}", key.empty() ? "" : " + ", kind,
+                           image.info.size.width, image.info.size.height,
+                           image.info.resources.layers, image.info.resources.levels,
+                           image.aliased_images.empty() ? "" : " aliased");
+        if (const char* const image_why = reason(image); image_why != nullptr && why == nullptr) {
+            why = image_why;
+            key += fmt::format(" [{}]", image_why);
+        }
+    };
+    for (const ImageId image_id : color_images) {
+        add(image_id, "color");
+    }
+    add(depth_image, "depth");
+    if (key.empty()) {
+        return;
+    }
+    key = fmt::format("{}: {}", rescaled ? "scaled" : why ? "native" : "native (not rated yet)",
+                      key);
+    ++entries[key].binds;
+    const u64 now = Nx2Profile::Now();
+    if (window_start == 0) {
+        window_start = now;
+        return;
+    }
+    if (now - window_start < 10'000'000'000ULL) {
+        return;
+    }
+    const double seconds = static_cast<double>(now - window_start) / 1e9;
+    window_start = now;
+    std::vector<std::pair<u64, std::string>> sorted;
+    for (const auto& [name, entry] : entries) {
+        sorted.emplace_back(entry.binds, name);
+    }
+    std::sort(sorted.rbegin(), sorted.rend());
+    for (size_t i = 0; i < sorted.size() && i < 24; ++i) {
+        LOG_INFO(HW_GPU, "Render targets {:.0f}/s {}",
+                 static_cast<double>(sorted[i].first) / seconds, sorted[i].second);
+    }
+    entries.clear();
 }
 
 template <class P>
@@ -2660,19 +2804,74 @@ void TextureCache<P>::RefreshSparseTiles(Image& image) {
         const std::vector<LevelRect> rects =
             SparseTileRects(image.info, ranges, image.SparseTileWidth(), image.SparseTileHeight(),
                             image.SparseTailLevel());
+        if constexpr (requires { &Image::ReleaseTilesOutside; }) {
+            // First, so the blocks the game stopped mapping make room for those it maps now.
+            if (image.ReleasesUnmappedTiles()) {
+                const std::vector<LevelRect> keep = SparseTileRects(
+                    image.info, Tegra::Nx2SparseDataRanges(image.gpu_addr, image.guest_size_bytes),
+                    image.SparseTileWidth(), image.SparseTileHeight(), image.SparseTailLevel());
+                const u64 bound_bytes = ImageMemoryBytes(image);
+                image.ReleaseTilesOutside(keep);
+                if (True(image.flags & ImageFlagBits::Registered)) {
+                    total_used_memory += ImageMemoryBytes(image) - bound_bytes;
+                }
+            }
+        }
         if (rects.empty() || !BindSparseTiles(image, rects)) {
             runtime.TransitionImageLayout(image);
             return;
         }
-        const size_t bytes = UnswizzledRectsBytes(image.info, rects);
-        auto staging = runtime.UploadStagingBuffer(bytes);
-        const std::vector<BufferImageCopy> copies =
-            UnswizzleImageRects(*gpu_memory, image.gpu_addr, image.info, rects, staging.mapped_span);
-        image.UploadMemory(staging, copies);
+        LogSparseTileGrowth(image);
+        // In parts: the data a large array can hold is hundreds of MiB, too much for one staging
+        // buffer.
+        constexpr size_t MaxUploadBytes = 64_MiB;
+        const std::span<const LevelRect> all{rects};
+        for (size_t first = 0; first < all.size();) {
+            size_t count = 1;
+            size_t bytes = UnswizzledRectsBytes(image.info, all.subspan(first, 1));
+            while (first + count < all.size()) {
+                const size_t next = UnswizzledRectsBytes(image.info, all.subspan(first + count, 1));
+                if (bytes + next > MaxUploadBytes) {
+                    break;
+                }
+                bytes += next;
+                ++count;
+            }
+            const std::span<const LevelRect> part = all.subspan(first, count);
+            auto staging = runtime.UploadStagingBuffer(bytes);
+            const std::vector<BufferImageCopy> copies = UnswizzleImageRects(
+                *gpu_memory, image.gpu_addr, image.info, part, staging.mapped_span);
+            image.UploadMemory(staging, copies);
+            uploaded_bytes += bytes;
+            first += count;
+        }
         runtime.InsertUploadMemoryBarrier();
         ++images_uploaded;
-        uploaded_bytes += bytes;
     }
+}
+
+template <class P>
+void TextureCache<P>::LogSparseTileGrowth(const Image& image) {
+    // Each 128 MiB an image's tiles grow by: how much of it the game maps, so a host tile shape
+    // that binds far more than that shows.
+    constexpr u64 Step = 128_MiB;
+    static std::unordered_map<GPUVAddr, u64> logged;
+    const u64 bound = ImageMemoryBytes(image);
+    u64& last = logged[image.gpu_addr];
+    if (bound < last + Step && bound + Step > last) {
+        return;
+    }
+    last = bound;
+    u64 guest = 0;
+    for (const auto& [offset, size] :
+         Tegra::Nx2SparseDataRanges(image.gpu_addr, image.guest_size_bytes)) {
+        guest += size;
+    }
+    LOG_INFO(HW_GPU, "Sparse tiles of {:#x} ({}x{}, {} layers, format {}): {} MiB bound for {} MiB "
+                     "the game maps",
+             image.gpu_addr, image.info.size.width, image.info.size.height,
+             image.info.resources.layers, static_cast<u32>(image.info.format), bound >> 20,
+             guest >> 20);
 }
 
 template <class P>
@@ -4683,6 +4882,9 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     });
     const auto& resolution = Settings::values.resolution_info;
     for (const AliasedImage* const aliased : aliased_images) {
+        if (Nx2Profile::Enabled()) {
+            CountAliasCopy(image, slot_images[aliased->id], aliased->copies);
+        }
         if (!resolution.active || !any_rescaled) {
             CopyImage(image_id, aliased->id, aliased->copies);
             continue;
@@ -4768,7 +4970,8 @@ void TextureCache<P>::PrepareImageView(ImageViewId image_view_id, bool is_modifi
 }
 
 template <class P>
-void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
+void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies,
+                                std::source_location location) {
     Image& dst = slot_images[dst_id];
     Image& src = slot_images[src_id];
     if (True(dst.flags & ImageFlagBits::UnwrittenSparse) ||
@@ -4806,7 +5009,7 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
                 return runtime.EmulateCopyImage(dst, src, copies);
             }
         }
-        return runtime.CopyImage(dst, src, copies);
+        return runtime.CopyImage(dst, src, copies, location);
     }
     UNIMPLEMENTED_IF(dst.info.type != ImageType::e2D);
     UNIMPLEMENTED_IF(src.info.type != ImageType::e2D);

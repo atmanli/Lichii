@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <source_location>
+
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -251,6 +253,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
 
     /// Image::BindTiles, counting what it binds in total_used_memory.
     bool BindSparseTiles(Image& image, std::span<const LevelRect> rects);
+    void LogSparseTileGrowth(const Image& image);
 
     /// Image::BackTilesWhole, counting what it binds in total_used_memory.
     bool BackSparseTilesWhole(Image& image);
@@ -364,6 +367,8 @@ public:
     /// Updates the Render Targets if they can be rescaled
     /// @retval True if the Render Targets have been rescaled.
     bool RescaleRenderTargets();
+    void CountRescaleDecision(std::span<const ImageId> color_images, ImageId depth_image,
+                              bool rescaled);
 
     /// Update bound render targets and upload memory if necessary
     /// @param is_clear True when the render targets are being used for clears
@@ -635,7 +640,8 @@ private:
     void PrepareImageView(ImageViewId image_view_id, bool is_modification, bool invalidate);
 
     /// Execute copies from one image to the other, even if they are incompatible
-    void CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies);
+    void CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies,
+                   std::source_location location = std::source_location::current());
 
     /// Bind an image view as render target, downloading resources preemtively if needed
     void BindRenderTarget(ImageViewId* old_id, ImageViewId new_id);

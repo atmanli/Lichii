@@ -6,6 +6,7 @@
 #pragma once
 
 #include <chrono>
+#include <source_location>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -169,7 +170,9 @@ public:
     [[nodiscard]] std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
         ImageView& input, ImageView& output, std::optional<std::array<u32, 2>> input_region);
 
-    void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+    /// `location`: who asked, for the GPU profile's render pass ends.
+    void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies,
+                   std::source_location location = std::source_location::current());
 
     void CopyImageMSAA(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
 
@@ -577,6 +580,14 @@ public:
     /// levels in it) device memory where they have none yet. False if that failed.
     bool BindTiles(std::span<const VideoCommon::LevelRect> rects);
 
+    /// SparseTiles images whose blocks come from a pool of fixed size: whether the blocks the game
+    /// no longer maps give their memory back.
+    bool ReleasesUnmappedTiles() const noexcept;
+
+    /// SparseTiles images: takes the memory of the host sparse blocks outside `keep` away (they
+    /// read zero again). Mip tails stay.
+    void ReleaseTilesOutside(std::span<const VideoCommon::LevelRect> keep);
+
     /// SparseTiles images: the host sparse block, in texels, and the first level of the mip tail.
     u32 SparseTileWidth() const noexcept {
         return sparse_layers.tile_width;
@@ -647,6 +658,8 @@ private:
             tail_level = other.tail_level;
             zero_block = std::exchange(other.zero_block, VK_NULL_HANDLE);
             tail_memory = std::exchange(other.tail_memory, VK_NULL_HANDLE);
+            layer_tails = std::move(other.layer_tails);
+            other.layer_tails.clear();
             bound_bytes = other.bound_bytes;
             warned = other.warned;
             return *this;
@@ -666,6 +679,10 @@ private:
                     allocator->FreeSparseMemory(allocation);
                 }
             }
+            for (const VmaAllocation allocation : layer_tails) {
+                allocator->FreeSparseMemory(allocation);
+            }
+            layer_tails.clear();
             allocator->FreeSparseMemory(tail_memory);
             allocator->FreeSparseMemory(zero_block);
             zero_block = VK_NULL_HANDLE;
@@ -684,8 +701,11 @@ private:
         u32 tile_height{};
         VkDeviceSize layer_bytes{}; ///< One layer's levels before the mip tail, and its own tail
         std::vector<VmaAllocation> layer_memory; ///< Per layer, null until bound
-        /// SparseTiles: per level before the mip tail, per sparse block (rows), null until bound
+        /// SparseTiles: per layer and level before the mip tail (layer * tail_level + level), per
+        /// sparse block (rows), null until bound
         std::vector<std::vector<VmaAllocation>> level_tiles;
+        /// SparseTiles with layers: each layer's mip tail, null until bound
+        std::vector<VmaAllocation> layer_tails;
         u32 tail_level{}; ///< SparseTiles: first level of the mip tail
         /// SparseTiles: the zeroed block every block without memory of its own is bound to, where
         /// the driver can't sample unbound memory

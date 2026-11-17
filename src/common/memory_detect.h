@@ -59,8 +59,9 @@ struct ProcessMemoryUsage {
 [[nodiscard]] u64 GetProcessPageFaults();
 
 /// Commit the system can still hand out, in bytes: its commit limit (RAM plus the page files)
-/// minus what is committed. No value where the host reports no such limit (anything but Windows).
-[[nodiscard]] std::optional<u64> GetSystemCommitRoom();
+/// minus what is committed. On macOS, the RAM this process does not hold: negative when it holds
+/// more than there is and the system swaps. No value on other hosts, which report no such limit.
+[[nodiscard]] std::optional<s64> GetSystemCommitRoom();
 
 /// Physical memory the host can hand out now without paging anything out (0 when unknown).
 [[nodiscard]] u64 GetAvailablePhysicalMemory();

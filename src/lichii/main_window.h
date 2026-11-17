@@ -187,6 +187,10 @@ public:
 
     bool DropAction(QDropEvent* event);
     void AcceptDropEvent(QDropEvent* event);
+    /// Boots a game, or loads an amiibo while one runs, from a dropped or opened file.
+    void OpenFile(const QString& filename);
+    /// Opens a file the system handed over once no other open or boot is in progress.
+    void QueueOpenFile(const QString& filename);
 
     std::filesystem::path GetShortcutPath(QtCommon::Game::ShortcutTarget target);
 
@@ -298,6 +302,7 @@ private:
     void BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                   StartGameType with_config = StartGameType::Normal);
     void BootGameFromList(const QString& filename, StartGameType with_config);
+    void OpenQueuedFiles();
     void ShutdownGame();
     void ExitIfEmulationThreadStuck();
 
@@ -640,6 +645,9 @@ private:
     bool emulation_running = false;
     std::optional<CompatibilityReporting::Session> report_session;
     bool boot_in_progress = false;
+    // Files the system asked to open, and whether one of them is being opened
+    QStringList queued_open_files;
+    bool opening_queued_file = false;
     bool close_pending = false;
     // The path to the game currently running
     QString current_game_path;

@@ -55,8 +55,18 @@ struct Patch {
     PatchSource source;
     std::string location;
     u32 numeric_version{0};
+    // Off until the user turns it on: disabled_addons then holds EnabledAddonKey(name).
+    bool off_by_default{false};
 };
 
+// The disabled_addons entry that turns on an add-on that is off by default.
+[[nodiscard]] std::string EnabledAddonKey(std::string_view name);
+
+// What disabled_addons stores for a frontend's list of unchecked add-on names: the built-ins that
+// are off by default are stored as EnabledAddonKey(name) when checked, and not at all otherwise.
+// Frontends only need to list what is unchecked.
+[[nodiscard]] std::vector<std::string> StoredDisabledAddons(u64 title_id,
+                                                            std::vector<std::string> unchecked);
 // An enabled cheat that writes code or state of an applied built-in patch. Ranges are main module
 // offsets, end exclusive.
 struct BuiltinCheatOverlap {

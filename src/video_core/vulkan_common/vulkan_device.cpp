@@ -518,7 +518,7 @@ void Device::RemoveExtensionFeatureIfUnsuitable(bool is_suitable, Feature& featu
 
 namespace {
 /// FSR 4 runs AMD's own shaders: inside AMD's runtime on Windows with AMD's driver, and through
-/// the fsr4-vk port on Linux with RADV. They need float16 and, on RDNA 4, float8 on the device;
+/// the fsr4up-vk port on Linux with RADV. They need float16 and, on RDNA 4, float8 on the device;
 /// the emulator's shaders use neither for it.
 bool WantsAmdFsr4(VkDriverId driver_id) {
 #ifdef _WIN32
@@ -530,7 +530,7 @@ bool WantsAmdFsr4(VkDriverId driver_id) {
 #endif
 }
 
-/// The fsr4-vk port's shaders use features the emulator's don't; they're enabled only for it.
+/// The fsr4up-vk port's shaders use features the emulator's don't; they're enabled only for it.
 bool WantsFsr4Port(VkDriverId driver_id) {
 #if defined(__linux__) && !defined(__ANDROID__)
     return WantsAmdFsr4(driver_id);
@@ -847,9 +847,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         descriptor_indexing.descriptorBindingStorageTexelBufferUpdateAfterBind = false;
         descriptor_indexing.descriptorBindingUpdateUnusedWhilePending = false;
         descriptor_indexing.descriptorBindingVariableDescriptorCount = false;
-        // The fsr4-vk port's shaders declare runtime descriptor arrays.
-        descriptor_indexing.runtimeDescriptorArray =
-            descriptor_indexing.runtimeDescriptorArray && WantsFsr4Port(driver_id);
+        descriptor_indexing.runtimeDescriptorArray = false;
     }
 
     // VK_EXT_descriptor_buffer requires VK_KHR_buffer_device_address
@@ -1049,30 +1047,33 @@ VideoCommon::Fsr4PortDevice Device::Fsr4PortDevice() const {
         .vendor_id = properties.properties.vendorID,
         .device_id = properties.properties.deviceID,
         .radv = properties.driver.driverID == VK_DRIVER_ID_MESA_RADV,
-        .mixed_dot4_accelerated = properties.integer_dot_product
-                                      .integerDotProduct4x8BitPackedMixedSignednessAccelerated !=
-                                  VK_FALSE,
-        .descriptor_buffer = extensions.descriptor_buffer && extensions.buffer_device_address &&
-                             features.descriptor_indexing.runtimeDescriptorArray,
-        .synchronization2 = extensions.synchronization2,
+        .mixed_dot4_accelerated =
+            properties.integer_dot_product
+                .integerDotProduct4x8BitPackedMixedSignednessAccelerated != VK_FALSE,
+        .vulkan_1_3 = instance_version >= VK_API_VERSION_1_3,
         .compute_wave32 = extensions.subgroup_size_control &&
-                          features.subgroup_size_control.computeFullSubgroups &&
                           IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT),
-        .shader_arithmetic = features.shader_float16_int8.shaderInt8 &&
-                             features.features.shaderInt16 &&
-                             features.shader_float16_int8.shaderFloat16 &&
-                             properties.float_controls.shaderDenormPreserveFloat16 &&
-                             extensions.shader_integer_dot_product,
-        .compute_derivatives = extensions.compute_shader_derivatives &&
-                               (properties.subgroup_properties.supportedStages &
-                                VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
-                               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_QUAD_BIT),
-        .fp8_matrices = fp8_matrix_shapes && extensions.cooperative_matrix &&
-                        extensions.shader_float8 &&
-                        features.shader_float8.shaderFloat8CooperativeMatrix &&
-                        extensions.cooperative_matrix2 &&
-                        features.vulkan_memory_model.vulkanMemoryModel &&
-                        features.bit8_storage.storageBuffer8BitAccess,
+        .shader_basics = features.shader_float16_int8.shaderFloat16 &&
+                         features.shader_float16_int8.shaderInt8 &&
+                         features.features.shaderStorageImageWriteWithoutFormat &&
+                         features.features.shaderStorageImageExtendedFormats,
+        .integer_dot_product = extensions.shader_integer_dot_product &&
+                               features.shader_integer_dot_product.shaderIntegerDotProduct,
+        // The INT8 prepass also uses quad subgroup operations.
+        .compute_derivatives =
+            extensions.compute_shader_derivatives &&
+            features.compute_shader_derivatives.computeDerivativeGroupLinear &&
+            (properties.subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+            IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_QUAD_BIT),
+        .fp8_offered = fsr4_fp8_offered,
+        .fp8_enabled =
+            extensions.cooperative_matrix && features.cooperative_matrix.cooperativeMatrix &&
+            extensions.shader_float8 && features.shader_float8.shaderFloat8 &&
+            features.shader_float8.shaderFloat8CooperativeMatrix && features.features.shaderInt16 &&
+            features.bit16_storage.storageBuffer16BitAccess &&
+            features.vulkan_memory_model.vulkanMemoryModel &&
+            features.variable_pointer.variablePointers &&
+            features.variable_pointer.variablePointersStorageBuffer,
     };
 }
 
@@ -2124,18 +2125,13 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
             usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
-        const auto has_fp32_result_shape = [&](VkComponentTypeKHR input) {
-            return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
-                return shape.MSize == 16 && shape.NSize == 16 && shape.KSize == 16 &&
-                       shape.AType == input && shape.BType == input &&
-                       shape.CType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
-                       shape.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
-                       shape.saturatingAccumulation == VK_FALSE &&
-                       shape.scope == VK_SCOPE_SUBGROUP_KHR;
-            });
-        };
-        fp8_matrix_shapes = has_fp32_result_shape(VK_COMPONENT_TYPE_FLOAT16_KHR) &&
-                            has_fp32_result_shape(VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT);
+        // fsr4up-vk runs its FP8 network wherever the GPU supports these (its own check, on the
+        // physical device), so it is taken before the guest-only test below can drop the
+        // extension. GPUs with FP8 matrices have the rest of what that network uses.
+        fsr4_fp8_offered = extensions.cooperative_matrix &&
+                           features.cooperative_matrix.cooperativeMatrix &&
+                           extensions.shader_float8 && features.shader_float8.shaderFloat8 &&
+                           features.shader_float8.shaderFloat8CooperativeMatrix;
         extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
@@ -2206,9 +2202,10 @@ void Device::RemoveUnsuitableExtensions() {
                                VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
     }
 
-    // Only for the fsr4-vk port: integer dot products and compute derivatives for its INT8
-    // network, and VK_NV_cooperative_matrix2's matrix conversions (all RADV implements of it,
-    // behind its radv_cooperative_matrix2_nv option) for its FP8 network.
+    // Only for the fsr4up-vk port: integer dot products and compute derivatives for its INT8
+    // networks, and VK_NV_cooperative_matrix2's matrix conversions, which its FP8 network's
+    // SPIR-V declares. RADV runs that network without them (it exposes the extension only behind
+    // its radv_cooperative_matrix2_nv option), so they are enabled only where offered.
     const bool fsr4_port = WantsFsr4Port(properties.driver.driverID);
     if (extensions.shader_integer_dot_product &&
         (!fsr4_port || !features.shader_integer_dot_product.shaderIntegerDotProduct)) {

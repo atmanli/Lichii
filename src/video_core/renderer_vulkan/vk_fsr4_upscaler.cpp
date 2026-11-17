@@ -110,16 +110,16 @@ struct Provider {
 };
 
 #if defined(__linux__) && !defined(__ANDROID__)
-/// The fsr4-vk model CheckFsr4Port picked for the device's enabled features. fsr4-vk would pick
-/// by what the GPU supports, which can include features this device doesn't enable.
+/// fsr4up-vk's FSR 4.1.2 provider, if CheckFsr4Port finds the device's enabled features cover the
+/// network fsr4up-vk will pick by what the GPU supports. fsr4up-vk lists one provider and picks
+/// FP8 or INT8 itself. Other libraries of the same name (fsr4-vk) need features this device
+/// doesn't enable, so they are left alone.
 std::optional<Provider> FindFsr4(const FfxRuntime::Api& api, const Device& device) {
     const VideoCommon::Fsr4PortSupport support =
         VideoCommon::CheckFsr4Port(device.Fsr4PortDevice());
     if (!support.model) {
         return std::nullopt;
     }
-    const std::string_view suffix =
-        *support.model == VideoCommon::Fsr4PortModel::Fp8 ? " FP8" : " INT8";
     VkDeviceContext vk_context = DeviceContext(device);
     u64 count = 0;
     ffxQueryDescGetVersions versions{};
@@ -128,7 +128,8 @@ std::optional<Provider> FindFsr4(const FfxRuntime::Api& api, const Device& devic
     versions.device = &vk_context;
     versions.outputCount = &count;
     if (api.query(nullptr, &versions.header) != FFX_API_RETURN_OK || count == 0) {
-        LOG_WARNING(Render_Vulkan, "FSR 4: fsr4-vk offers no upscaler; using FSR 3.1");
+        LOG_WARNING(Render_Vulkan, "FSR 4: fsr4up-vk offers no upscaler for {}; using FSR 3.1",
+                    device.GetModelName());
         return std::nullopt;
     }
     std::vector<u64> ids(count);
@@ -138,16 +139,22 @@ std::optional<Provider> FindFsr4(const FfxRuntime::Api& api, const Device& devic
     if (api.query(nullptr, &versions.header) != FFX_API_RETURN_OK) {
         return std::nullopt;
     }
+    std::string offered;
     for (u64 i = 0; i < count; ++i) {
         const std::string_view name = names[i] ? names[i] : "";
-        if (name.starts_with('4') && name.ends_with(suffix)) {
+        if (!name.empty() && name[0] >= '4' && name[0] <= '9' &&
+            name.find("fsr4up-vk") != std::string_view::npos) {
+            const std::string_view network =
+                *support.model == VideoCommon::Fsr4PortModel::Fp8 ? "FP8" : "INT8";
             LOG_INFO(Render_Vulkan,
-                     "FSR 4 (fsr4-vk community Vulkan port): using its {} model on {}: {}", name,
-                     device.GetModelName(), support.reason);
+                     "FSR 4 (fsr4up-vk community Vulkan port): using {}, {} network on {}: {}",
+                     name, network, device.GetModelName(), support.reason);
             return Provider{ids[i], std::string{name}};
         }
+        offered += (offered.empty() ? "" : ", ") + std::string{name};
     }
-    LOG_WARNING(Render_Vulkan, "FSR 4: fsr4-vk lacks its{} model; using FSR 3.1", suffix);
+    LOG_WARNING(Render_Vulkan,
+                "FSR 4: the library offers {}, not fsr4up-vk's FSR 4.1.2; using FSR 3.1", offered);
     return std::nullopt;
 }
 #else
@@ -199,7 +206,7 @@ bool Fsr4Upscaler::IsWanted(const Device& device) {
         VideoCommon::CheckFsr4Port(device.Fsr4PortDevice());
     if (!support.model) {
         LOG_INFO(Render_Vulkan,
-                 "FSR 4 (fsr4-vk community Vulkan port) can't run on {} ({}): {}; using FSR 3.1",
+                 "FSR 4 (fsr4up-vk community Vulkan port) can't run on {} ({}): {}; using FSR 3.1",
                  device.GetModelName(), device.GetDriverName(), support.reason);
     }
     return support.model.has_value();
@@ -271,7 +278,7 @@ bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size
     render_extent = render_size;
     upscale_extent = upscale_size;
 #if defined(__linux__) && !defined(__ANDROID__)
-    LOG_INFO(Render_Vulkan, "FSR 4: fsr4-vk {} context {}x{} -> {}x{}", provider_name,
+    LOG_INFO(Render_Vulkan, "FSR 4: FSR {} context {}x{} -> {}x{}", provider_name,
              render_size.width, render_size.height, upscale_size.width, upscale_size.height);
 #else
     LOG_INFO(Render_Vulkan, "FSR 4: AMD FSR {} context {}x{} -> {}x{}", provider_name,

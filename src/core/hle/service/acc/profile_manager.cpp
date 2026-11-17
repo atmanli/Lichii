@@ -16,6 +16,7 @@
 #include "common/fs/fs_types.h"
 #include "common/fs/path_util.h"
 #include "common/fs/symlink.h"
+#include "common/nextendo.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/file_sys/savedata_factory.h"
@@ -91,6 +92,7 @@ bool ProfileManager::RemoveProfileAtIndex(std::size_t index) {
         return false;
     }
 
+    Common::Nextendo::ClearAccount(profiles[index].user_uuid);
     profiles[index] = ProfileInfo{};
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });

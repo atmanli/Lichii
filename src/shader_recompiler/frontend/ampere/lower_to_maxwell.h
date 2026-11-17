@@ -3993,8 +3993,15 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const bool write = opcode == 0x927;
             const u32 region = insn.Bits(76, 2);
             const bool output = insn.Bits(79, 1) != 0;
-            if ((insn.words[2] & ~0xf800U) != 0 || (region != 0 && region != 3) || write != output ||
-                (!write && region != 3) || (!write && dest == 255))
+            // A read with .O takes back a 32-bit word of the output attribute region: Nintendo
+            // Switch Sports Resort's Power Cruising water has ISBERD.ATTR.32.O (#1043, #2066).
+            // .SKEW packs attributes into 32-value lines; ISBE_nx2 does not model that for reads of
+            // the output region, so such a read stays rejected. That program has it off.
+            const bool output_read =
+                !write && output && insn.Bits(75, 1) != 0 && insn.Bits(78, 1) == 0;
+            if ((insn.words[2] & ~0xf800U) != 0 || (region != 0 && region != 3) ||
+                (write != output && !output_read) || (!write && region != 3) ||
+                (!write && dest == 255))
                 return fail(index, "native stage buffer access mode");
             emit(0xefc0000000000000ULL | predicate | (write ? u64{insn.Bits(32, 8)} : dest) |
                  (u64{insn.Bits(24, 8)} << 8) | (u64{insn.Bits(40, 24)} << 20) |

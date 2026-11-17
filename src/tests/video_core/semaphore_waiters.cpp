@@ -219,3 +219,58 @@ TEST_CASE("A puller torn down while it waits leaves the semaphore waiters", "[vi
     word = 5;
     CHECK_FALSE(waiters.WordStored());
 }
+
+TEST_CASE("Semaphore acquires pass without a drain only where draining can't change the outcome",
+          "[video_core][nx2_waiters]") {
+    using Acquire = Tegra::Engines::Puller::PendingAcquire;
+    using Check = Acquire::EarlyCheck;
+    constexpr u32 equal = 0x1;
+    constexpr u32 gequal = 0x4;
+    constexpr u32 mask = 0x8;
+    const auto make = [](u32 operation, u32 value) {
+        return Acquire{.address = 0x1000, .value = value, .operation = operation};
+    };
+    using Release = Acquire::QueuedRelease;
+    const auto none = [](const Acquire& acquire, u32 word) {
+        return acquire.CheckEarly(std::nullopt, word);
+    };
+    const auto queued = [](const Acquire& acquire, bool known, u32 payload,
+                           bool at_least = false) {
+        return acquire.CheckEarly(
+            Release{.payload = payload, .known = known, .at_least = at_least, .ran = false}, 0);
+    };
+    // A fenced release the back ran whose fence has yet to run, over the word in memory.
+    const auto ran = [](const Acquire& acquire, u32 payload, u32 word) {
+        return acquire.CheckEarly(
+            Release{.payload = payload, .known = true, .at_least = false, .ran = true}, word);
+    };
+    for (const u32 operation : {equal, gequal, mask}) {
+        CAPTURE(operation);
+        const Acquire acquire = make(operation, 6);
+        // Met by the word in memory, with nothing queued for it.
+        CHECK(none(acquire, operation == mask ? 2 : 6) == Check::Met);
+        // The last queued release decides: met by its known payload, else a drain reads it (a
+        // greater-or-equal word that will hold a value short of it is not met yet).
+        CHECK(queued(acquire, true, operation == mask ? 4 : 6) == Check::MetByQueued);
+        CHECK(queued(acquire, true, operation == mask ? 1 : 5) ==
+              (operation == gequal ? Check::NotMet : Check::Drain));
+        CHECK(queued(acquire, true, operation == mask ? 1 : 5, true) == Check::Drain);
+        // A lower bound that meets the value: the word may end above it, so it only decides a
+        // greater-or-equal acquire (a maximum over an unknown 8 records 6 and writes 8).
+        CHECK(queued(acquire, true, operation == mask ? 4 : 6, true) ==
+              (operation == gequal ? Check::MetByQueued : Check::Drain));
+        CHECK(queued(acquire, false, 6) == Check::Drain);
+        CHECK(ran(acquire, operation == mask ? 4 : 6, 0) == Check::MetByQueued);
+    }
+    // Ran but not landed: memory decides a greater-or-equal acquire; an equal or mask word may
+    // still change when it lands.
+    CHECK(ran(make(gequal, 6), 5, 6) == Check::Met);
+    CHECK(ran(make(gequal, 6), 5, 5) == Check::NotMet);
+    CHECK(ran(make(equal, 6), 5, 6) == Check::Drain);
+    CHECK(ran(make(mask, 6), 1, 2) == Check::Drain);
+    // Not met in memory: a greater-or-equal word only advances through releases the front sees
+    // (polled again later); an equal or mask word may be met by work the front doesn't record.
+    CHECK(none(make(gequal, 6), 5) == Check::NotMet);
+    CHECK(none(make(equal, 6), 7) == Check::Drain);
+    CHECK(none(make(mask, 6), 1) == Check::Drain);
+}

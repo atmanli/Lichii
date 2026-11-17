@@ -112,25 +112,31 @@ matched by shader hash, and stop matching when the lowering of their program cha
   stays created and takes over if the files are missing or don't check out, AMD's runtime offers
   no FSR 4 for the GPU, the context can't be created or a dispatch fails. The log says which, and
   shows `Ocarina FSR 4 evaluated` while it runs.
-- FSR 4 on Linux (RADV, off by default): "Use FSR 4 (fsr4-vk community Vulkan port) in place of
-  FSR 3.1" feeds the same inputs to [fsr4-vk](https://github.com/Astyyyyy/fsr4-vk) (GPL-3.0), a
-  community Vulkan port of FSR 4.1.1 built from AMD's weights and shaders. It is not AMD's
-  official FSR 4. The release workflow builds it with `tools/fsr4-vk/build.sh`, which pins the
-  fsr4-vk commit and the SHA-256 of AMD's signed `amd_fidelityfx_upscaler_dx12.dll` of FidelityFX
-  SDK 2.3.0 it extracts them from (listed under MIT in the SDK's `license.md`). Both x86-64 Linux
-  packages carry `usr/lib/amd_fidelityfx_upscaler_vk.so` and, in `usr/share/licenses/fsr4-vk`,
-  fsr4-vk's licences and AMD's SDK licence. The aarch64 packages don't: fsr4-vk's shader
-  conversion fails its own asset check on arm64 hosts. A build without it loads the library from the user
-  folder's `fidelityfx` folder. The setting is shown for RDNA 2 and newer Radeons on RADV
-  (`VideoCommon::IsFsr4PortGpu`). At boot `VideoCommon::CheckFsr4Port` checks what fsr4-vk's
-  shaders use on the created device (descriptor buffers, synchronization2, 32-lane compute
-  subgroups, 8/16-bit arithmetic with integer dot products, linear compute derivatives) and picks
-  the network: FP8 with FP16/FP8 cooperative matrices, `shaderFloat8` and the matrix conversions
-  of `VK_NV_cooperative_matrix2` (RADV exposes it only with its `radv_cooperative_matrix2_nv`
-  option), INT8 otherwise. Lichii asks fsr4-vk for that model by version. The extra device
-  features are enabled only while the setting is on with RADV. Anything missing, a missing
+- FSR 4 on Linux (RADV, off by default): "Use FSR 4 (fsr4up-vk community Vulkan port) in place
+  of FSR 3.1" feeds the same inputs to [fsr4up-vk](https://github.com/auz466/fsr4up-vk) (MIT), a
+  community native Linux Vulkan implementation of FSR 4.1.2 upscaling. It runs AMD's own FSR 4.1.2
+  shaders and network data, which its build reads out of AMD's signed
+  `amd_fidelityfx_upscaler_vk.dll` of FidelityFX SDK 2.4.0 (the same release the Windows build
+  downloads; listed under MIT in the SDK's `license.md`), and its output matches that DLL's bit
+  for bit under Wine. It is not AMD's official FSR 4. The release workflow builds it with
+  `tools/fsr4up-vk/build.sh`, which pins the fsr4up-vk commit, the SHA-256 of AMD's DLL and the
+  Vulkan headers it compiles against. Both x86-64 Linux packages carry
+  `usr/lib/amd_fidelityfx_upscaler_vk.so` and, in `usr/share/licenses/fsr4up-vk`, fsr4up-vk's
+  licence and notices and AMD's SDK licence. The aarch64 packages don't (untested there). A build
+  without it loads the library from the user folder's `fidelityfx` folder. The setting is shown
+  for RDNA 2 and newer Radeons on RADV (`VideoCommon::IsFsr4PortGpu`). fsr4up-vk picks the network
+  from what the GPU supports: FP8 where it has `VK_KHR_cooperative_matrix` and
+  `VK_EXT_shader_float8` with FP8 cooperative matrices (RDNA 4), else AMD's INT8 network for the
+  GPU (RDNA 3, RDNA 2, FSR 4 Lite). So at boot `VideoCommon::CheckFsr4Port` checks that the created
+  device enabled everything that network uses (Vulkan 1.3, 32-lane compute subgroups, float16 and
+  int8, format-less storage image writes; for FP8 cooperative matrices, float8, int16, 16-bit
+  storage, the Vulkan memory model and variable pointers; for INT8 integer dot products and linear
+  compute derivatives with quad operations). Unlike fsr4-vk (FSR 4.1.1, which this replaced),
+  fsr4up-vk needs neither `VK_EXT_descriptor_buffer` nor `VK_NV_cooperative_matrix2`, so RDNA 4
+  runs FP8 on a default RADV. Lichii only takes a library that names itself fsr4up-vk. The extra
+  device features are enabled only while the setting is on with RADV. Anything missing, a missing
   library or a failed context or dispatch leaves FSR 3.1 running, and the log names the active
-  upscaler and why. Ported from #915's loader; untested on AMD hardware so far.
+  upscaler and why.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
   (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
   reactive and transparency/composition masks; missing capture uses zero masks, not stale

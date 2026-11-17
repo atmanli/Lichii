@@ -264,7 +264,7 @@ std::shared_ptr<const Api> Acquire() {
         dlclose(module);
         return nullptr;
     }
-    LOG_INFO(Render_Vulkan, "FSR 4: loaded the fsr4-vk community Vulkan port from {}",
+    LOG_INFO(Render_Vulkan, "FSR 4: loaded the fsr4up-vk community Vulkan port from {}",
              Common::FS::PathToUTF8String(path));
     std::shared_ptr<const Loaded> shared{loaded.release(), [](const Loaded* l) {
                                              dlclose(l->module);

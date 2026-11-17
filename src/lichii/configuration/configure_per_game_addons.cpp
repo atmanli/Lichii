@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <utility>
 
@@ -137,36 +138,81 @@ void ConfigurePerGameAddons::SetTitleId(u64 id) {
 
 void ConfigurePerGameAddons::InstallMods(const QStringList& mods) {
     QStringList failed;
+    QStringList kept;
+    int installed = 0;
     for (const auto& mod : mods) {
-        if (FrontendCommon::InstallMod(mod.toStdString(), title_id, true) ==
-            FrontendCommon::Failed) {
-            failed << QFileInfo(mod).baseName();
+        const std::filesystem::path mod_path{mod.toStdU16String()};
+        FrontendCommon::ModInstallOptions options;
+        if (mods.size() == 1) {
+            options.name = install_name.toStdString();
+        }
+        const QString name =
+            QString::fromStdString(FrontendCommon::InstalledModName(mod_path, options));
+
+        // Installing replaces the whole mod of that name: only with the player's yes.
+        if (FrontendCommon::IsModInstalled(title_id, name.toStdString())) {
+            const auto choice = QtCommon::Frontend::Warning(
+                tr("Replace mod?"),
+                tr("A mod named \"%1\" is already installed for this game.\n\nReplace it? Its "
+                   "files are deleted and can NOT be recovered. Choose No to keep it as it is.")
+                    .arg(name),
+                QtCommon::Frontend::StandardButton::Yes | QtCommon::Frontend::StandardButton::No);
+            if (choice != QtCommon::Frontend::StandardButton::Yes) {
+                kept << name;
+                continue;
+            }
+            options.replace_existing = true;
+        }
+
+        switch (FrontendCommon::InstallMod(mod_path, title_id, options)) {
+        case FrontendCommon::Success:
+            ++installed;
+            break;
+        case FrontendCommon::Cancelled:
+            kept << name;
+            break;
+        case FrontendCommon::Failed:
+            failed << name;
+            break;
         }
     }
 
-    if (failed.empty()) {
-        QtCommon::Frontend::Information(tr("Mod Install Succeeded"),
-                                        tr("Successfully installed all mods."));
-
+    if (installed > 0) {
         item_model->removeRows(0, item_model->rowCount());
         list_items.clear();
         LoadConfiguration();
 
         UISettings::values.is_game_list_reload_pending.exchange(true);
-    } else {
+    }
+
+    if (!failed.empty()) {
         QtCommon::Frontend::Critical(
             tr("Mod Install Failed"),
             tr("Failed to install the following mods:\n\t%1\nCheck the log for details.")
                 .arg(failed.join(QStringLiteral("\n\t"))));
+    } else if (installed > 0 && kept.empty()) {
+        QtCommon::Frontend::Information(tr("Mod Install Succeeded"),
+                                        tr("Successfully installed all mods."));
+    } else if (installed > 0) {
+        QtCommon::Frontend::Information(
+            tr("Mod Install Succeeded"),
+            tr("Installed the other mods. Kept as they were:\n\t%1")
+                .arg(kept.join(QStringLiteral("\n\t"))));
     }
 }
 
 void ConfigurePerGameAddons::InstallModPath(const QString& path, const QString& fallbackName) {
-    const auto mods = QtCommon::Mod::GetModFolders(path, fallbackName);
+    install_name.clear();
+    const auto mods = QtCommon::Mod::GetModFolders(path, fallbackName, install_name);
 
     if (mods.size() > 1) {
         ModSelectDialog* dialog = new ModSelectDialog(mods, this);
-        connect(dialog, &ModSelectDialog::modsSelected, this, &ConfigurePerGameAddons::InstallMods);
+        // Each mod picked here is installed under its folder's name, even when another import
+        // asked for a name while this dialog was open.
+        connect(dialog, &ModSelectDialog::modsSelected, this, [this](const QStringList& selected) {
+            install_name.clear();
+            InstallMods(selected);
+        });
         dialog->show();
     } else if (!mods.empty()) {
         InstallMods(mods);

@@ -40,8 +40,10 @@ The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) has no DLSS of its own
 end-of-frame upscale pass can be replaced with FSR 3.1 on Linux or Windows, on any supported
 Vulkan GPU, or NVIDIA DLSS on Windows. The **Use AMD FSR 3.1 upscaling in Ocarina of Time**
 setting (`ocarina_fsr`) is off by default. NVIDIA DLSS takes precedence when its setting is
-enabled and the runtime is available; FSR runs only when its own setting is on, so without it
-the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
+enabled and the runtime is available. Otherwise, supported FSR is selected when its setting is
+on, or as the fallback at an explicit 50% or 75% render scale when DLSS is unavailable; that
+scale-based fallback applies even when `ocarina_fsr` is off. XeSS can take precedence over FSR
+when selected as described below. If no replacement is selected, the game keeps its own pass.
 `EDEN_NX2_DLSS_REPLACEMENT=fsr` explicitly enables FSR; `native` disables both replacements;
 `dlss` asks for DLSS as its setting does.
 
@@ -62,8 +64,9 @@ matched by shader hash, and stop matching when the lowering of their program cha
 - Max Resolution add-on on, handheld: at the default render scale, the scene and FullSize pass
   are 1920x1080 (1:1). An explicitly selected render scale changes both sizes; at 50%, they are
   1280x720. The game's final pass then scales to its 2560x1440 output. FSR replaces the FullSize
-  pass as native anti-aliasing (1:1, no upscale). DLSS leaves the game's pass there (DLAA through
-  it is untested).
+  pass and, in handheld mode, outputs to the game-screen window extent. It is 1:1 (no upscale)
+  only when the scene and window extents match; a larger window extent makes FSR upscale. DLSS
+  leaves the game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame
@@ -142,9 +145,11 @@ matched by shader hash, and stop matching when the lowering of their program cha
 
 On Windows with Vulkan, **Use Intel XeSS upscaling in Ocarina of Time** selects Intel's official
 XeSS-SR Vulkan runtime instead of the game's native network. This is a separate choice from FSR;
-it does not automatically replace FSR. When NVIDIA DLSS is enabled and available, DLSS takes
-precedence. XeSS uses the host-reconstructed camera motion, scene depth and the same host jitter
-applied to the scene. The SDK's `Ultra Quality`, `Quality`, `Balanced`, `Performance` and
+it does not automatically replace FSR just because XeSS is available. When NVIDIA DLSS is enabled
+and available, DLSS takes precedence. Otherwise, when XeSS and FSR are both enabled and XeSS is
+available, XeSS takes precedence over FSR; if XeSS is unavailable, selection falls back to FSR
+when supported. XeSS uses the host-reconstructed camera motion, scene depth and the same host
+jitter applied to the scene. The SDK's `Ultra Quality`, `Quality`, `Balanced`, `Performance` and
 `Ultra Performance` presets are available. The selected preset is used only when the game's
 render/output sizes fall within XeSS's reported input range; otherwise XeSS falls back.
 

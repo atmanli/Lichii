@@ -126,6 +126,23 @@ TEST_CASE("Ampere SUST.P keeps its channel mask", "[video_core][ampere]") {
     REQUIRE(((FindMaxwell(lowered, 0xeb2, 52) >> 20) & 0xf) == 1);
 }
 
+TEST_CASE("Ampere LDG.E.STRONG.GPU with a uniform base loads coherently", "[video_core][ampere]") {
+    // Cyberpunk 2077: LDG.E.STRONG.GPU R7, [R7.U32+UR4]: R250:R251 = UR4:UR5 + R7, then LDG.CG.
+    const std::array<Instruction, 2> code{{
+        {{0x07077981, 0x00000004, 0x081ee900, 0x002f2800}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const u64 load = FindMaxwell(lowered, 0xeed, 52);
+    REQUIRE(load != 0);
+    CHECK((load & 0xff) == 7);
+    CHECK(((load >> 8) & 0xff) == 250);
+    CHECK(((load >> 46) & 3) == 1);
+    CHECK(((load >> 48) & 7) == 4);
+}
+
 TEST_CASE("Ampere SHF.R.U64 immediate shifts keep their amount", "[video_core][ampere]") {
     // SHF.R.U64 R14, R14, n, R17 (Ocarina vertex shader 1a55fa57a335b963). The Maxwell
     // translator reads the immediate from bits 20-38, so no max-shift bits may be set there.
@@ -141,6 +158,36 @@ TEST_CASE("Ampere SHF.R.U64 immediate shifts keep their amount", "[video_core][a
         CHECK(((shf >> 20) & 0x7ffff) == shift);
         CHECK(((shf >> 39) & 0xff) == 17);
     }
+}
+
+TEST_CASE("Ampere USHF.L.U64.HI funnels two uniform words", "[video_core][ampere]") {
+    // Cyberpunk 2077: USHF.L.U64.HI UR5, UR4, 0x8, UR5 -> SHF.L R221, R220, 0x8, R221.
+    const std::array<Instruction, 2> code{{
+        {{0x04057899, 0x00000008, 0x08010205, 0x000fc800}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(lowered.instructions.front() == 0x36f86e800087dcddULL);
+}
+
+TEST_CASE("Ampere REDUX.AND starts from and fills inactive lanes with all ones",
+          "[video_core][ampere]") {
+    // Cyberpunk 2077: REDUX UR7, R0 (mode 0, AND).
+    const std::array<Instruction, 2> code{{
+        {{0x000773c4, 0, 0, 0x000ee200}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
+        return (word >> 52) == 0x010 && (word & 0xff) == 223 && ((word >> 20) & 0xffffffffULL) == ~0U;
+    }));
+    // Inactive lanes OR in the inverted lane mask, then R223 &= R251 once per lane.
+    CHECK(CountMaxwell(lowered, 0x5c4703000fc7fbfbULL, 0) == 32);
+    CHECK(CountMaxwell(lowered, 0x5c4700000fb7dfdfULL, 0) == 32);
 }
 
 TEST_CASE("Ampere SHFL with a register lane keeps its mode", "[video_core][ampere]") {

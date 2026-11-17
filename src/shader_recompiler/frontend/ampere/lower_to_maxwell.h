@@ -1210,6 +1210,14 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             const bool high_result = insn.words[2] == (0x08010600U | high) && low == 63 && high_ok;
             const bool low_result = insn.words[2] == 0x0800063f && low_ok;
+            // Left funnel of two uniform registers, as SHF.L; U64 shifts through 32 have the same
+            // high word (Cyberpunk 2077: USHF.L.U64.HI UR5, UR4, 0x8, UR5).
+            if (dst_ok && low_ok && high_ok && insn.words[1] <= 32 &&
+                (insn.words[2] == (0x08010600U | high) || insn.words[2] == (0x08010200U | high))) {
+                emit(0x36f8000000000000ULL | predicate | dst_reg | (u64{low_reg} << 8) |
+                     (u64{insn.words[1]} << 20) | (u64{high_reg} << 39));
+                break;
+            }
             if (!dst_ok || insn.words[1] > 32 || (!high_result && !low_result))
                 return fail(index, "native uniform shift mode");
             emit(0x3848000000000000ULL | predicate | dst_reg |
@@ -1421,19 +1429,21 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                          (u64{1} << 15) | (u64{7} << 29) | (u64{7} << 39));
             break;
         }
-        case 0x3c4: { // REDUX.SUM (modulo 2^32), .MIN/.MAX (unsigned), .OR or .XOR over the actual active lanes.
+        case 0x3c4: { // REDUX.SUM (modulo 2^32), .MIN/.MAX (unsigned), .AND, .OR or .XOR over the actual active lanes.
             const u32 source = insn.Bits(24, 8), target = uniform_register(static_cast<u32>(dest));
             const u32 mode = insn.words[2] & ~0x200U;
             const bool maximum = mode == 0x14000, minimum = mode == 0x10000;
             const bool signed_order = insn.Bits(73, 1);
             // OR and XOR: inactive lanes contribute zero, as for the sum. Maxwell LOP: 1 = OR, 2 = XOR.
-            const u32 logical = insn.words[2] == 0x4000 ? 1U : insn.words[2] == 0x8000 ? 2U : 0U;
+            // AND (mode 0) starts from and fills inactive lanes with ~0, as the minimum does.
+            const bool bitwise_and = insn.words[2] == 0;
+            const u32 logical = insn.words[2] == 0x4000 ? 1U : insn.words[2] == 0x8000 ? 2U : bitwise_and ? 3U : 0U;
             if (target == ~0U || target == 255 || insn.words[1] ||
                 (insn.words[2] != 0xc000 && !maximum && !minimum && !logical) ||
                 (signed_order && !maximum && !minimum) || native_predicate != 7)
                 return fail(index, "native warp sum mode");
             emit(0x50d8000000070000ULL | 250 | (u64{7} << 39) | (u64{7} << 45) | (u64{1} << 48));
-            mov_imm(target, minimum ? ~0U : 0U);
+            mov_imm(target, minimum || bitwise_and ? ~0U : 0U);
             for (u32 lane = 0; lane < 32; ++lane) {
                 emit(0xef10000000070000ULL | 251 | (u64{source} << 8) | (u64{lane} << 20) |
                     (u64{1} << 28) | (u64{1} << 29) | (u64{31} << 34) | (u64{7} << 48));
@@ -1443,16 +1453,16 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(0x3828000000070000ULL | 252 | (u64{250} << 8) | (u64{lane} << 20));
                 emit(0x0400000000070000ULL | 252 | (u64{252} << 8) | (u64{1} << 20));
                 emit(0x5c10000000070000ULL | 252 | (u64{255} << 8) | (u64{252} << 20) | (u64{1} << 48));
-                // Inactive lanes: 0, or ~0 for the minimum (OR with the inverted lane mask).
+                // Inactive lanes: 0, or ~0 for the minimum and AND (OR with the inverted lane mask).
                 emit(0x5c40000000070000ULL | 251 | (u64{251} << 8) | (u64{252} << 20) | (u64{7} << 48) |
-                     (u64{minimum} << 40) | (u64{minimum} << 41));
+                     (u64{minimum || bitwise_and} << 40) | (u64{minimum || bitwise_and} << 41));
                 if (minimum) {
                     emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) | (u64{7} << 39));
                 } else if (maximum) {
                     emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) | (u64{15} << 39));
                 } else if (logical) {
                     emit(0x5c40000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) |
-                        (u64{logical} << 41) | (u64{7} << 48));
+                        (u64{bitwise_and ? 0U : logical} << 41) | (u64{7} << 48));
                 } else {
                     emit(0x5c10000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20));
                 }
@@ -2031,6 +2041,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 size = insn.Bits(73, 3);
             const bool scoped_descriptor = opcode == 0x981 &&
                 insn.words[2] == 0x0c1ebd00;
+            // Memory order 7 in bits 77-80 (Mesa NAK, SM80+) is .STRONG.GPU: a coherent load, as LDG.CG.
+            const bool strong_gpu = opcode == 0x981 && insn.Bits(77, 4) == 7;
             u32 address = insn.Bits(24, 8);
             if (size > 6 || (opcode == 0x381 && insn.Bits(32, 8)) ||
                 (size == 5 && (dest & 1)) || (size == 6 && (dest & 3)))
@@ -2049,7 +2061,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool descriptor_address = scoped_descriptor ||
                     (insn.words[2] & ~(0x3fU | 0xe00U)) == 0x0c1e1100;
                 if ((!descriptor_address &&
-                     (insn.words[2] & ~(0x04000000U | 0x3fU | 0xe00U | 0x2000U)) != 0x081e8100) ||
+                     (insn.words[2] & ~(0x04000000U | 0x3fU | 0xe00U | 0x2000U | (strong_gpu ? 0x4000U : 0U))) !=
+                         0x081e8100) ||
                     uniform_address == ~0U || (uniform_address & 1))
                     return fail(index, "native global load uniform addressing mode");
                 if (descriptor_address) {
@@ -2091,7 +2104,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             emit(base(0xeed0000000000000ULL) | (u64{address} << 8) |
                  (u64{insn.Bits(40, 24)} << 20) | (u64{1} << 45) |
-                 (u64{scoped_descriptor} << 46) | (u64{size} << 48));
+                 (u64{scoped_descriptor || strong_gpu} << 46) | (u64{size} << 48));
             break;
         }
         case 0x386: case 0x986: { // Global store of 32/64/128 bits, 64-bit address.

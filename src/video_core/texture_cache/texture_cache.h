@@ -1529,6 +1529,25 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
 }
 
 template <class P>
+void TextureCache<P>::WriteGpuMemory(GPUVAddr gpu_addr, size_t size) {
+    for (const auto& [piece_addr, piece_size] : gpu_memory->GetSubmappedRange(gpu_addr, size)) {
+        if (const auto device_addr = gpu_memory->GpuToCpuAddress(piece_addr)) {
+            WriteMemory(*device_addr, piece_size);
+        }
+    }
+}
+
+template <class P>
+void TextureCache<P>::DownloadGpuMemory(GPUVAddr gpu_addr, size_t size) {
+    for (const auto& [piece_addr, piece_size] : gpu_memory->GetSubmappedRange(gpu_addr, size)) {
+        const auto device_addr = gpu_memory->GpuToCpuAddress(piece_addr);
+        if (device_addr && IsRegionGpuModified(*device_addr, piece_size)) {
+            DownloadMemory(*device_addr, piece_size);
+        }
+    }
+}
+
+template <class P>
 bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
     if (!image.IsSafeGpuCopy() || True(image.flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
         return false;

@@ -491,7 +491,7 @@ struct Values {
                                       Specialization::Default, true, false};
 
     SwitchableSetting<FrameGenType> frame_gen_type{linkage,
-                                                   FrameGenType::Fsr3,
+                                                   FrameGenType::FlyHigh,
                                                    "frame_gen_type",
                                                    Category::Renderer,
                                                    Specialization::Default,
@@ -552,6 +552,15 @@ struct Values {
                                                         true,
                                                         false,
                                                         &frame_gen};
+
+    SwitchableSetting<bool> frame_gen_flyhigh_protect_hud{linkage,
+                                                          true,
+                                                          "frame_gen_flyhigh_protect_hud",
+                                                          Category::Renderer,
+                                                          Specialization::Default,
+                                                          true,
+                                                          false,
+                                                          &frame_gen};
 
     SwitchableSetting<bool> frame_gen_dump_flow{linkage, false, "frame_gen_dump_flow",
                                                 Category::Renderer};

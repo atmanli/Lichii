@@ -2523,15 +2523,15 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         using Ms = std::chrono::duration<double, std::milli>;
         LOG_WARNING(HW_GPU,
                     "TCTRACE upload gpu={:#x} fmt={} {}x{}x{} lv={} ly={} guest={}KiB host={}KiB "
-                    "ms={:.2f} staging={:.2f} read={:.2f} untile={:.2f} faults={} chunked={} "
-                    "frame={}",
+                    "ms={:.2f} staging={:.2f} prefault={:.2f} read={:.2f} untile={:.2f} faults={} "
+                    "chunked={} frame={}",
                     image.gpu_addr, static_cast<u32>(image.info.format), image.info.size.width,
                     image.info.size.height, image.info.size.depth, image.info.resources.levels,
                     image.info.resources.layers, image.guest_size_bytes / 1024,
                     MapSizeBytes(image) / 1024, Ms(TraceClock::now() - trace_begin).count(),
-                    Ms(trace_staged - trace_begin).count(), upload_trace.read_ms,
-                    upload_trace.untile_ms, Common::GetProcessPageFaults() - trace_faults, chunked,
-                    frame_tick);
+                    Ms(trace_staged - trace_begin).count(), upload_trace.prefault_ms,
+                    upload_trace.read_ms, upload_trace.untile_ms,
+                    Common::GetProcessPageFaults() - trace_faults, chunked, frame_tick);
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
     // marks it cold, so the OS pages it out before anything else when it needs RAM (title 1
@@ -2577,6 +2577,14 @@ bool TextureCache<P>::UploadInChunks(Image& image) {
             continue; // padding between levels or layers
         }
         auto staging = runtime.UploadStagingBuffer(plan.total_host_bytes);
+        const auto prefault_begin = std::chrono::steady_clock::now();
+        PrefaultGuestMemory(*gpu_memory, image.gpu_addr + range[0].first,
+                            range[0].second - range[0].first);
+        if (TextureCacheTrace()) {
+            upload_trace.prefault_ms += std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - prefault_begin)
+                                            .count();
+        }
         ExecuteUnswizzlePlan(*gpu_memory, plan, staging.mapped_span);
         image.UploadMemory(staging, plan.copies);
     }
@@ -2849,6 +2857,16 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         runtime.AccelerateImageUpload(image, staging, uploads, 0, 0);
         return;
     }
+
+    using TraceClock = std::chrono::steady_clock;
+    const bool tc_trace = TextureCacheTrace();
+    const auto prefault_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
+    PrefaultGuestMemory(*gpu_memory, gpu_addr, image.guest_size_bytes);
+    const auto read_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
+    if (tc_trace) {
+        upload_trace.prefault_ms =
+            std::chrono::duration<double, std::milli>(read_begin - prefault_begin).count();
+    }
     if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
         gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                               VideoCommon::CacheType::NoTextureCache);
@@ -2857,9 +2875,6 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         return;
     }
 
-    using TraceClock = std::chrono::steady_clock;
-    const bool tc_trace = TextureCacheTrace();
-    const auto read_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     const auto untile_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};

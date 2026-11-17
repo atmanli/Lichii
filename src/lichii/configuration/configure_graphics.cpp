@@ -243,7 +243,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         }
 #endif
 #if !defined(_WIN32) && !defined(__linux__)
-        // FSR 4 runs through AMD's runtime on Windows and the fsr4-vk port on Linux.
+        // FSR 4 runs through AMD's runtime on Windows and the fsr4up-vk port on Linux.
         if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             continue;
         }

@@ -29,7 +29,7 @@ struct Api {
 
 /// On Windows, loads AMD's runtime after checking every file, or null when a file is missing,
 /// doesn't match or the loader lacks its exports (the log says which). Files that passed are not
-/// checked again this session. On Linux, loads the fsr4-vk port (PortLibrary), or null when it
+/// checked again this session. On Linux, loads the fsr4up-vk port (PortLibrary), or null when it
 /// isn't there or doesn't load; null on other systems. The runtime stays loaded while a returned
 /// pointer lives.
 [[nodiscard]] std::shared_ptr<const Api> Acquire();

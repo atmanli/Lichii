@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // FSR 4 through the FFX API (vulkan_common/ffx_runtime.h): on Windows AMD's FidelityFX runtime,
-// which the user downloads from AMD in the Graphics settings; on Linux the fsr4-vk community Vulkan
-// port the packages ship. Same inputs as the Ocarina FSR 3.1 path, which takes over when FSR 4 is
-// off, missing or fails.
+// which the user downloads from AMD in the Graphics settings; on Linux the fsr4up-vk community
+// Vulkan port of FSR 4.1.2 the packages ship. Same inputs as the Ocarina FSR 3.1 path, which takes
+// over when FSR 4 is off, missing or fails.
 
 #pragma once
 

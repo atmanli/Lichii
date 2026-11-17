@@ -3701,7 +3701,9 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
     using enum VideoCommon::OcarinaUpscalePass;
-    const auto pass = VideoCommon::FindOcarinaUpscalePass(native_key, pipeline.ShaderHash());
+    const auto pass = VideoCommon::OcarinaPassForTarget(
+        VideoCommon::FindOcarinaUpscalePass(native_key, pipeline.ShaderHash()), target.size.width,
+        target.size.height, extent.width, extent.height);
     const bool native_size = pass == FullSize;
     // At the DLSS Performance render scale (1920x1080) the game upscales to 2560x1440 with its
     // 3/4 pass instead (QuincyForbes' f7d0938b5b). The scale is the one the game started with,

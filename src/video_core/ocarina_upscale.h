@@ -49,6 +49,20 @@ constexpr OcarinaUpscalePass FindOcarinaUpscalePass(u64 native_key, u64 shader_h
     return None;
 }
 
+/// The pass a recognized program runs as for this target. Handheld with the Max Resolution add-on
+/// runs the 1440p program (da6df3e54c716df2) at 1:1 into a 1920x1080 target, which is the full-size
+/// pass: seen on RADV and MoltenVK (#1068).
+constexpr OcarinaUpscalePass OcarinaPassForTarget(OcarinaUpscalePass pass, u32 target_width,
+                                                  u32 target_height, u32 scene_width,
+                                                  u32 scene_height) {
+    const bool target_1440p = target_width == 2560 && target_height == 1440;
+    if (pass == OcarinaUpscalePass::Pass1440p && !target_1440p && target_width == scene_width &&
+        target_height == scene_height) {
+        return OcarinaUpscalePass::FullSize;
+    }
+    return pass;
+}
+
 /// render_scaled: a DLSS render-scale patch shrank the scene to a size FSR 3.1 takes, so FSR 3.1
 /// reconstructs it when DLSS can't run.
 constexpr OcarinaUpscaleBackend SelectOcarinaUpscaler(bool fsr_enabled, bool dlss_enabled,

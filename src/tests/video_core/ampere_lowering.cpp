@@ -531,6 +531,60 @@ TEST_CASE("Ampere Ocarina sign extends, uniform shifts and carries, LEA.HI and S
     CHECK_FALSE(LowerToMaxwell(straddle));
 }
 
+TEST_CASE("Ampere constant banks 24-31 read the root tables from bank 17", "[video_core][ampere]") {
+    const auto lower = [](const Instruction& instruction) {
+        const std::array<Instruction, 2> code{{instruction, EXIT}};
+        return LowerToMaxwell(code);
+    };
+    const auto field = [](u64 word, u32 offset, u32 count) {
+        return (word >> offset) & ((u64{1} << count) - 1);
+    };
+    // Cyberpunk 2077's ULDC.64 UR4, c[0x1f][0x0] and ULDC.64 UR4, c[0x19][0x8]: LDC.64 from
+    // bank 17, root table n at byte n * 256.
+    const auto check_load = [&](const Instruction& instruction, u32 offset) {
+        const auto loaded = lower(instruction);
+        INFO(loaded.error);
+        REQUIRE(static_cast<bool>(loaded));
+        const u64 ldc = FindMaxwell(loaded, 0xef9, 52);
+        REQUIRE(ldc != 0);
+        CHECK(field(ldc, 36, 5) == 17);
+        CHECK(field(ldc, 20, 16) == offset);
+        CHECK(field(ldc, 48, 3) == 5);
+    };
+    check_load({{0x00047ab9, 0x07c00000, 0x00000a00, 0x000fe200}}, 0x700);
+    check_load({{0x00047ab9, 0x06400200, 0x00000a00, 0x000fe400}}, 0x108);
+
+    // MOV R0, c[0x19][0x18] and IMAD.MOV.U32 R0, RZ, RZ, c[0x19][0x18]: a constant buffer MOV
+    // from bank 17 at 0x118. Bank 24 keeps its offset.
+    const auto check_move = [&](const Instruction& instruction, u32 offset) {
+        const auto moved = lower(instruction);
+        INFO(moved.error);
+        REQUIRE(static_cast<bool>(moved));
+        const u64 mov = FindMaxwell(moved, 0x4c98, 48);
+        REQUIRE(mov != 0);
+        CHECK(field(mov, 34, 5) == 17);
+        CHECK(field(mov, 20, 14) * 4 == offset);
+    };
+    check_move({{0x00007a02, 0x06400600, 0x00000f00, 0x040fc400}}, 0x118);
+    check_move({{0xff007624, 0x06400600, 0x078e00ff, 0x040fc400}}, 0x118);
+    check_move({{0x00007a02, 0x06000600, 0x00000f00, 0x040fc400}}, 0x18);
+
+    // MOV R0, c[0x19][0x100] is past its 256-byte table.
+    CHECK_FALSE(lower({{0x00007a02, 0x06404000, 0x00000f00, 0x040fc400}}));
+
+    // ULDC.U8 UR8, c[0x19][UR6-0x1] and c[0x18][UR6-0x1]: an indexed displacement is signed, so
+    // table 1's base wraps it to 0xff and bank 24 keeps 0xffff.
+    for (const auto& [bank, offset] : {std::pair{25U, 0xffU}, std::pair{24U, 0xffffU}}) {
+        const u32 address = (bank << 22) | (0xffffU << 6);
+        const auto indexed = lower({{0x06087abb, address, 0x08000000, 0x000fe400}});
+        INFO(indexed.error);
+        REQUIRE(static_cast<bool>(indexed));
+        const u64 ldc = FindMaxwell(indexed, 0xef9, 52);
+        CHECK(field(ldc, 36, 5) == 17);
+        CHECK(field(ldc, 20, 16) == offset);
+    }
+}
+
 TEST_CASE("Ampere Ocarina byte constant loads, ULEA carries to UP3 and two-source F2IP",
           "[video_core][ampere]") {
     const auto lower = [](const Instruction& instruction) {

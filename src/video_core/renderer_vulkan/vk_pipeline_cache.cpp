@@ -3608,6 +3608,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+    // Compute has eight constant buffers. The Ampere lowering reads NVN2's root tables (banks
+    // 24-31) from bank 17, which only the 3D engine provides.
+    if (program.info.constant_buffer_mask >> Tegra::Engines::KeplerCompute::NumConstBuffers) {
+        throw Shader::RuntimeError("Compute program reads constant buffer mask {:#x}",
+                                   program.info.constant_buffer_mask);
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||

@@ -392,17 +392,22 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         u64 predicate = u64{guarded_uniform ? ((native_predicate & 8) | guard_slot) : native_predicate} << 16;
         const u64 dest = insn.Bits(16, 8);
         const auto base = [&](u64 opcode_bits) { return opcode_bits | predicate | dest; };
-        // NVN2 fullscreen vertex shaders read bank 24, which the game never binds (the console reads
-        // zeros from an unbound bank); Maxwell has 18, so read it from bank 17, also never bound.
-        const auto bank = [&]() -> u32 {
-            const u32 value = insn.Bits(54, 5);
-            return value == 24 ? 17U : value;
+        // Banks 24-31 are NVN2's 256-byte root tables (Maxwell3D::RootTables). Maxwell has 18 banks,
+        // so they are read from bank 17, which games never bind, one after another: bank 24 + n at
+        // byte n * 256 (Cyberpunk 2077 reads banks 25 and 31). An indexed form's offset is a signed
+        // displacement, so the sum wraps at 16 bits; a direct offset past its table is rejected.
+        const auto root_bank = [&] { return insn.Bits(54, 5) >= 24; };
+        const auto bank = [&]() -> u32 { return root_bank() ? 17U : insn.Bits(54, 5); };
+        const auto cbuf_offset = [&]() -> u32 {
+            const u32 table_base = root_bank() ? (insn.Bits(54, 5) - 24) * 256 : 0U;
+            return (insn.Bits(38, 16) + table_base) & 0xffff;
         };
+        const auto direct_cbuf_in_table = [&] { return !root_bank() || insn.Bits(38, 16) < 256; };
         const auto cbuf = [&]() -> u64 {
-            return (u64{insn.Bits(38, 16) / 4} << 20) | (u64{bank()} << 34);
+            return (u64{cbuf_offset() / 4} << 20) | (u64{bank()} << 34);
         };
         const auto valid_cbuf = [&] {
-            return !insn.Bits(91, 1) && bank() < 18 &&
+            return !insn.Bits(91, 1) && bank() < 18 && direct_cbuf_in_table() &&
                    (insn.Bits(38, 16) % 4) == 0;
         };
         std::string_view operand_error;
@@ -1167,7 +1172,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 (opcode == 0xab9 && subword_load && offset >= 0x8000) ||
                 (width == 5 && ((uniform_dest & 1) || uniform_register(uniform_dest + 1) != target + 1)) ||
                 // An index register can align the offset; the host reads the aligned word either way.
-                bank() >= 18 || (opcode == 0xab9 && offset % alignment) || insn.Bits(62, 2) ||
+                bank() >= 18 || insn.Bits(62, 2) ||
+                (opcode == 0xab9 && (offset % alignment || !direct_cbuf_in_table())) ||
                 (insn.words[2] & ~0xe00U) != (opcode == 0xab9 ? 0U : 0x08000000U) ||
                 index_target == ~0U)
                 return fail(index, "native uniform constant load mode");
@@ -1175,7 +1181,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(0x4c98000000000000ULL | predicate | target | (u64{15} << 39) | cbuf());
             } else {
                 emit(0xef90000000000000ULL | predicate | target |
-                     (u64{index_target} << 8) | (u64{offset} << 20) |
+                     (u64{index_target} << 8) | (u64{cbuf_offset()} << 20) |
                      (u64{bank()} << 36) | (u64{width} << 48));
             }
             break;
@@ -1234,7 +1240,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 (width == 5 && ((dest & 1) || dest >= 254)))
                 return fail(index, "native indexed constant load mode");
             emit(base(0xef90000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
-                 (u64{insn.Bits(38, 16)} << 20) | (u64{bank()} << 36) | (u64{mode} << 44) | (u64{width} << 48));
+                 (u64{cbuf_offset()} << 20) | (u64{bank()} << 36) | (u64{mode} << 44) | (u64{width} << 48));
             break;
         }
         case 0xf89: { // SHFL with immediate lane and segmentation/clamp mask, any mode.

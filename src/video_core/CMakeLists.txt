@@ -124,6 +124,8 @@ add_library(video_core STATIC
     gpu_trace/trace_file.cpp
     gpu_trace/trace_file.h
     guest_memory.h
+    host_vsync.cpp
+    host_vsync.h
     invalidation_accumulator.h
     memory_manager.cpp
     memory_manager.h
@@ -299,6 +301,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_update_descriptor.cpp
     renderer_vulkan/vk_update_descriptor.h
     renderer_vulkan/descriptor_payload_growth.h
+    vulkan_common/vulkan_address_map.cpp
+    vulkan_common/vulkan_address_map.h
     vulkan_common/vulkan_debug_callback.cpp
     vulkan_common/vulkan_debug_callback.h
     vulkan_common/vulkan_device.cpp
@@ -386,6 +390,8 @@ add_library(video_core STATIC
     texture_cache/types.h
     texture_cache/util.cpp
     texture_cache/util.h
+    texture_cache/writeback_ranges.h
+    texture_cache/writeback_switches.h
     textures/astc.h
     textures/astc.cpp
     textures/bcn.cpp

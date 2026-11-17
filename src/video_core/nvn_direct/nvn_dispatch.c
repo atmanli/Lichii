@@ -10,10 +10,10 @@
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
 // ways unchanged.
 
+#include <sys/mman.h>   // (Windows: bananative/shim/win32)
 #if !defined(_WIN32)
 #include <signal.h>
 #include <execinfo.h>
-#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>

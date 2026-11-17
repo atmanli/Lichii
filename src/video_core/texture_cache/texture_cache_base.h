@@ -246,6 +246,9 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     /// SparseTiles images: notes a written range, uploaded with the next refresh.
     void MarkRangeWritten(Image& image, DAddr cpu_addr, size_t size);
 
+    /// What a CPU write of [cpu_addr, +size) does to an image over it.
+    void MarkImageWritten(ImageId image_id, Image& image, DAddr cpu_addr, size_t size);
+
     /// SparseTiles images: binds and uploads the parts written since the last upload.
     void RefreshSparseTiles(Image& image);
 
@@ -407,6 +410,12 @@ public:
 
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
+
+    /// After a DMA copy of [src_addr, +size) to [dest_addr, +size) in guest memory: marks the
+    /// images over the destination whose contents guest memory now holds. gpu_written_dest are
+    /// the destination ranges that took buffer cache GPU writes, which guest memory lacks.
+    void WriteDmaCopy(GPUVAddr src_addr, GPUVAddr dest_addr, size_t size,
+                      std::span<const std::pair<DAddr, size_t>> gpu_written_dest);
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);

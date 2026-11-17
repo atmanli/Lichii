@@ -1619,26 +1619,78 @@ template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
     ClearStale(cpu_addr, size);
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
-        if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
-            // Written at last: a backed image replaces it where it is used next.
-            image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+        MarkImageWritten(image_id, image, cpu_addr, size);
+    });
+}
+
+template <class P>
+void TextureCache<P>::MarkImageWritten(ImageId image_id, Image& image, DAddr cpu_addr,
+                                       size_t size) {
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+    if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
+        // Written at last: a backed image replaces it where it is used next.
+        image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+        return;
+    }
+    if (True(image.flags & ImageFlagBits::SparseTiles)) {
+        MarkRangeWritten(image, cpu_addr, size);
+        return;
+    }
+    if (UploadsByLayer(image)) {
+        MarkLayersWritten(image, cpu_addr, size);
+        return;
+    }
+    if (True(image.flags & ImageFlagBits::CpuModified)) {
+        return;
+    }
+    image.flags |= ImageFlagBits::CpuModified;
+    if (True(image.flags & ImageFlagBits::Tracked)) {
+        UntrackImage(image, image_id);
+    }
+}
+
+template <class P>
+void TextureCache<P>::WriteDmaCopy(GPUVAddr src_addr, GPUVAddr dest_addr, size_t size,
+                                   std::span<const std::pair<DAddr, size_t>> gpu_written_dest) {
+    const std::optional<DAddr> src = gpu_memory->GpuToCpuAddress(src_addr);
+    const std::optional<DAddr> dest = gpu_memory->GpuToCpuAddress(dest_addr);
+    if (!src || !dest) {
+        return;
+    }
+    // Destination bytes guest memory doesn't hold yet: the buffer cache's GPU writes and the
+    // bytes of images the GPU wrote over the source.
+    boost::container::small_vector<std::pair<DAddr, size_t>, 8> unheld(gpu_written_dest.begin(),
+                                                                       gpu_written_dest.end());
+    ForEachImageInRegion(*src, size, [&](ImageId, Image& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified)) {
             return;
         }
-        if (True(image.flags & ImageFlagBits::SparseTiles)) {
-            MarkRangeWritten(image, cpu_addr, size);
-            return;
+        const DAddr begin = (std::max)(static_cast<DAddr>(image.cpu_addr), *src);
+        const DAddr end = (std::min)(static_cast<DAddr>(image.cpu_addr_end), *src + size);
+        unheld.emplace_back(*dest + (begin - *src), end - begin);
+    });
+    std::ranges::sort(unheld);
+    DAddr held = *dest;
+    for (const auto& [begin, length] : unheld) {
+        if (begin > held) {
+            ClearStale(held, begin - held);
         }
-        if (UploadsByLayer(image)) {
-            MarkLayersWritten(image, cpu_addr, size);
-            return;
-        }
-        if (True(image.flags & ImageFlagBits::CpuModified)) {
-            return;
-        }
-        image.flags |= ImageFlagBits::CpuModified;
-        if (True(image.flags & ImageFlagBits::Tracked)) {
-            UntrackImage(image, image_id);
+        held = (std::max)(held, begin + length);
+    }
+    const DAddr dest_end = *dest + size;
+    if (held < dest_end) {
+        ClearStale(held, dest_end - held);
+    }
+    ForEachImageInRegion(*dest, size, [&](ImageId image_id, Image& image) {
+        // An upload would take bytes guest memory doesn't hold.
+        const bool takes_unheld = std::ranges::any_of(unheld, [&image](const auto& range) {
+            return range.first < image.cpu_addr_end && image.cpu_addr < range.first + range.second;
+        });
+        // GPU-written contents outside the copy are only in the image.
+        const bool keeps_gpu_contents = True(image.flags & ImageFlagBits::GpuModified) &&
+                                        (image.cpu_addr < *dest || image.cpu_addr_end > dest_end);
+        if (!takes_unheld && !keeps_gpu_contents) {
+            MarkImageWritten(image_id, image, *dest, size);
         }
     });
 }

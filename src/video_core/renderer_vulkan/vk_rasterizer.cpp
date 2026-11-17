@@ -4244,13 +4244,20 @@ bool AccelerateDMA::BufferClear(GPUVAddr src_address, u64 amount, u32 value) {
 }
 
 bool AccelerateDMA::BufferCopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
-    std::scoped_lock lock{buffer_cache.mutex};
+    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     buffer_cache.Nx2CollectListCopies(true);
-    const bool copied = buffer_cache.DMACopy(src_address, dest_address, amount);
+    boost::container::small_vector<std::pair<DAddr, size_t>, 4> gpu_written;
+    const bool copied = buffer_cache.DMACopy(src_address, dest_address, amount, &gpu_written);
     if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick())) {
         scheduler.Flush();
     }
     buffer_cache.Nx2CollectListCopies(false);
+    // DMACopy copies guest memory without telling the texture cache. Images over the destination
+    // (pitch linear data textures such as Kirby Air Riders' vertex lighting) would keep their old
+    // contents, and stale pages would skip the upload of images made there later.
+    if (copied) {
+        texture_cache.WriteDmaCopy(src_address, dest_address, amount, gpu_written);
+    }
     return copied;
 }
 

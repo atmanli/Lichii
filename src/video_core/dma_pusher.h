@@ -243,6 +243,11 @@ private:
 
     void CallMethod(u32 argument);
     void CallMultiMethod(const u32* base_start, u32 num_methods);
+    /// A word of an NVN host implementation's marker (nvn_hle_marker.h).
+    void CallNvnHleMarker(u32 argument);
+    /// What the driver's nvnCommandBufferBindTexture writes, as its marker describes it.
+    void ReplayNvnBindTexture(u32 word0, u32 handle);
+    u32 nvn_hle_word0{};
     [[nodiscard]] bool WantsSegment() const;
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;

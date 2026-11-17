@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -14,14 +15,19 @@
 #include <fmt/ranges.h>
 
 #include "common/display_hdr.h"
+#include "common/fs/fs.h"
+#include "common/fs/fs_util.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "core/nvn_hook.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
+#include "video_core/shader_notify.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/present.h"
 #include "video_core/render_trace.h"
@@ -52,6 +58,15 @@
 #endif
 #ifdef __ANDROID__
 #include <jni.h>
+#endif
+#ifdef LICHII_NVN_DIRECT
+#include "video_core/nvn_direct/nvn_direct.h"
+#include <chrono>
+#include <mutex>
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 #endif
 namespace Vulkan {
 namespace {
@@ -142,6 +157,204 @@ VkSurfaceFormatKHR ChooseOutputFormat(const vk::PhysicalDevice& physical, VkSurf
     return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
 #endif
 }
+
+#ifdef LICHII_NVN_DIRECT
+#ifdef _WIN32
+// Under WDDM NVML has no figure for a process (nvml.h: usedGpuMemory is NVML_VALUE_NOT_AVAILABLE
+// there, as Windows' kernel driver manages the memory): the memory budget extension's
+class NvmlProcessMemory {
+public:
+    explicit NvmlProcessMemory(const Device&) {
+        LOG_INFO(Render_Vulkan, "NVN2 direct mode: VRAM use from the memory budget extension (NVML "
+                                "has no per-process figure under WDDM)");
+    }
+    u64 Get() {
+        return 0;
+    }
+};
+#else
+/// NVN2 direct mode (dotfiles-25x.8): NVML's figure for this process's video memory on the
+/// device (NVIDIA only; 0 elsewhere or when NVML has no entry for it). VK_EXT_memory_budget's heap
+/// usage leaves out what the driver keeps for itself: Mario Kart World's race showed 8.8 GiB of
+/// heap usage while NVML had the process at 12.1 GiB (ux-vram-1), so a budget on the heap usage
+/// never held the cap. Read at most every 250 ms (an NVML process query takes about a millisecond).
+class NvmlProcessMemory {
+public:
+    explicit NvmlProcessMemory(const Device& device) {
+        library = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (library == nullptr) { // (NixOS keeps the driver's libraries here)
+            library = dlopen("/run/opengl-driver/lib/libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (library == nullptr) {
+            LOG_INFO(Render_Vulkan, "NVN2 direct mode: VRAM use from the memory budget extension (no NVML)");
+            return;
+        }
+        const auto load = [this](const char* name) { return dlsym(library, name); };
+        const auto init = reinterpret_cast<int (*)()>(load("nvmlInit_v2"));
+        const auto count = reinterpret_cast<int (*)(unsigned*)>(load("nvmlDeviceGetCount_v2"));
+        const auto by_index = reinterpret_cast<int (*)(unsigned, void**)>(load("nvmlDeviceGetHandleByIndex_v2"));
+        const auto uuid_of = reinterpret_cast<int (*)(void*, char*, unsigned)>(load("nvmlDeviceGetUUID"));
+        processes = reinterpret_cast<int (*)(void*, unsigned*, ProcessInfo*)>(
+            load("nvmlDeviceGetGraphicsRunningProcesses_v3"));
+        unsigned devices = 0;
+        if (!init || !count || !by_index || !uuid_of || !processes || init() != 0 ||
+            count(&devices) != 0) {
+            processes = nullptr;
+            return;
+        }
+        // The NVML device with the Vulkan device's UUID ("GPU-" and the 16 bytes as 8-4-4-4-12).
+        VkPhysicalDeviceIDProperties id{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                               .pNext = &id};
+        device.GetPhysical().GetProperties2(properties);
+        std::string want = "GPU-";
+        for (size_t i = 0; i < VK_UUID_SIZE; ++i) {
+            want += fmt::format("{:02x}", id.deviceUUID[i]);
+            if (i == 3 || i == 5 || i == 7 || i == 9) {
+                want += '-';
+            }
+        }
+        for (unsigned index = 0; index < devices; ++index) {
+            void* handle = nullptr;
+            std::array<char, 96> uuid{};
+            if (by_index(index, &handle) == 0 && uuid_of(handle, uuid.data(), 96) == 0 &&
+                want == uuid.data()) {
+                nvml_device = handle;
+            }
+        }
+        LOG_INFO(Render_Vulkan, "NVN2 direct mode: VRAM use {} (NVML device {})",
+                 nvml_device ? "from NVML for this process" : "from the memory budget extension",
+                 nvml_device ? want : "not found");
+    }
+
+    /// Bytes, 0 when not known.
+    u64 Get() {
+        if (nvml_device == nullptr) {
+            return 0;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        std::scoped_lock lock{mutex};
+        if (now - read_at < std::chrono::milliseconds{250}) {
+            return value;
+        }
+        read_at = now;
+        std::array<ProcessInfo, 64> table{};
+        unsigned count = static_cast<unsigned>(table.size());
+        value = 0;
+        if (processes(nvml_device, &count, table.data()) == 0) {
+            const unsigned self = static_cast<unsigned>(getpid());
+            for (unsigned i = 0; i < count && i < table.size(); ++i) {
+                if (table[i].pid == self) {
+                    value = table[i].used;
+                }
+            }
+        }
+        return value;
+    }
+
+private:
+    struct ProcessInfo { // nvmlProcessInfo_t (the _v3 calls)
+        unsigned pid;
+        unsigned long long used;
+        unsigned gpu_instance, compute_instance;
+    };
+    void* library{};
+    void* nvml_device{};
+    int (*processes)(void*, unsigned*, ProcessInfo*){};
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point read_at{};
+    u64 value{};
+};
+
+#endif
+
+struct NvnDirectMemory {
+    const Device* device;
+    NvmlProcessMemory nvml;
+};
+
+/// NVN2 direct mode (dotfiles-25x.2): the replay runs on this device. Its NVN queues take the
+/// graphics family's queues from 1 on, its own work (uploads, sparse binds) queue 0 with Lichii; every
+/// submission of the replay holds the scheduler's submit lock. Returns whether the replay is up.
+bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
+                    Scheduler& scheduler, NvnDirectAstc* astc, NvnDirectShaders& shaders,
+                    VideoCore::ShaderNotify& shader_notify) {
+    std::vector<const char*> extensions;
+    for (const std::string& name : device.GetLoadedExtensions()) {
+        extensions.push_back(name.c_str());
+    }
+    const std::span<const VkQueue> queues = device.GetNvnDirectQueues();
+    nvn_direct_device adopted{
+        .get_instance_proc_addr = dld.vkGetInstanceProcAddr,
+        .instance = instance,
+        .physical = device.GetPhysical(),
+        .device = *device.GetLogical(),
+        .queue_family = device.GetGraphicsFamily(),
+        .queue_count = static_cast<uint32_t>(queues.size()),
+        .queues = {},
+        .extensions = extensions.data(),
+        .extension_count = static_cast<uint32_t>(extensions.size()),
+        .queue_lock = [](void* mutex) { static_cast<std::mutex*>(mutex)->lock(); },
+        .queue_unlock = [](void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); },
+        .queue_context = &scheduler.submit_mutex,
+        .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
+        .astc_flush = astc != nullptr ? &NvnDirectAstc::Flush : nullptr,
+        .astc_context = astc,
+        .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
+        // NVML's figure when there is one (it counts what the driver keeps for itself), else the
+        // heap usage (dotfiles-25x.8).
+        .memory_usage = [](void* context) -> uint64_t {
+            auto* const memory = static_cast<NvnDirectMemory*>(context);
+            const u64 nvml = memory->nvml.Get();
+            return nvml != 0 ? nvml : memory->device->GetDeviceMemoryUsage();
+        },
+        .memory_budget = [](void* context) -> uint64_t {
+            return static_cast<NvnDirectMemory*>(context)->device->GetDeviceMemoryBudget();
+        },
+        .memory_context = new NvnDirectMemory{&device, NvmlProcessMemory{device}},   // (the replay's, for the process: one launch per process)
+        .pipeline_building = [](void* notify) {
+            static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderBuilding();
+        },
+        .pipeline_built = [](void* notify) {
+            static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderComplete();
+        },
+        .pipeline_context = &shader_notify,
+        .async_pipelines = Settings::values.use_asynchronous_shaders.GetValue(),
+        .shader_translate = &NvnDirectShaders::Translate,
+        .shader_free = &NvnDirectShaders::Free,
+        .shader_context = &shaders,
+        .scale_up = Settings::values.resolution_info.up_scale,
+        .scale_shift = Settings::values.resolution_info.down_shift,
+        .debug_labels = device.HasDebuggingToolAttached() || Settings::values.renderer_debug.GetValue(),
+    };
+    for (size_t index = 0; index < queues.size(); ++index) {
+        adopted.queues[index] = queues[(index + 1) % queues.size()];
+    }
+    // The replay keeps its pipeline cache, prewarm list, kept translations and the view formats
+    // it learns in DM_TEMP: unless it is set (lab runs set their own), Lichii's cache directory,
+    // one folder per title named as the shader cache's (nvn_direct/<16 hex digits of the program
+    // id>/: dotfiles-25x.13, every title loaded Mario Kart World's), never the working directory
+    // or HOME, its fallback.
+    if (const char* temp = std::getenv("DM_TEMP"); temp == nullptr || *temp == '\0') {
+        const u64 title = Core::NvnHook::DirectProgramId();
+        auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nvn_direct";
+        if (title != 0) {
+            dir /= fmt::format("{:016x}", title);
+        }
+        if (Common::FS::CreateDirs(dir)) {
+#ifdef _WIN32
+            _putenv_s("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str()); // (getenv's environment)
+#else
+            setenv("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str(), 0);
+#endif
+        }
+    }
+    const bool up = nvn_direct_adopt_device(&adopted) != 0;
+    LOG_INFO(Render_Vulkan, "NVN2 direct mode: the replay {} on Lichii's device ({}, {} queues)",
+             up ? "is up" : "failed to start", device.GetModelName(), queues.size());
+    return up;
+}
+#endif
 
 } // Anonymous namespace
 
@@ -269,6 +482,48 @@ try
             },
     };
     Report();
+#ifdef LICHII_NVN_DIRECT
+    // EDEN_NX2_NVN_DIRECT_NULL=1: the null backend (no replay device: submissions run their
+    // CPU-side effects only, fences complete at submit).
+    if (const char* null_backend = std::getenv("EDEN_NX2_NVN_DIRECT_NULL");
+        device.IsNvnDirect() && (null_backend == nullptr || std::strcmp(null_backend, "1") != 0)) {
+        // ASTC the device cannot sample: decoded and re-compressed to BC on the GPU (.8).
+        if (!device.IsOptimalAstcSupported() && device.IsKhrPushDescriptorSupported()) {
+            nvn_direct_astc.emplace(device, memory_allocator);
+        }
+        const PipelineCache& pipeline_cache = rasterizer.GetPipelineCache();
+        nvn_direct_shaders.emplace(device, pipeline_cache.GetProfile(), pipeline_cache.GetHostInfo());
+        if (!AdoptNvnDirect(dld, *instance, device, scheduler,
+                            nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
+                            gpu_.ShaderNotify())) {
+            // Before the game runs: it falls back to GPU emulation on this device rather than
+            // run with nothing to show.
+            nvn_direct_shaders.reset();
+            nvn_direct_astc.reset();
+            device.EndNvnDirect();
+            Core::NvnHook::DirectFailed();
+        }
+    } else if (device.IsNvnDirect()) {
+        LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
+    }
+    // Lab (EDEN_NX2_VRAM_TRACE=1, dotfiles-25x.8 / vvt.9): every second NVML's figure for this
+    // process beside the heap usage Lichii counts (GetDeviceMemoryUsage), in either renderer: what
+    // the driver keeps outside the memory heaps (the replay's DM_VK_VRAM_TRACE adds its own lines).
+    if (const char* trace = std::getenv("EDEN_NX2_VRAM_TRACE"); trace != nullptr && std::strcmp(trace, "1") == 0) {
+        vram_trace = std::jthread([this](std::stop_token stop) {
+            NvmlProcessMemory nvml{device};
+            while (!stop.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                const u64 process = nvml.Get();
+                // (the driver's heap usage: Lichii's figure plus what VMA holds unused in its blocks)
+                const u64 heaps = device.GetDeviceMemoryUsage() + device.GetDeviceMemorySlack();
+                LOG_INFO(Render_Vulkan, "VRAM trace: NVML {} MiB, heap usage {} MiB (VMA unused {} MiB), outside the heaps {} MiB",
+                         process >> 20, heaps >> 20, device.GetDeviceMemorySlack() >> 20,
+                         (static_cast<s64>(process) - static_cast<s64>(heaps)) >> 20);
+            }
+        });
+    }
+#endif
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
     throw std::runtime_error{fmt::format("Vulkan initialization error {}", exception.what())};
@@ -276,6 +531,13 @@ try
 
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
+#ifdef LICHII_NVN_DIRECT
+    // NVN2 direct mode (dotfiles-25x.18): the replay's threads leave the device (and the ASTC
+    // decode it calls back into) before both go away.
+    if (device.IsNvnDirect()) {
+        nvn_direct_park();
+    }
+#endif
     void(device.GetLogical().WaitIdle());
 }
 

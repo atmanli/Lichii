@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <memory>
 
 #include "common/logging.h"
@@ -60,6 +61,18 @@ namespace VideoCore {
 /// @brief Creates an emulated GPU instance using the given system context.
 void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_window, Core::System& system) {
     Settings::UpdateRescalingInfo();
+    // Lab: EDEN_NX2_RESOLUTION=<resolution_setup value> (3 = 1x, 2 = 3/4x, 1 = 1/2x, ...) in place
+    // of the configured one for this run only: the setting itself is left alone, so it is not
+    // written back into a shared config.
+    if (const char* setup = std::getenv("EDEN_NX2_RESOLUTION"); setup != nullptr && *setup != '\0') {
+        const int value = std::atoi(setup);
+        if (value >= static_cast<int>(Settings::ResolutionSetup::Res1_4X) &&
+            value <= static_cast<int>(Settings::ResolutionSetup::Res8X)) {
+            Settings::TranslateResolutionInfo(static_cast<Settings::ResolutionSetup>(value),
+                                              Settings::values.resolution_info);
+            LOG_INFO(Render, "EDEN_NX2_RESOLUTION: resolution scale of setup {}", value);
+        }
+    }
     VideoCommon::Nx2Profile::ReadSwitch();
     VideoCommon::StutterTrace::StartSession();
     Tegra::Nx2CmdPageDiag::ReadSwitch();

@@ -5,6 +5,9 @@
 
 add_subdirectory(host_shaders)
 add_subdirectory(gpu_logging)
+if (ENABLE_NVN_DIRECT)
+    add_subdirectory(nvn_direct)
+endif()
 
 if(LIBVA_FOUND)
     set_source_files_properties(host1x/ffmpeg.cpp
@@ -146,6 +149,8 @@ add_library(video_core STATIC
     nx2_list_indirect_stats.h
     nx2_owed_words.h
     nx2_profile.h
+    nvn_header_count.h
+    nvn_hle_marker.h
     nx2_stutter_trace.cpp
     nx2_stutter_trace.h
     nx2_perf.h
@@ -259,6 +264,10 @@ add_library(video_core STATIC
     renderer_vulkan/vk_multi_range_buffer.h
     renderer_vulkan/vk_master_semaphore.cpp
     renderer_vulkan/vk_master_semaphore.h
+    renderer_vulkan/vk_nvn_direct_astc.cpp
+    renderer_vulkan/vk_nvn_direct_astc.h
+    renderer_vulkan/vk_nvn_direct_shaders.cpp
+    renderer_vulkan/vk_nvn_direct_shaders.h
     renderer_vulkan/vk_pipeline_cache.cpp
     renderer_vulkan/vk_pipeline_cache.h
     renderer_vulkan/vk_pipeline_cache_records.cpp
@@ -605,6 +614,9 @@ add_custom_command(
 target_sources(video_core PRIVATE "${emission_stamp}")
 target_include_directories(video_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
+if (TARGET nvn_direct)
+    target_link_libraries(video_core PUBLIC nvn_direct)
+endif()
 if (ENABLE_OPENGL)
     target_link_libraries(video_core PUBLIC glad)
 endif()

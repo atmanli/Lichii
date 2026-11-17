@@ -86,8 +86,8 @@ VkExtent2D ScaleExtentAtQualityRatio(VkExtent2D input, double scale) {
     }
     const double scaled_width = input.width * scale;
     const double scaled_height = input.height * scale;
-    if (scaled_width > std::numeric_limits<i32>::max() ||
-        scaled_height > std::numeric_limits<i32>::max()) {
+    if (scaled_width > std::numeric_limits<s32>::max() ||
+        scaled_height > std::numeric_limits<s32>::max()) {
         return {};
     }
     return {static_cast<u32>(std::llround(scaled_width)),
@@ -498,12 +498,12 @@ struct XessUpscaler::Impl {
                 const VkImageBlit region{
                     .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .srcOffsets = {{0, 0, 0},
-                                   {static_cast<i32>(xess_output_size.width),
-                                    static_cast<i32>(xess_output_size.height), 1}},
+                                   {static_cast<s32>(xess_output_size.width),
+                                    static_cast<s32>(xess_output_size.height), 1}},
                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                     .dstOffsets = {{0, 0, 0},
-                                   {static_cast<i32>(output_size.width),
-                                    static_cast<i32>(output_size.height), 1}},
+                                   {static_cast<s32>(output_size.width),
+                                    static_cast<s32>(output_size.height), 1}},
                 };
                  const std::array regions{region};
                 cmdbuf.BlitImage(target_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *output_image,

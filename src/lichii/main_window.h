@@ -577,6 +577,8 @@ private:
     QTimer nextendo_session_timer;
     QFutureWatcher<Common::Nextendo::SignOutReason> nextendo_session_watcher;
     QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>> nextendo_status_watcher;
+    // The profile nextendo_status_watcher checks.
+    Common::UUID nextendo_status_profile;
     QFutureWatcher<std::optional<Common::Nextendo::GameCatalog>> nextendo_catalog_watcher;
     std::optional<std::pair<u64, std::string>> nextendo_version_check;
     QTimer nextendo_social_timer;

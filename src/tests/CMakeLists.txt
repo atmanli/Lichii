@@ -12,6 +12,7 @@ add_executable(tests
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
+    video_core/frame_dump_decode.cpp
     video_core/frame_gen_generations.cpp
     video_core/frame_pacer.cpp
     video_core/nx2_stutter_trace.cpp
@@ -41,6 +42,7 @@ add_executable(tests
     core/keyblob_cmac.cpp
     core/aes_xts.cpp
     common/display_hdr.cpp
+    common/restore_eden_path.cpp
     common/dkb_cpu_trace.cpp
     common/dkb_frame_trace.cpp
     audio_core/nx2_sysmix.cpp

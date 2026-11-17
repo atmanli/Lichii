@@ -168,6 +168,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/frontend/applets/software_keyboard.h"
 
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applet_web_browser_types.h"
@@ -542,11 +543,17 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                                          tr("Sign in again in Configure > Network."));
             });
     connect(&nextendo_status_watcher,
-            &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this,
-            [this] {
+            &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this, [this] {
+                // A reply for the user before a profile switch isn't this user's, and the check
+                // a game booted on the new profile meanwhile waited for this one.
+                if (nextendo_status_profile !=
+                    Service::Account::Nextendo::CurrentProfile(*QtCommon::system)) {
+                    CheckNextendoOnlineStatus();
+                    return;
+                }
                 const auto status = nextendo_status_watcher.result();
                 QString message;
-                if (!Common::Nextendo::LoadAccount()) {
+                if (!Common::Nextendo::LoadAccount(nextendo_status_profile)) {
                     message = tr("Nextendo online play is on, but you aren't signed in. Sign in "
                                  "in Configure > Network.");
                 } else if (status && !status->allow) {
@@ -578,10 +585,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                               .arg(QString::fromStdString(verdict->recommended)),
                     30000);
             });
-    connect(&nextendo_session_timer, &QTimer::timeout, this,
-            &MainWindow::KeepNextendoSessionAlive);
-    nextendo_session_timer.start(std::chrono::minutes{2});
-    KeepNextendoSessionAlive();
+    connect(&nextendo_session_timer, &QTimer::timeout, this, &MainWindow::KeepNextendoSessionAlive);
     connect(&nextendo_social_timer, &QTimer::timeout, this, &MainWindow::UpdateNextendoSocial);
     connect(&nextendo_profile_watcher,
             &QFutureWatcher<std::optional<Common::Nextendo::ProfilePull>>::finished, this, [this] {
@@ -682,6 +686,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // to prevent the UI from blowing up.
     UpdateUITheme();
 
+    std::optional<Core::LaunchParams> launch;
     if (QStringList args = QApplication::arguments(); args.size() >= 2) {
         QList<QByteArray> qba{};
         for (auto const& e : args)
@@ -690,7 +695,18 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         for (auto& e : qba)
             args_cstr.push_back(e.data());
 
-        auto const lp = Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+        launch =
+            Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+    }
+
+    // Once FixProfiles has read the configured NAND and -u may have picked another user.
+    Common::Nextendo::MigrateAccountFile(
+        Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
+    nextendo_session_timer.start(std::chrono::minutes{2});
+    KeepNextendoSessionAlive();
+
+    if (launch) {
+        const auto& lp = *launch;
 
         // Override fullscreen setting if gamepath or argument is provided
         if (!lp.filepath.empty() || lp.fullscreen) {
@@ -2859,10 +2875,13 @@ void MainWindow::OnEmulationStopped() {
 
     nextendo_social_timer.stop();
     if (Common::Nextendo::OnlinePlayActive()) {
-        const auto post_offline = [client_id = Settings::values.nextendo_client_id.GetValue()] {
-            void(QtConcurrent::run(
-                [client_id] { void(Common::Nextendo::UpdatePresence(client_id, 0)); }));
-        };
+        const auto post_offline =
+            [client_id = Settings::values.nextendo_client_id.GetValue(),
+             profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system)] {
+                void(QtConcurrent::run([client_id, profile] {
+                    void(Common::Nextendo::UpdatePresence(client_id, profile, 0));
+                }));
+            };
         // A refresh still running would post playing after the offline one.
         if (nextendo_social_watcher.isRunning()) {
             connect(&nextendo_social_watcher, &QFutureWatcher<void>::finished, this, post_offline,
@@ -4219,7 +4238,8 @@ void MainWindow::OnConfigure() {
     const bool old_nextendo_sync = Settings::values.nextendo_sync_profile.GetValue();
     const auto old_current_user = Settings::values.current_user.GetValue();
     const auto nextendo_pid = [] {
-        const auto account = Common::Nextendo::LoadAccount();
+        const auto account = Common::Nextendo::LoadAccount(
+            Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
         return account ? account->pid : 0;
     };
     const u64 old_nextendo_pid = nextendo_pid();
@@ -5442,9 +5462,12 @@ void MainWindow::KeepNextendoSessionAlive() {
     if (!Common::Nextendo::OnlinePlayActive() || nextendo_session_watcher.isRunning()) {
         return;
     }
-    nextendo_session_watcher.setFuture(
-        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
-            return Common::Nextendo::KeepSessionAlive(client_id);
+    // Only the profile a game plays with, or the one the next game boots with: a heartbeat for
+    // every signed-in profile would spend the request budget.
+    nextendo_session_watcher.setFuture(QtConcurrent::run(
+        [client_id = Settings::values.nextendo_client_id.GetValue(),
+         profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system)] {
+            return Common::Nextendo::KeepSessionAlive(client_id, profile);
         }));
 }
 
@@ -5454,9 +5477,10 @@ void MainWindow::UpdateNextendoSocial() {
     }
     nextendo_social_watcher.setFuture(
         QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                           profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system),
                            program_id = QtCommon::system->GetApplicationProcessProgramID()] {
-            void(Common::Nextendo::RefreshFriends(client_id));
-            void(Common::Nextendo::UpdatePresence(client_id, program_id));
+            void(Common::Nextendo::RefreshFriends(client_id, profile));
+            void(Common::Nextendo::UpdatePresence(client_id, profile, program_id));
         }));
 }
 
@@ -5484,9 +5508,11 @@ void MainWindow::CheckNextendoOnlineStatus() {
     if (!Common::Nextendo::OnlinePlayActive() || nextendo_status_watcher.isRunning()) {
         return;
     }
+    nextendo_status_profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system);
     nextendo_status_watcher.setFuture(
-        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
-            return Common::Nextendo::CheckOnlineStatus(client_id);
+        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                           profile = nextendo_status_profile] {
+            return Common::Nextendo::CheckOnlineStatus(client_id, profile);
         }));
 }
 

@@ -24,6 +24,7 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/nso.h"
 #include "core/memory/cheat_engine.h"
+#include "tests/common/restore_eden_path.h"
 
 namespace {
 
@@ -188,7 +189,7 @@ public:
 
     ~PatchManagerTestContext() {
         for (size_t i = 0; i < TestDirectories.size(); ++i) {
-            Common::FS::SetEdenPath(TestDirectories[i].first, previous[i]);
+            Tests::RestoreEdenPath(TestDirectories[i].first, previous[i]);
         }
         Settings::values.disabled_addons.erase(OcarinaTitleId);
         std::error_code error;

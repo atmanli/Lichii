@@ -12,11 +12,15 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QPointer>
+#include <QSignalBlocker>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrent>
 #include "common/nextendo.h"
 #include "common/settings.h"
+#include "common/string_util.h"
 #include "core/core.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/internal_network/network_interface.h"
 #include "ui_configure_network.h"
 #include "lichii/configuration/configure_network.h"
@@ -31,9 +35,10 @@ std::string NextendoClientId(const QString& text) {
 enum class FriendKind { Friend, Request, Sent };
 
 Common::Nextendo::SocialResult ThenRefresh(const std::string& client_id,
+                                           const Common::UUID& profile,
                                            Common::Nextendo::SocialResult result) {
     return result.status == Common::Nextendo::SocialStatus::Ok
-               ? Common::Nextendo::RefreshFriends(client_id)
+               ? Common::Nextendo::RefreshFriends(client_id, profile)
                : result;
 }
 
@@ -67,6 +72,7 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
         ui->network_interface->addItem(QString::fromStdString(iface.name));
     ui->nextendo_status->setTextFormat(Qt::PlainText);
     ui->nextendo_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ShowNextendoProfiles();
     RetranslateUI();
     this->SetConfiguration();
 
@@ -80,6 +86,8 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
         }
     }
 
+    connect(ui->nextendo_profile, &QComboBox::currentIndexChanged, this,
+            &ConfigureNetwork::SwitchNextendoProfile);
     connect(ui->nextendo_enabled, &QCheckBox::toggled, this, [this](bool enabled) {
         if (enabled) {
             ui->airplane_mode->setChecked(false);
@@ -115,14 +123,16 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
             return;
         }
         RunFriendsRequest(
-            [code](const std::string& client_id) {
-                return ThenRefresh(client_id, Common::Nextendo::AddFriend(client_id, code));
+            [code](const std::string& client_id, const Common::UUID& profile) {
+                return ThenRefresh(client_id, profile,
+                                   Common::Nextendo::AddFriend(client_id, profile, code));
             },
             tr("Friend request sent."));
     });
     connect(ui->nextendo_sign_out, &QPushButton::clicked, this, [this] {
-        const auto account = Common::Nextendo::LoadAccount();
-        Common::Nextendo::ClearAccount();
+        const Common::UUID profile = NextendoProfile();
+        const auto account = Common::Nextendo::LoadAccount(profile);
+        Common::Nextendo::ClearAccount(profile);
         if (account && !account->refresh_token.empty()) {
             void(QtConcurrent::run([client_id = NextendoClientId(ui->nextendo_client_id->text()),
                                     token = account->refresh_token] {
@@ -153,6 +163,15 @@ void ConfigureNetwork::ApplyConfiguration() {
         Settings::values.online_redirect_ca = ui->redirect_ca->text().trimmed().toStdString();
         Settings::values.online_redirect_loopback_only = ui->redirect_loopback_only->isChecked();
     }
+}
+
+void ConfigureNetwork::showEvent(QShowEvent* event) {
+    const Common::UUID shown = NextendoProfile();
+    ShowNextendoProfiles();
+    if (!per_game && NextendoProfile() != shown) {
+        SwitchNextendoProfile();
+    }
+    QWidget::showEvent(event);
 }
 
 void ConfigureNetwork::changeEvent(QEvent* event) {
@@ -194,6 +213,45 @@ void ConfigureNetwork::SetConfiguration() {
     UpdateNextendoStatus();
 }
 
+Common::UUID ConfigureNetwork::NextendoProfile() const {
+    const int index = ui->nextendo_profile->currentIndex();
+    return index < 0 ? Common::InvalidUUID
+                     : nextendo_profiles[static_cast<std::size_t>(index)].uuid;
+}
+
+void ConfigureNetwork::ShowNextendoProfiles() {
+    const Common::UUID shown = nextendo_profiles.empty()
+                                   ? Service::Account::Nextendo::CurrentProfile(system)
+                                   : NextendoProfile();
+    const QSignalBlocker blocker{ui->nextendo_profile};
+    ui->nextendo_profile->clear();
+    nextendo_profiles.clear();
+    const auto& profile_manager = system.GetProfileManager();
+    for (const auto& uuid : profile_manager.GetAllUsers()) {
+        Service::Account::ProfileBase base{};
+        if (!uuid.IsValid() || !profile_manager.GetProfileBase(uuid, base)) {
+            continue;
+        }
+        const QString name = QString::fromStdString(Common::StringFromFixedZeroTerminatedBuffer(
+            reinterpret_cast<const char*>(base.username.data()), base.username.size()));
+        nextendo_profiles.push_back({uuid, name});
+        ui->nextendo_profile->addItem(name);
+        if (uuid == shown) {
+            ui->nextendo_profile->setCurrentIndex(ui->nextendo_profile->count() - 1);
+        }
+    }
+}
+
+void ConfigureNetwork::SwitchNextendoProfile() {
+    nextendo_online.reset();
+    ui->nextendo_friends_status->clear();
+    UpdateNextendoStatus();
+    RenewNextendoToken();
+    if (!ui->nextendo_friends->isHidden()) {
+        RunFriendsRequest(Common::Nextendo::RefreshFriends);
+    }
+}
+
 void ConfigureNetwork::SignInToNextendo() {
     if (nextendo_signing_in) {
         nextendo_stop.request_stop();
@@ -202,6 +260,8 @@ void ConfigureNetwork::SignInToNextendo() {
     const std::string client_id = NextendoClientId(ui->nextendo_client_id->text());
     nextendo_stop = std::stop_source{};
     nextendo_signing_in = true;
+    // The sign-in saves to the profile it started for.
+    ui->nextendo_profile->setEnabled(false);
     ui->nextendo_sign_in->setText(tr("Cancel sign-in"));
     ui->nextendo_status->setText(tr("Finish signing in to Nextendo in your browser."));
 
@@ -211,6 +271,7 @@ void ConfigureNetwork::SignInToNextendo() {
                 const auto result = watcher->result();
                 watcher->deleteLater();
                 nextendo_signing_in = false;
+                ui->nextendo_profile->setEnabled(true);
                 ui->nextendo_sign_in->setText(tr("Sign in to Nextendo"));
                 if (result.ok) {
                     nextendo_online = result.online_status;
@@ -223,9 +284,10 @@ void ConfigureNetwork::SignInToNextendo() {
                 }
             });
     const QPointer<ConfigureNetwork> self{this};
-    watcher->setFuture(QtConcurrent::run([client_id, self, stop = nextendo_stop.get_token()] {
+    watcher->setFuture(QtConcurrent::run([client_id, profile = NextendoProfile(), self,
+                                          stop = nextendo_stop.get_token()] {
         return Common::Nextendo::SignIn(
-            client_id,
+            client_id, profile,
             [self](const std::string& url) {
                 QMetaObject::invokeMethod(
                     QCoreApplication::instance(),
@@ -243,32 +305,34 @@ void ConfigureNetwork::SignInToNextendo() {
 }
 
 void ConfigureNetwork::RenewNextendoToken() {
-    if (!Common::Nextendo::LoadAccount()) {
+    const Common::UUID profile = NextendoProfile();
+    if (!Common::Nextendo::LoadAccount(profile)) {
         return;
     }
     const std::string client_id = NextendoClientId(ui->nextendo_client_id->text());
     using Status = std::optional<Common::Nextendo::OnlineStatus>;
     auto* watcher = new QFutureWatcher<Status>(this);
-    connect(watcher, &QFutureWatcher<Status>::finished, this, [this, watcher] {
+    connect(watcher, &QFutureWatcher<Status>::finished, this, [this, watcher, profile] {
         const Status status = watcher->result();
         watcher->deleteLater();
-        if (!nextendo_signing_in) {
+        if (!nextendo_signing_in && profile == NextendoProfile()) {
             nextendo_online = status;
             UpdateNextendoStatus();
         }
     });
-    watcher->setFuture(
-        QtConcurrent::run([client_id] { return Common::Nextendo::CheckOnlineStatus(client_id); }));
+    watcher->setFuture(QtConcurrent::run(
+        [client_id, profile] { return Common::Nextendo::CheckOnlineStatus(client_id, profile); }));
 }
 
 void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in) {
-    const auto account = Common::Nextendo::LoadAccount();
+    const Common::UUID profile = NextendoProfile();
+    const auto account = Common::Nextendo::LoadAccount(profile);
     ui->nextendo_sign_out->setEnabled(account.has_value());
     QString status;
     if (!error.isEmpty() && !signed_in) {
         status = tr("Sign-in failed: %1").arg(error);
     } else if (!account) {
-        switch (Common::Nextendo::LastSignOutReason()) {
+        switch (Common::Nextendo::LastSignOutReason(profile)) {
         case Common::Nextendo::SignOutReason::SessionExpired:
             status = tr("Your Nextendo session expired. Sign in again.");
             break;
@@ -303,6 +367,21 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in
             status += QLatin1Char(' ') + tr("Sign in again to add friends and show them what you "
                                             "play. Online play keeps working until then.");
         }
+        QStringList shared;
+        for (const auto& entry : nextendo_profiles) {
+            const auto other =
+                entry.uuid == profile ? std::nullopt : Common::Nextendo::LoadAccount(entry.uuid);
+            if (other && account->pid != 0 && other->pid == account->pid) {
+                shared.push_back(entry.name);
+            }
+        }
+        if (!shared.isEmpty()) {
+            status += QLatin1Char(' ') +
+                      tr("%1 is signed in to the same Nextendo account. Nextendo allows one "
+                         "online session per account, so only one of these profiles can play "
+                         "online at a time.")
+                          .arg(shared.join(QStringLiteral(", ")));
+        }
     }
     ui->nextendo_status->setText(status);
     ui->nextendo_sync_profile->setEnabled(account && ui->nextendo_enabled->isChecked());
@@ -315,7 +394,7 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in
 }
 
 void ConfigureNetwork::ShowNextendoFriends() {
-    const auto account = Common::Nextendo::LoadAccount();
+    const auto account = Common::Nextendo::LoadAccount(NextendoProfile());
     const QString code = account ? QString::fromStdString(account->friend_code) : QString{};
     ui->nextendo_friend_code->setVisible(!code.isEmpty());
     ui->nextendo_friend_code->setText(tr("Your friend code: %1").arg(code));
@@ -329,7 +408,7 @@ void ConfigureNetwork::ShowNextendoFriends() {
         item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(entry.pid));
         item->setData(Qt::UserRole + 1, static_cast<int>(kind));
     };
-    const auto list = Common::Nextendo::CachedFriends();
+    const auto list = Common::Nextendo::CachedFriends(NextendoProfile());
     for (const auto& entry : list.requests) {
         add(entry, FriendKind::Request, tr("wants to be your friend"));
     }
@@ -373,21 +452,28 @@ void ConfigureNetwork::AnswerNextendoFriend(Common::Nextendo::FriendAction actio
             QMessageBox::Yes) {
         return;
     }
-    RunFriendsRequest([action, pid](const std::string& client_id) {
-        return ThenRefresh(client_id, Common::Nextendo::AnswerFriend(client_id, action, pid));
+    RunFriendsRequest([action, pid](const std::string& client_id, const Common::UUID& profile) {
+        return ThenRefresh(client_id, profile,
+                           Common::Nextendo::AnswerFriend(client_id, profile, action, pid));
     });
 }
 
 void ConfigureNetwork::RunFriendsRequest(
-    std::function<Common::Nextendo::SocialResult(const std::string& client_id)> request,
+    std::function<Common::Nextendo::SocialResult(const std::string& client_id,
+                                                 const Common::UUID& profile)>
+        request,
     const QString& done) {
     using Common::Nextendo::SocialResult;
     using Common::Nextendo::SocialStatus;
     const std::string client_id = NextendoClientId(ui->nextendo_client_id->text());
+    const Common::UUID profile = NextendoProfile();
     auto* watcher = new QFutureWatcher<SocialResult>(this);
-    connect(watcher, &QFutureWatcher<SocialResult>::finished, this, [this, watcher, done] {
+    connect(watcher, &QFutureWatcher<SocialResult>::finished, this, [this, watcher, done, profile] {
         const SocialResult result = watcher->result();
         watcher->deleteLater();
+        if (profile != NextendoProfile()) {
+            return;
+        }
         QString message = done;
         switch (result.status) {
         case SocialStatus::Ok:
@@ -426,6 +512,7 @@ void ConfigureNetwork::RunFriendsRequest(
             UpdateNextendoStatus();
         }
     });
-    watcher->setFuture(QtConcurrent::run(
-        [client_id, request = std::move(request)] { return request(client_id); }));
+    watcher->setFuture(QtConcurrent::run([client_id, profile, request = std::move(request)] {
+        return request(client_id, profile);
+    }));
 }

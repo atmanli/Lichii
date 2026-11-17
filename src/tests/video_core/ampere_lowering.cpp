@@ -84,6 +84,77 @@ TEST_CASE("Ampere TLD.SCR.LZ takes its handle from a uniform register", "[video_
     REQUIRE(((tld >> 31) & 0xf) == 7);
 }
 
+TEST_CASE("Ampere TLD.B.LL takes the handle, then the level, after the coordinates",
+          "[video_core][ampere]") {
+    // Cyberpunk 2077 (#1084): TLD.B.LL 2D, x, y in Ra, Ra+1 and the handle, level in Rb, Rb+1.
+    // The graphics form splits its third component to a second destination.
+    struct Form { Instruction insn; u32 dest, second_dest, mask, source_a, source_b; };
+    const std::array forms{
+        Form{{{0x0c047367, 0x38000004, 0x019e03ff, 0x004f4200}}, 4, 255, 3, 12, 4},
+        Form{{{0x04007367, 0x38000008, 0x059e0702, 0x104fc200}}, 0, 2, 7, 4, 8},
+    };
+    for (const Form& form : forms) {
+        const auto lowered = LowerToMaxwell(std::array{form.insn, EXIT});
+        INFO(lowered.error);
+        REQUIRE(static_cast<bool>(lowered));
+        std::array<u32, 256> regs{};
+        for (u32 i = 0; i < regs.size(); ++i) regs[i] = 0x1000 + i;
+        bool fetched = false;
+        for (const u64 word : lowered.instructions) {
+            if ((word >> 48) == 0x5c98) {
+                regs[word & 255] = regs[(word >> 20) & 255];
+            } else if ((word >> 56) == 0xdd) {
+                REQUIRE_FALSE(fetched);
+                fetched = true;
+                CHECK(((word >> 28) & 7) == 2);
+                CHECK(((word >> 31) & 15) == form.mask);
+                CHECK(((word >> 55) & 1) == 1);
+                const u32 coord = (word >> 8) & 255, meta = (word >> 20) & 255;
+                CHECK(regs[coord] == 0x1000 + form.source_a);
+                CHECK(regs[coord + 1] == 0x1000 + form.source_a + 1);
+                CHECK(regs[meta] == 0x1000 + form.source_b);
+                CHECK(regs[meta + 1] == 0x1000 + form.source_b + 1);
+                for (u32 i = 0; i < 4; ++i) regs[(word & 255) + i] = 0xfeed0000 + i;
+            }
+        }
+        REQUIRE(fetched);
+        CHECK(regs[form.dest] == 0xfeed0000);
+        CHECK(regs[form.dest + 1] == 0xfeed0001);
+        if (form.second_dest != 255) CHECK(regs[form.second_dest] == 0xfeed0002);
+    }
+}
+
+TEST_CASE("Ampere TXQ takes its handle from a uniform register", "[video_core][ampere]") {
+    // Cyberpunk 2077 (#1084): a dimension query, mask 0x7, of the handle in UR6 at the level
+    // in R3, the third component going to R3 -> Maxwell TXQ.B with the handle, then the level.
+    const std::array code{Instruction{{0x03047f6f, 0x00000600, 0x08000703, 0x000f4200}}, EXIT};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(lowered.required_texture_buffer == ~0U);
+    std::array<u32, 256> regs{};
+    for (u32 i = 0; i < regs.size(); ++i) regs[i] = 0x1000 + i;
+    bool queried = false;
+    for (const u64 word : lowered.instructions) {
+        if ((word >> 48) == 0x5c98) {
+            regs[word & 255] = regs[(word >> 20) & 255];
+        } else if ((word >> 52) == 0xdf5) {
+            REQUIRE_FALSE(queried);
+            queried = true;
+            CHECK(((word >> 22) & 7) == 1);
+            CHECK(((word >> 31) & 15) == 7);
+            const u32 source = (word >> 8) & 255;
+            CHECK(regs[source] == regs[222]); // UR6
+            CHECK(regs[source + 1] == 0x1003);
+            for (u32 i = 0; i < 3; ++i) regs[(word & 255) + i] = 0xfeed0000 + i;
+        }
+    }
+    REQUIRE(queried);
+    CHECK(regs[4] == 0xfeed0000);
+    CHECK(regs[5] == 0xfeed0001);
+    CHECK(regs[3] == 0xfeed0002);
+}
+
 TEST_CASE("Ampere I2F converts signed 16-bit sources", "[video_core][ampere]") {
     // I2F.S16 R8, R8
     const std::array<Instruction, 2> code{{

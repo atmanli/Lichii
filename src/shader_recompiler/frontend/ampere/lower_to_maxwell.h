@@ -72,7 +72,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
     });
     for (const auto& instruction : code) {
         const u32 op = instruction.Bits(0, 12);
-        uses_uniform_bank |= op == 0xf66 || op == 0xf6c;
+        uses_uniform_bank |= op == 0xf66 || op == 0xf6c || op == 0xf6f;
         uses_uniform_bank |= op == 0xc3e || op == 0x499 || op == 0x2bf || op == 0x4a4;
         uses_uniform_bank |= op == 0x987 ||
             ((op == 0x387 || op == 0x983) && instruction.Bits(91, 1));
@@ -2319,18 +2319,23 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             break;
         }
-        case 0xb6f: case 0x370: { // TXQ texture dimensions (0x370: TXQ.B).
-            // TXQ.B takes the handle in Ra and the level in Ra+1, as Maxwell's. Up to two outputs
-            // go to Rd, Rd+1 directly; more, or a second destination (bits 64-71) for the third and
-            // fourth, come out packed in scratch and are copied as for TEX.
-            const bool bindless = opcode == 0x370;
+        case 0xb6f: case 0x370: case 0xf6f: { // TXQ texture dimensions (0x370: TXQ.B).
+            // TXQ.B takes the handle in Ra and the level in Ra+1, as Maxwell's. 0xf6f takes the
+            // handle in a uniform register (bit 91) and the level in Ra; it becomes TXQ.B with the
+            // handle in R252 and the level in R253. Up to two outputs go to Rd, Rd+1 directly; more,
+            // or a second destination (bits 64-71) for the third and fourth, come out packed in
+            // scratch and are copied as for TEX.
+            const bool uniform_handle = opcode == 0xf6f;
+            const bool bindless = opcode != 0xb6f;
+            const u32 handle = uniform_handle ? uniform_register(insn.Bits(40, 6)) : 255;
             const u32 binding = insn.Bits(54, 5); // descriptor buffer, as for TLD
             const u32 mask = insn.Bits(72, 4), components = static_cast<u32>(std::popcount(mask));
             const u32 second_dest = insn.Bits(64, 8);
             const bool direct = second_dest == 255;
-            if (insn.Bits(59, 5) != (bindless ? 1U : 0U) || mask == 0 || (direct && components > 2) ||
-                insn.Bits(76, 14) || insn.Bits(91, 1) || (!bindless && binding >= 18) ||
-                (bindless && (insn.Bits(32, 27) || insn.Bits(24, 8) >= 245)) ||
+            if (insn.Bits(59, 5) != (opcode == 0x370 ? 1U : 0U) || mask == 0 || (direct && components > 2) ||
+                insn.Bits(76, 14) || insn.Bits(91, 1) != (uniform_handle ? 1U : 0U) || (!bindless && binding >= 18) ||
+                (opcode == 0x370 && (insn.Bits(32, 27) || insn.Bits(24, 8) >= 245)) ||
+                (uniform_handle && (handle == ~0U || handle >= 246 || insn.Bits(32, 8) || insn.Bits(46, 13))) ||
                 (!direct && (second_dest >= 245 || dest >= 245)) ||
                 insn.Bits(40, 14) > 0x1fff || (direct && components == 2 && (dest & 1)) || dest >= 254)
                 return fail(index, "native texture dimension query mode");
@@ -2339,8 +2344,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     return fail(index, "native texture descriptor buffer conflict");
                 result.required_texture_buffer = binding;
             }
+            if (uniform_handle) {
+                emit(0x5c98000000000000ULL | predicate | 253 | (u64{15} << 39) | (u64{insn.Bits(24, 8)} << 20));
+                emit(0x5c98000000000000ULL | predicate | 252 | (u64{15} << 39) | (u64{handle} << 20));
+            }
             emit((bindless ? 0xdf50000000000000ULL : 0xdf48000000000000ULL) | predicate | (direct ? dest : 250) |
-                 (u64{insn.Bits(24, 8)} << 8) | (u64{1} << 22) | (u64{mask} << 31) |
+                 (u64{uniform_handle ? 252U : insn.Bits(24, 8)} << 8) | (u64{1} << 22) | (u64{mask} << 31) |
                  (u64{bindless ? 0U : insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49));
             for (u32 i = 0; !direct && i < components; ++i) {
                 const u32 target = i < 2 ? (dest == 255 ? 255U : static_cast<u32>(dest) + i) : second_dest + (i - 2);
@@ -2447,17 +2456,19 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                       : array ? 8U : volume ? 7U : dimension == 0 ? (level ? 1U : 0U) : (level ? 5U : 2U)} << 53));
             break;
         }
-        case 0x367: { // TLD.B at level zero (.LZ), the handle in a register.
-            // The values are the coordinates, then the handle, split over Ra and Rb as for TEX.B
-            // (ARRAY_2D: layer, x | y, handle); Maxwell TLD.B takes the handle first in Rb.
+        case 0x367: { // TLD.B at level zero (.LZ) or a given level (.LL), the handle in a register.
+            // The values are the coordinates, the handle, then the level, split over Ra and Rb as for
+            // TEX.B (ARRAY_2D: layer, x | y, handle; 2D.LL: x, y | handle, level); Maxwell TLD.B
+            // takes the handle first in Rb, then the level.
             constexpr std::array<u32, 8> coordinate_count{1, 2, 3, 0, 0, 3, 0, 0};
             constexpr std::array<u32, 8> maxwell_type{0, 2, 4, 0, 0, 3, 0, 0};
             const u32 mask = insn.Bits(72, 4), second_dest = insn.Bits(64, 8);
             const u32 source_a = insn.Bits(24, 8), source_b = insn.Bits(32, 8);
             const u32 dimension = insn.Bits(61, 3), coordinates = coordinate_count[dimension];
-            const u32 count = coordinates + 1, in_a = (count + 1) / 2;
-            if (coordinates == 0 || !insn.Bits(59, 1) || !insn.Bits(60, 1) || insn.Bits(40, 19) ||
-                insn.Bits(76, 5) || insn.Bits(81, 3) != 7 || insn.Bits(87, 3) != 1 || insn.Bits(91, 1) ||
+            const bool level = insn.Bits(87, 3) == 3;
+            const u32 count = coordinates + 1 + (level ? 1 : 0), in_a = (count + 1) / 2;
+            if (coordinates == 0 || count > 4 || !insn.Bits(59, 1) || !insn.Bits(60, 1) || insn.Bits(40, 19) ||
+                insn.Bits(76, 5) || insn.Bits(81, 3) != 7 || (insn.Bits(87, 3) != 1 && !level) || insn.Bits(91, 1) ||
                 mask == 0 || source_a == 255 || source_a + in_a > 246 || source_b == 255 ||
                 source_b + (count - in_a) > 246)
                 return fail(index, "native bindless texel fetch mode");
@@ -2467,9 +2478,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             };
             for (u32 i = 0; i < coordinates; ++i) copy(250 + i, value(i));
             copy(246, value(coordinates));
+            if (level) copy(247, value(coordinates + 1));
             emit(0xdd00000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{246} << 20) |
                  (u64{maxwell_type[dimension]} << 28) | (u64{mask} << 31) | (u64{insn.Bits(90, 1)} << 49) |
-                 (u64{7} << 51));
+                 (u64{7} << 51) | (u64{level} << 55));
             const u32 components = static_cast<u32>(std::popcount(mask));
             const bool split = second_dest != 255;
             for (u32 i = 0; i < components; ++i) {

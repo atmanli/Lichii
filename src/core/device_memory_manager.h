@@ -249,6 +249,12 @@ private:
     };
     Common::SparseLargeVector<u32> compressed_device_addr;
     Common::SparseLargeVector<TrackedEntry> tracked_entries;
+    /// Asid.id + 1 of the process the last Map of each device page was attributed to; 0 when no
+    /// mapping was recorded (also the value a never-committed page reads back as). Kept out of
+    /// TrackedEntry so that struct's element size stays a divisor of the host page size, which
+    /// SparseLargeVector::CommitRegion's page math assumes. Kept so an unmapped-read report can
+    /// say which process the range was last mapped under.
+    Common::SparseLargeVector<u32> mapping_asid_plus1;
 
     // Process memory interfaces
 

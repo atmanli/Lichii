@@ -64,9 +64,9 @@ matched by shader hash, and stop matching when the lowering of their program cha
   upscale filters.
 - Max Resolution add-on on, handheld: at the default render scale, the scene and FullSize pass
   are 1920x1080 (1:1). An explicitly selected render scale changes both sizes; at 50%, they are
-  1280x720. The game's final pass then scales to its 2560x1440 output. FSR replaces the FullSize
-  pass and, in handheld mode, outputs to the game-screen window extent. It is 1:1 (no upscale)
-  only when the scene and window extents match; a larger window extent makes FSR upscale. DLSS
+  1280x720. The game's final pass then scales to its 2560x1440 output. FSR or XeSS replaces the
+  FullSize pass and outputs to the target extent, not the handheld window extent. Output is 1:1
+  only when the scene and target extents match; a larger target extent makes FSR upscale. DLSS
   leaves the game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized

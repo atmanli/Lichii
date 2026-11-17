@@ -4521,9 +4521,14 @@ void RasterizerVulkan::UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs
 }
 
 void RasterizerVulkan::UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs) {
-    if (!state_tracker.TouchDepthBias()) {
+    // The slope term is per pixel, so a rescaled viewport needs it scaled back to guest pixels.
+    const float slope_scale = texture_cache.IsRescaling() && regs.viewport_scale_offset_enabled
+                                  ? Settings::values.resolution_info.up_factor
+                                  : 1.0f;
+    if (!state_tracker.TouchDepthBias() && slope_scale == depth_bias_slope_scale) {
         return;
     }
+    depth_bias_slope_scale = slope_scale;
     float units = regs.depth_bias / 2.0f;
     const bool is_d24 = regs.zeta.format == Tegra::DepthFormat::Z24_UNORM_S8_UINT ||
                         regs.zeta.format == Tegra::DepthFormat::X8Z24_UNORM ||
@@ -4547,7 +4552,7 @@ void RasterizerVulkan::UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs) {
         }
     }
     float clamp = regs.depth_bias_clamp;
-    float factor = regs.slope_scale_depth_bias;
+    float factor = regs.slope_scale_depth_bias * slope_scale;
     if (far_plane_draw) {
         const bool reversed =
             regs.viewport_scale_offset_enabled && regs.viewport_transform[0].scale_z < 0.0f;

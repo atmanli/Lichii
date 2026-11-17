@@ -1030,7 +1030,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         if (!mesh_vertex_inputs_seeded) {
             mesh_vertex_inputs_seeded = true;
             for (const auto& [key, pipeline] : graphics_cache) {
-                if (pipeline && pipeline->IsMeshPipeline()) {
+                if (CanSeedMeshVertexInput(pipeline.get())) {
                     mesh_vertex_inputs.Add(key);
                 }
             }

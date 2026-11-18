@@ -2363,6 +2363,219 @@ TEST_CASE("Split front passes an acquire on a QMD release the back ran before it
     CHECK(f.memory.Read<u32>(other) == 3);
 }
 
+TEST_CASE("Split front passes equal and mask acquires only on what their word settles at",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using Landing = VideoCommon::GpuSplit::Landing;
+    using MethodCall = Tegra::Engines::Puller::MethodCall;
+    using VideoCommon::AcquireUnsettled;
+    constexpr u32 Equal = 0x1;
+    constexpr u32 Mask = 0x8;
+    constexpr u32 OneWordRelease = 0x2 | (1U << 24);
+    constexpr GPUVAddr word = MappedPages::gpu_address + 0x1000;
+    constexpr DAddr word_device = MappedPages::device_address + 0x1000;
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
+    f.system.Initialize();
+    Tegra::Nx2ClearGpuWrittenPages();
+    MappedPages pages{f};
+    FencedReports fences{f.memory};
+    Tegra::Control::ChannelState channel_state{0};
+    Tegra::DmaPusher dma_pusher{f.system, f.memory, channel_state};
+    dma_pusher.BindRasterizer(&fences);
+    const auto accuracy = Settings::values.current_gpu_accuracy;
+    Settings::values.current_gpu_accuracy = Settings::GpuAccuracy::Low;
+    const bool ampere = Tegra::g_nx2_ampere.exchange(true);
+    const bool counting = std::exchange(VideoCommon::g_acquire_counting, true);
+    auto& split = VideoCommon::GpuSplit::Get();
+    std::atomic<bool> release{};
+    Access::Start(split, f.system);
+    Access::SetFrontMacros(split);
+    SCOPE_EXIT {
+        split.Stop();
+        VideoCommon::g_acquire_counting = counting;
+        Tegra::g_nx2_ampere = ampere;
+        Settings::values.current_gpu_accuracy = accuracy;
+    };
+    // Runs before Stop: a failed check must not leave the back in a held entry.
+    SCOPE_EXIT {
+        release = true;
+    };
+    const auto semaphore_at = [&](GPUVAddr address, u32 payload, u32 trigger) {
+        const std::array<std::pair<u32, u32>, 4> methods{{
+            {0x4, static_cast<u32>(address >> 32)},
+            {0x5, static_cast<u32>(address)},
+            {0x6, payload},
+            {0x7, trigger},
+        }};
+        for (const auto& [method, argument] : methods) {
+            dma_pusher.puller.CallMethod(dma_pusher, MethodCall{method, argument});
+        }
+    };
+    const auto semaphore = [&](u32 payload, u32 trigger) { semaphore_at(word, payload, trigger); };
+    // Whether the acquire passes at once, without the channel waiting.
+    const auto acquire = [&](u32 operation, u32 value) {
+        semaphore(value, operation);
+        return !dma_pusher.puller.HasPendingAcquire();
+    };
+    // A release the back runs now and writes once the test runs its fence, noted as \`known\`.
+    const auto fenced = [&](u32 payload, bool known, bool at_least) {
+        split.Defer(
+            [&fences, payload] {
+                fences.reports.push_back(
+                    {word, payload, VideoCommon::GpuSplit::Get().TrackFencedWrite()});
+            },
+            0, VideoCommon::GpuSplit::Writes::Noted);
+        split.NoteSemaphoreWrite(word_device, payload, known, at_least, Landing::Fenced);
+        split.Drain(VideoCommon::DrainSite::Other);
+    };
+    auto& stats = VideoCommon::g_acquire_stats;
+    const auto unsettled = [&](AcquireUnsettled why) {
+        return stats.unsettled[static_cast<size_t>(why)].load();
+    };
+    u64 drained = stats.drained.load();
+    u64 by_queued = stats.by_queued.load();
+    const auto drains = [&](u64 expected) {
+        const u64 now = stats.drained.load();
+        CHECK(now - drained == expected);
+        drained = now;
+    };
+
+    // Nothing sent there: memory decides.
+    f.memory.Write<u32>(word, 5);
+    CHECK(acquire(Equal, 5));
+    CHECK(acquire(Mask, 4));
+    drains(0);
+    // Not met by what the word settles at: it drains as before and waits. A poll passes once
+    // memory meets it, without a drain.
+    const u64 operations = stats.drain_operation.load();
+    CHECK_FALSE(acquire(Equal, 6));
+    CHECK(stats.drain_operation.load() == operations + 1);
+    drains(1);
+    f.memory.Write<u32>(word, 6);
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
+
+    // A release the back has yet to run, with a known payload: it decides, ordered after it. The
+    // back holds the entry before it until the test releases it, or an acquire drains.
+    split.Defer([&release, before = stats.drained.load()] {
+        while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    semaphore(7, OneWordRelease);
+    CHECK(acquire(Equal, 7));
+    CHECK(acquire(Mask, 3));
+    CHECK(stats.by_queued.load() == by_queued + 2);
+    by_queued += 2;
+    drains(0);
+    CHECK(f.memory.Read<u32>(word) == 6);
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    fences.RunFence();
+    CHECK(f.memory.Read<u32>(word) == 7);
+
+    // The back ran a release whose fence has yet to run: its payload decides, not memory.
+    fenced(8, true, false);
+    CHECK(acquire(Equal, 8));
+    CHECK(stats.by_queued.load() == by_queued + 1);
+    drains(0);
+    CHECK(acquire(Equal, 7)); // Memory meets it, until the release lands: it drains
+    drains(1);
+    fences.RunFence();
+
+    // A queued release of unknown value, or of a lower bound: memory may change under it.
+    const u64 unknown = unsettled(AcquireUnsettled::Unknown);
+    fenced(9, false, false);
+    CHECK(acquire(Equal, 8));
+    drains(1);
+    fences.RunFence();
+    fenced(10, true, true);
+    CHECK(acquire(Mask, 1));
+    drains(1);
+    fences.RunFence();
+    CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 2);
+    CHECK(f.memory.Read<u32>(word) == 10);
+    // Unaligned, it reads part of two words: no note names what it finds.
+    semaphore_at(word + 2, 0, Equal);
+    CHECK_FALSE(dma_pusher.puller.HasPendingAcquire());
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 3);
+
+    // A release the front did not note may land yet.
+    const u64 unnoted = unsettled(AcquireUnsettled::Unnoted);
+    split.Defer(
+        [&fences] {
+            fences.reports.push_back(
+                {word + 0x10, 2, VideoCommon::GpuSplit::Get().TrackFencedWrite()});
+        },
+        0, VideoCommon::GpuSplit::Writes::Noted);
+    split.NoteUnnotedReleases();
+    split.Drain(VideoCommon::DrainSite::Other);
+    CHECK(acquire(Equal, 10));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Unnoted) == unnoted + 1);
+    fences.RunFence();
+
+    // Another write sent there that the back has yet to run (held until the acquire drains).
+    const u64 writes = unsettled(AcquireUnsettled::Writes);
+    release = false;
+    split.Defer(
+        [&release, before = stats.drained.load()] {
+            while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Noted);
+    split.NoteWrite(f.memory, word, sizeof(u32));
+    split.Publish();
+    CHECK(acquire(Equal, 10));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == writes + 1);
+
+    // Shader stores the back has yet to run, which may write any page: they mark it GPU-written
+    // only once they run.
+    release = false;
+    split.Defer(
+        [&release, before = stats.drained.load()] {
+            while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Caches);
+    split.Publish();
+    CHECK(acquire(Mask, 2));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == writes + 2);
+    // Nor does a release sent before them decide.
+    release = false;
+    split.Defer([&release, before = stats.drained.load()] {
+        while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    semaphore(11, OneWordRelease);
+    split.Defer([] {}, 0, VideoCommon::GpuSplit::Writes::Caches);
+    split.Publish();
+    CHECK_FALSE(acquire(Equal, 11)); // The release lands once its fence ran
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == writes + 3);
+    fences.RunFence();
+    CHECK(f.memory.Read<u32>(word) == 11);
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
+
+    // GPU acquires read a word mirrored releases go beside from the mirror shadow.
+    const u64 elsewhere = unsettled(AcquireUnsettled::Elsewhere);
+    Tegra::Nx2AddSemaphoreRegion(word & ~GPUVAddr{0xfff});
+    Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(word_device, word);
+    CHECK(acquire(Equal, 11));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Elsewhere) == elsewhere + 1);
+    Tegra::Nx2MirrorShadow::Get().Clear();
+    Tegra::Nx2RemoveSemaphoreRegion(word & ~GPUVAddr{0xfff});
+}
+
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

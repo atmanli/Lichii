@@ -845,6 +845,25 @@ TEST_CASE("Constant buffer data goes through the bound buffer's translation and 
     f.memory.FlushCaching();
     REQUIRE(recorder.constant_data == Ranges{{0x30040, 4}});
 
+    // Data memory already holds stays out of the delta, unless the page may be GPU-written.
+    FastDraw::g_delta = {};
+    call(CbOffset, 0x40);
+    call(CbData, 5);
+    REQUIRE(FastDraw::g_delta.num_writes == 0);
+    REQUIRE(FastDraw::g_delta.num_device_writes == 0);
+    call(CbData, 7);
+    REQUIRE(FastDraw::g_delta.num_device_writes == 1);
+    REQUIRE(FastDraw::g_delta.device_begin[0] == 0x30044);
+    FastDraw::g_delta = {};
+    Tegra::Nx2MarkGpuWritten(0x30040, 4);
+    call(CbOffset, 0x40);
+    call(CbData, 5);
+    Tegra::Nx2ClearGpuWrittenPages();
+    REQUIRE(FastDraw::g_delta.num_device_writes == 1);
+    REQUIRE(FastDraw::g_delta.device_begin[0] == 0x30040);
+    f.memory.FlushCaching();
+    recorder.constant_data.clear();
+
     // A buffer the texture headers lie in takes the general path, which checks each write.
     engine.regs.tex_header.address_high = 0;
     engine.regs.tex_header.address_low = 0x100400;

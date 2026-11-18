@@ -1650,6 +1650,25 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
 
             out.push_back(update_patch);
         }
+
+        // A packed update inside the loaded container (e.g. NUP) lives in no
+        // provider slot, so the enumeration above never sees it. Fall back to
+        // listing it the same way the legacy branch does.
+        const auto any_update_listed =
+            std::any_of(out.cbegin(), out.cend(),
+                        [](const Patch& patch) { return patch.type == PatchType::Update; });
+        if (!any_update_listed && update_raw != nullptr) {
+            const auto update_disabled =
+                std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
+            out.push_back({.enabled = !update_disabled,
+                           .name = "Update",
+                           .version = "PACKED",
+                           .type = PatchType::Update,
+                           .program_id = title_id,
+                           .title_id = update_tid,
+                           .source = PatchSource::Packed,
+                           .numeric_version = 0});
+        }
     } else {
         PatchManager update{update_tid, fs_controller, content_provider};
         const auto metadata = update.GetControlMetadata();

@@ -617,11 +617,11 @@ jobs:
           codesign --verify --deep --strict "$app"
           ditto -c -k --keepParent "$app" "lichii-${GITHUB_SHA}-${{ matrix.platform }}.zip"
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.zip"
-          # Also ship a .dmg (drag lichii.app onto Applications).
-          dmgdir=$(mktemp -d)
-          ditto "$app" "$dmgdir/lichii.app"
-          ln -s /Applications "$dmgdir/Applications"
-          hdiutil create -volname "Lichii" -srcfolder "$dmgdir" -ov -format UDZO \
+          # Also ship a .dmg whose window shows an arrow from lichii.app to Applications.
+          # dmgbuild writes the window layout itself, without scripting Finder.
+          python3 -m venv "$RUNNER_TEMP/dmgbuild"
+          "$RUNNER_TEMP/dmgbuild/bin/pip" install --quiet dmgbuild==2.0.0 ds_store==1.3.4 mac_alias==2.2.4
+          "$RUNNER_TEMP/dmgbuild/bin/dmgbuild" -s dist/dmg-settings.py -D app="$app" Lichii \
             "lichii-${GITHUB_SHA}-${{ matrix.platform }}.dmg"
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.dmg"
 
@@ -734,6 +734,12 @@ jobs:
             tar=$(link tar.gz "$1.tar.gz")
             echo "${appimage}${appimage:+${tar:+ · }}${tar}"
           }
+          dmg_zip() {
+            local dmg zip
+            dmg=$(link dmg "$1.dmg")
+            zip=$(link zip "$1.zip")
+            echo "${dmg}${dmg:+${zip:+ · }}${zip}"
+          }
           has_pgo=$(compgen -G 'dist/*-pgo.*' || true)
           row() {
             [[ -z "$2$3" ]] && return 0
@@ -777,7 +783,9 @@ jobs:
 
           ## macOS
 
-          $(row "arm64 (Apple Silicon)" "$(link zip lichii-macos-arm64.zip)" "" "macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`" | table)
+          macOS packages come as a disk image and a zip holding the same \`lichii.app\`. Open the dmg and drag \`lichii.app\` onto Applications; move it to the Trash to remove it. Lichii then opens .nsp, .xci, .nca, .nro and .nso files from the Finder.
+
+          $(row "arm64 (Apple Silicon)" "$(dmg_zip lichii-macos-arm64)" "" "macOS 15 or newer. Not notarized, so macOS blocks the first launch: click Open Anyway in System Settings › Privacy & Security, or run \`xattr -dr com.apple.quarantine /Applications/lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`" | table)
 
           ${pgo_note}
           EOF

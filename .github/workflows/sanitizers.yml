@@ -15,6 +15,7 @@ on:
       - "src/core/file_sys/**"
       - "src/core/crypto/**"
       - "src/core/loader/**"
+      - "src/core/memory/cheat_engine.*"
       - "src/fuzz/**"
       - "src/tests/core/**"
       - ".github/workflows/sanitizers.yml"
@@ -148,7 +149,7 @@ jobs:
       # Only the nx2 runs save, and they drop the older entry: one cache of about 0.5 GB in all,
       # which pull requests restore without adding their own.
       - name: Save dependencies and compiler objects
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/nx2'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: |
@@ -156,16 +157,22 @@ jobs:
             .ccache
           key: clang-sanitizers-${{ runner.os }}-${{ github.run_id }}
 
+      # Only once the new entry is there: a save that failed or was skipped keeps the old one.
       - name: Drop older compiler caches
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/nx2'
         env:
           GH_TOKEN: ${{ github.token }}
           KEEP: clang-sanitizers-${{ runner.os }}-${{ github.run_id }}
         run: |
-          gh cache list --repo "$GITHUB_REPOSITORY" --key "clang-sanitizers-${RUNNER_OS}-" \
-            --limit 100 --json key --jq '.[].key' |
-            while read -r key; do
-              if [ "$key" != "$KEEP" ]; then
-                gh cache delete "$key" --repo "$GITHUB_REPOSITORY" || true
-              fi
-            done
+          caches="repos/$GITHUB_REPOSITORY/actions/caches"
+          keys=$(gh api "$caches?key=clang-sanitizers-${RUNNER_OS}-&ref=refs/heads/nx2&per_page=100" \
+            --jq '.actions_caches[].key')
+          if ! printf '%s\n' "$keys" | grep -qxF "$KEEP"; then
+            echo "The new cache $KEEP is not there; keeping the older ones."
+            exit 0
+          fi
+          printf '%s\n' "$keys" | while read -r key; do
+            if [ -n "$key" ] && [ "$key" != "$KEEP" ]; then
+              gh api -X DELETE "$caches?key=$key&ref=refs/heads/nx2" > /dev/null || true
+            fi
+          done

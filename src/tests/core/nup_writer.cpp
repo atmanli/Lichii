@@ -362,6 +362,91 @@ TEST_CASE("NUP loader registers a Switch 2 Edition's add-ons kept under the Swit
     CHECK(FileSys::GetAddOnApplicationID(ProgramId, {}) == TitleId);
 }
 
+/// Opens a packed dump and exposes its program RomFS the way the loader merges it.
+class NupRomFS {
+public:
+    explicit NupRomFS(const fs::path& archive)
+        : loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)} {
+        REQUIRE(loader.ReadRomFS(romfs_file) == Loader::ResultStatus::Success);
+        root = FileSys::ExtractRomFS(romfs_file);
+        REQUIRE(root != nullptr);
+    }
+
+    [[nodiscard]] std::optional<std::string> File(std::string_view name) const {
+        const auto file = root->GetFile(std::string{name});
+        return file != nullptr ? std::optional<std::string>(Read(file)) : std::nullopt;
+    }
+
+private:
+    FileSys::RealVfsFilesystem vfs;
+    Loader::AppLoader_NUP loader;
+    FileSys::VirtualFile romfs_file;
+    FileSys::VirtualDir root;
+};
+
+TEST_CASE("NUP layers a Switch 2 Edition's upgrade pack over the update", "[nup][nup-content]") {
+    // As Super Mario Bros. Wonder: program 040015100B514001 with add-on 010015100B515001 that
+    // ships patched game data instead of plain add-on content.
+    constexpr u64 ProgramId = TitleId + 1;
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(ProgramId));
+    Put(root / "base/romfs/title.bin", "base title");
+    Put(root / "updates/65536/exefs/main", "update main");
+    Put(root / "updates/65536/exefs/main.npdm", Npdm(ProgramId));
+    Put(root / "updates/65536/romfs/title.bin", "update title");
+    Put(root / "updates/65536/romfs/update_only.bin", "update only");
+    Put(root / "dlc/0100ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+    Put(root / "dlc/0100ABCD00011001/0/romfs/title.bin", "pack title");
+    Put(root / "dlc/0100ABCD00011001/0/romfs/pack_only.bin", "pack only");
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    const NupRomFS romfs{archive};
+    // The pack wins over the update where both layers carry a path.
+    CHECK(romfs.File("title.bin") == "pack title");
+    CHECK(romfs.File("update_only.bin") == "update only");
+    CHECK(romfs.File("pack_only.bin") == "pack only");
+}
+
+TEST_CASE("NUP keeps add-on content out of the program RomFS", "[nup][nup-content]") {
+    SECTION("an add-on of the program itself") {
+        // As Donkey Kong Bananza: 040074A01BF12000 with add-on 040074A01BF13001. The marker is
+        // present so only the application id, not the marker check, can keep it out.
+        TempDir tmp;
+        const auto root = tmp.path / "own";
+        Put(root / "base/exefs/main", "main");
+        Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+        Put(root / "base/romfs/title.bin", "base title");
+        Put(root / "dlc/0400ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+        Put(root / "dlc/0400ABCD00011001/0/romfs/addon.bin", "addon data");
+        const auto archive = tmp.path / "own.nup";
+        REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+        const NupRomFS romfs{archive};
+        CHECK(romfs.File("addon.bin") == std::nullopt);
+    }
+
+    SECTION("a Switch 1 add-on without the upgrade marker") {
+        TempDir tmp;
+        const auto root = tmp.path / "unmarked";
+        Put(root / "base/exefs/main", "main");
+        Put(root / "base/exefs/main.npdm", Npdm(TitleId + 1));
+        Put(root / "base/romfs/title.bin", "base title");
+        Put(root / "updates/65536/exefs/main", "update main");
+        Put(root / "updates/65536/exefs/main.npdm", Npdm(TitleId + 1));
+        Put(root / "updates/65536/romfs/title.bin", "update title");
+        Put(root / "dlc/0100ABCD00011001/0/romfs/addon.bin", "addon data");
+        const auto archive = tmp.path / "unmarked.nup";
+        REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+        const NupRomFS romfs{archive};
+        CHECK(romfs.File("addon.bin") == std::nullopt);
+        CHECK(romfs.File("title.bin") == "update title");
+    }
+}
+
 void MakeDump(const fs::path& root) {
     Put(root / "Base/ExeFS/main", "base main");
     Put(root / "Base/ExeFS/main.npdm", Npdm(TitleId));

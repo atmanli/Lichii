@@ -271,7 +271,14 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
-    const auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    // A Switch 2 Edition's upgrade pack ships patched game data that the program reads from its
+    // own RomFS, not from an add-on storage, so it belongs on top of the update.
+    if (const auto pack_index = nup->FindUpgradePack(base_title_id)) {
+        LOG_INFO(Loader, "NUP upgrade pack {:016X} layered over the update",
+                 nup->GetPackages()[*pack_index].title_id);
+        merged = FileSys::NupContainer::MergeShadowDirs(merged, nup->GetRomFSDir(*pack_index));
+    }
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }

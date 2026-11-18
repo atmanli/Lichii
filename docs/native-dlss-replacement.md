@@ -71,6 +71,10 @@ matched by shader hash, and stop matching when the lowering of their program cha
   `9302bc0d6d1d9bc1`; also shader `4c1ae2fe58f30a97`). Any 16:9 scene up to the pass's output
   size is taken: FSR/DLSS writes 1920x1080 handheld, and the 3840x2160 image above docked. When the
   scene size changes, the upscaler's images are recreated and its history starts over.
+- At the handheld dynamic-resolution floor, the 854x480 scene is drawn into a target padded to
+  864x480. The temporal upscaler uses the camera's unpadded size. FSR replaces this padded pass
+  only when the sampled depth image is also 854x480, so it can pass the actual depth image size to
+  the FSR runtime.
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame

@@ -3481,9 +3481,11 @@ void RasterizerVulkan::TrackOcarinaCamera() {
     }
     VideoCommon::OcarinaCameraBuffer values;
     device_memory.ReadBlockUnsafe(*device_address, values.data(), sizeof(values));
-    const auto camera = VideoCommon::DecodeOcarinaCamera(
-        values, color.size.width, color.size.height,
-        oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss);
+    using enum VideoCommon::OcarinaCameraPadding;
+    const auto padding =
+        oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss ? Bounded : AlignedWidth;
+    const auto camera =
+        VideoCommon::DecodeOcarinaCamera(values, color.size.width, color.size.height, padding);
     if (camera.issue != VideoCommon::OcarinaCameraIssue::None) {
         refuse(camera.issue == VideoCommon::OcarinaCameraIssue::Extent
                    ? "no scene camera: its size does not match the scene target"
@@ -3726,6 +3728,13 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
     const auto extent = oot_motion.extent;
     using enum VideoCommon::OcarinaUpscalePass;
     const auto pass = VideoCommon::FindOcarinaUpscalePass(native_key, pipeline.ShaderHash());
+    const bool padded_scene = extent.width != oot_motion.image_extent.width ||
+                              extent.height != oot_motion.image_extent.height;
+    if (padded_scene && oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr &&
+        (pass != Scaled || target.size.width != 1920 || target.size.height != 1080 ||
+         depth.size.width != extent.width || depth.size.height != extent.height)) {
+        return fail("unsupported padded FSR scene or depth extent");
+    }
     const bool target_1440p = target.size.width == 2560 && target.size.height == 1440;
     // At the DLSS Performance render scale (1920x1080) the game upscales to 2560x1440 with its
     // 3/4 pass instead (QuincyForbes' f7d0938b5b). The scale is the one the game started with,

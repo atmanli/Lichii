@@ -2774,3 +2774,108 @@ TEST_CASE("Draw reuse remains eligible on the actual split worker",
     REQUIRE(on_back);
     REQUIRE(allowed);
 }
+
+namespace {
+
+/// Records the draws (with the fast draw serial each sees) and counter resets the back runs.
+class QueryOrderRecorder final : public VideoCore::RasterizerInterface {
+public:
+    struct Event {
+        bool reset;
+        u64 serial;
+        bool operator==(const Event&) const = default;
+    };
+
+    void Draw(bool, u32) override {
+        events.push_back({false, VideoCommon::Nx2FastDraw::Serial()});
+    }
+    void DrawTexture() override {}
+    void Clear(u32) override {}
+    void DispatchCompute() override {}
+    void ResetCounter(VideoCommon::QueryType) override {
+        events.push_back({true, 0});
+    }
+    void Query(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32,
+               u32) override {}
+    void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override {}
+    void DisableGraphicsUniformBuffer(size_t, u32) override {}
+    void SignalFence(std::function<void()>&& func) override {
+        func();
+    }
+    void SyncOperation(std::function<void()>&& func) override {
+        func();
+    }
+    void SignalSyncPoint(u32) override {}
+    void SignalReference() override {}
+    void ReleaseFences(bool) override {}
+    void FlushAll() override {}
+    void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    bool MustFlushRegion(DAddr, u64, VideoCommon::CacheType) override {
+        return false;
+    }
+    VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override {
+        return {addr, addr + size, false};
+    }
+    void InvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void OnCacheInvalidation(DAddr, u64) override {}
+    bool OnCPUWrite(DAddr, u64) override {
+        return false;
+    }
+    void InvalidateGPUCache() override {}
+    void UnmapMemory(DAddr, u64) override {}
+    void ModifyGPUMemory(size_t, GPUVAddr, u64) override {}
+    void FlushAndInvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void WaitForIdle() override {}
+    void FragmentBarrier() override {}
+    void TiledCacheBarrier() override {}
+    void FlushCommands() override {}
+    void TickFrame() override {}
+    Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override {
+        std::terminate();
+    }
+    void AccelerateInlineToMemory(GPUVAddr, size_t, std::span<const u8>) override {}
+
+    std::vector<Event> events;
+};
+
+} // namespace
+
+TEST_CASE("Split back runs counter resets and render enable modes in order within draw reuse",
+          "[video_core][fast_draw]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using Event = QueryOrderRecorder::Event;
+    using Mode = Maxwell3D::Regs::RenderEnable::Mode;
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
+    const auto split_owner = std::make_unique<VideoCommon::GpuSplit>(); // Too big for the stack
+    VideoCommon::GpuSplit& split = *split_owner;
+    Access::Initialize(split, f.system);
+    QueryOrderRecorder recorder;
+    auto& engine = f.fast;
+    engine.BindRasterizer(&recorder);
+    const auto front = [&](u32 method, u32 argument) {
+        engine.FrontCallMethod(f.system, split, method, argument, true);
+    };
+    const auto draw = [&] {
+        front(MAXWELL3D_REG_INDEX(vertex_buffer.first), 0);
+        front(MAXWELL3D_REG_INDEX(vertex_buffer.count), 3);
+        front(DrawBegin, 0x4);
+        front(DrawEnd, 0);
+    };
+    constexpr u32 mode = MAXWELL3D_REG_INDEX(render_enable.mode);
+    front(mode, static_cast<u32>(Mode::True));
+    draw();
+    front(MAXWELL3D_REG_INDEX(clear_report_value),
+          static_cast<u32>(Maxwell3D::Regs::ClearReport::ZPassPixelCount));
+    draw();
+    front(mode, static_cast<u32>(Mode::False));
+    draw(); // Not drawn: the back ran the mode before it.
+    front(mode, static_cast<u32>(Mode::True));
+    draw();
+    REQUIRE(recorder.events.empty()); // All of it runs on the back.
+    Access::RunBack(split);
+    REQUIRE(recorder.events.size() == 4);
+    const u64 serial = recorder.events[0].serial;
+    CHECK(recorder.events ==
+          std::vector<Event>{{false, serial}, {true, 0}, {false, serial}, {false, serial}});
+}

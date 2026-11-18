@@ -110,7 +110,6 @@ void DisplayHdrMonitor::Watch(void* new_window) {
 }
 
 void DisplayHdrMonitor::Run(std::stop_token stop) {
-    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
     std::mutex wait_mutex;
     std::condition_variable_any wake;
     while (!stop.stop_requested()) {
@@ -121,13 +120,9 @@ void DisplayHdrMonitor::Run(std::stop_token stop) {
         if (stop.stop_requested()) {
             break;
         }
-        if (!factory || !factory->IsCurrent()) {
-            factory.Reset();
-            if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-                continue;
-            }
-        }
-        Update(QueryDisplayHdr(factory.Get(), static_cast<HWND>(window.load())));
+        // A factory kept between reads outlived the module holding its vtable once emulation
+        // stopped, and IsCurrent crashed; a new one per read cannot go stale.
+        Update(QueryDisplayHdr(window.load()));
     }
 }
 #else

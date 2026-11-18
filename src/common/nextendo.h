@@ -205,7 +205,8 @@ struct SignInResult {
 // Opens the authorize page through open_url, waits up to five minutes (or until stop) for the
 // loopback callback, exchanges the code for tokens and saves the account to profile. The callback
 // listens on CallbackPort, or on a free port when another program holds that one. Only one sign-in
-// runs at a time.
+// runs at a time. When the profile is signed out or deleted while it runs, nothing is saved, the
+// new refresh token is revoked and the result has an error and an empty account.
 SignInResult SignIn(std::string_view client_id, const Common::UUID& profile,
                     const std::function<void(const std::string&)>& open_url, std::stop_token stop);
 

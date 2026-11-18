@@ -26,7 +26,7 @@ constexpr char auto_device_name[] = "auto";
  * This class is an interface for an audio sink, holds multiple output streams and is responsible
  * for sinking samples to hardware. Used by Audio Render, Audio In and Audio Out.
  */
-class Sink {
+class Sink : public std::enable_shared_from_this<Sink> {
 public:
     virtual ~Sink() = default;
     /**
@@ -55,6 +55,16 @@ public:
      */
     virtual SinkStream* AcquireSinkStream(Core::System& system, u32 system_channels,
                                           const std::string& name, StreamType type) = 0;
+
+    /**
+     * Whether opening an input stream can wait on the host for as long as it likes. Windows asks
+     * the player for microphone access the first time a program at a new path opens one, and the
+     * open waits until they answer. Callers open such a sink's input streams on a helper thread,
+     * so its stream and volume calls must be safe from several threads at once.
+     */
+    virtual bool InputOpenMayBlock() const {
+        return false;
+    }
 
     /**
      * Get the number of channels the hardware device supports.

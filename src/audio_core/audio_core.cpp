@@ -19,6 +19,13 @@ AudioCore::AudioCore(Core::System& system) {
 
 AudioCore ::~AudioCore() {
     Shutdown();
+    // A sysmix capture stream may still be opening the host microphone on a helper thread, which
+    // holds the input sink until its open returns: never, while a permission prompt stays
+    // unanswered. Keep the sink alive for good instead of letting that thread destroy it, which
+    // would undo COM setup on a thread that never made it.
+    if (input_sink.use_count() > 1) {
+        static_cast<void>(new std::shared_ptr<Sink::Sink>(std::move(input_sink)));
+    }
 }
 
 void AudioCore::CreateSinks() {

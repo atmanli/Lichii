@@ -45,8 +45,8 @@ void HFMA2(TranslatorVisitor& v, u64 insn, Merge merge, Swizzle swizzle_a, bool 
     };
     IR::F16F32F64 lhs{v.ir.FPFma(lhs_a, lhs_b, lhs_c, fp_control)};
     IR::F16F32F64 rhs{v.ir.FPFma(rhs_a, rhs_b, rhs_c, fp_control)};
-    if (precision == HalfPrecision::FMZ && !sat) {
-        // Do not implement FMZ if SAT is enabled, as it does the logic for us.
+    if (precision == HalfPrecision::FMZ) {
+        // SAT does not implement the FMZ zero clamp, so apply it even when SAT is enabled.
         // On D3D9 mode, anything * 0 is zero, even NAN and infinity
         const IR::F32 zero{v.ir.Imm32(0.0f)};
         const IR::U1 lhs_zero_a{v.ir.FPEqual(lhs_a, zero)};

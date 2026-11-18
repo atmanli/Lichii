@@ -5,9 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -60,35 +63,73 @@ public:
 
 class Sink final : public AudioCore::Sink::Sink {
 public:
+    /// With block_input, an input open waits like one on a microphone prompt, until Release.
+    bool InputOpenMayBlock() const override {
+        return block_input;
+    }
     AudioCore::Sink::SinkStream* AcquireSinkStream(Core::System& system, u32 channels,
         const std::string&, AudioCore::Sink::StreamType type) override {
+        std::unique_lock lock{mutex};
+        if (block_input && type == AudioCore::Sink::StreamType::In) {
+            ++waiting;
+            changed.notify_all();
+            changed.wait(lock, [this] { return released; });
+            --waiting;
+        }
         auto stream = std::make_unique<Stream>(system, type, host_channels, ready);
         stream->SetSystemChannels(channels);
         stream->fail_start = fail_start;
         last = stream.get();
         streams.push_back(std::move(stream));
+        changed.notify_all();
         return last;
     }
     void CloseStream(AudioCore::Sink::SinkStream* stream) override {
+        std::scoped_lock lock{mutex};
         std::erase_if(streams, [stream](const auto& value) { return value.get() == stream; });
         if (last == stream) {
             last = nullptr;
         }
         ++closed;
+        changed.notify_all();
     }
     void CloseStreams() override {
+        std::scoped_lock lock{mutex};
         streams.clear();
         last = nullptr;
     }
     f32 GetDeviceVolume() const override { return 1.0f; }
     void SetDeviceVolume(f32) override {}
     void SetSystemVolume(f32) override {}
+    /// The player answers the prompt: blocked input opens return.
+    void Release() {
+        std::scoped_lock lock{mutex};
+        released = true;
+        changed.notify_all();
+    }
+    /// Reads the sink's state under its lock, without waiting.
+    template <typename Read>
+    auto Inspect(Read read) {
+        std::scoped_lock lock{mutex};
+        return read();
+    }
+    /// Waits up to ten seconds for the condition, checked under the sink's lock.
+    template <typename Condition>
+    bool WaitFor(Condition condition) {
+        std::unique_lock lock{mutex};
+        return changed.wait_for(lock, std::chrono::seconds{10}, condition);
+    }
     Stream* last{};
     u32 host_channels{2};
     bool ready{true};
     bool fail_start{};
+    bool block_input{};
+    bool released{};
+    u32 waiting{};
     u32 closed{};
     std::vector<std::unique_ptr<Stream>> streams;
+    std::mutex mutex;
+    std::condition_variable changed;
 };
 
 class Context {

@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -10,11 +12,14 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
-#include "audio_core/sink/silent_input_stream.h"
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_stream.h"
 #include "common/logging.h"
+#include "common/thread.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_event.h"
@@ -35,6 +40,21 @@ constexpr u32 MaxChannels = 6;
 u64 AlignUp(u64 value, u64 alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
+
+/// A host microphone open running on a helper thread. A permission prompt can hold the open for
+/// as long as it stays unanswered, so nothing joins the thread: it hands over the stream it
+/// opened, or closes it itself when the guest closed its stream meanwhile.
+struct MicrophoneOpen {
+    std::mutex mutex;
+    AudioCore::Sink::SinkStream* stream{};
+    bool done{};
+    bool abandoned{};
+};
+
+/// Helper threads inside a host microphone open, across every capture stream. While one waits on
+/// the permission prompt another open would only wait beside it, so a stream that asks then
+/// waits for it to return before it starts its own (the answer is known by then).
+std::atomic<u32> microphone_opens_waiting{0};
 } // namespace
 
 struct SysmixOutput::Impl {
@@ -59,27 +79,147 @@ struct SysmixOutput::Impl {
         engaged = false;
         data_mode = 0;
         ReleaseHost();
+        AbandonMicrophone();
+        microphone_requested = false;
+        microphone_deferred = false;
         if (state_event) {
             state_event->Signal(system.Kernel());
         }
     }
 
     void ReleaseHost() {
-        if (host == silent_input.get()) {
-            silent_input.reset();
-        } else {
+        if (host) {
             sink.CloseStream(host);
         }
         host = nullptr;
     }
 
-    /// Replace a host microphone that failed to open or start with silence the guest can capture.
-    void UseSilentInput(u32 guest_channels) {
-        LOG_WARNING(Service_Audio,
-                    "sysmix stream {}: host microphone unavailable, capturing silence", id);
-        ReleaseHost();
-        silent_input = std::make_unique<AudioCore::Sink::SilentInputStream>(system, guest_channels);
-        host = silent_input.get();
+    /**
+     * Capture from the host microphone, opening it when the guest first engages the stream.
+     * Games that create capture streams without capturing (Ocarina of Time) never open it. Until
+     * it is open, and for good when it cannot open or start, Pump hands the guest silence.
+     */
+    void StartMicrophone() {
+        if (!microphone_requested) {
+            OpenMicrophone();
+        }
+        StartHostMicrophone();
+    }
+
+    void StartHostMicrophone() {
+        if (!host) {
+            return;
+        }
+        host->Start();
+        if (!host->IsReady() || host->IsPaused()) {
+            LOG_WARNING(Service_Audio,
+                        "sysmix stream {}: host microphone unavailable, capturing silence", id);
+            ReleaseHost();
+        }
+    }
+
+    /**
+     * Open the host microphone. Windows asks the player for microphone access the first time a
+     * program at a new path opens it, and the open waits until they answer. On a sink
+     * whose open can wait like that it runs on a helper thread, so no guest thread waits on it,
+     * and Pump takes the stream once the open returns.
+     */
+    void OpenMicrophone() {
+        if (!microphone_requested) {
+            microphone_requested = true;
+            microphone_requested_at = std::chrono::steady_clock::now();
+        }
+        microphone_deferred = false;
+        auto name = "sysmix-" + std::to_string(id);
+        // The helper keeps the sink alive, so only a sink owned by a shared_ptr gets one.
+        auto owner = sink.InputOpenMayBlock() ? sink.weak_from_this().lock() : nullptr;
+        if (!owner) {
+            TakeMicrophone(
+                sink.AcquireSinkStream(system, channels, name, AudioCore::Sink::StreamType::In));
+            return;
+        }
+        u32 idle{};
+        if (!microphone_opens_waiting.compare_exchange_strong(idle, 1)) {
+            // Pump asks again once the other open returns.
+            microphone_deferred = true;
+            return;
+        }
+        microphone = std::make_shared<MicrophoneOpen>();
+        std::thread{[request = microphone, owner_sink = std::move(owner), &emulated = system,
+                     guest_channels = channels, stream_name = std::move(name)] {
+            Common::SetCurrentThreadName("SysmixMicOpen");
+            auto* opened = owner_sink->AcquireSinkStream(emulated, guest_channels, stream_name,
+                                                         AudioCore::Sink::StreamType::In);
+            microphone_opens_waiting.fetch_sub(1);
+            {
+                std::scoped_lock lock{request->mutex};
+                if (!request->abandoned) {
+                    request->stream = opened;
+                    request->done = true;
+                    return;
+                }
+            }
+            owner_sink->CloseStream(opened);
+        }}.detach();
+    }
+
+    /// Capture from the host microphone an open returned, or keep capturing silence without one.
+    void TakeMicrophone(AudioCore::Sink::SinkStream* opened) {
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - microphone_requested_at);
+        if (!opened || !opened->IsReady()) {
+            if (opened) {
+                sink.CloseStream(opened);
+            }
+            LOG_WARNING(Service_Audio,
+                        "sysmix stream {}: host microphone unavailable after {} ms, capturing "
+                        "silence",
+                        id, waited.count());
+            return;
+        }
+        host = opened;
+        LOG_INFO(Service_Audio, "sysmix stream {}: host microphone open after {} ms", id,
+                 waited.count());
+    }
+
+    /// Take the host microphone once its open on the helper thread has returned.
+    void AdoptMicrophone() {
+        if (microphone_deferred && engaged && microphone_opens_waiting.load() == 0) {
+            OpenMicrophone();
+        }
+        if (!microphone) {
+            return;
+        }
+        AudioCore::Sink::SinkStream* opened{};
+        {
+            std::scoped_lock lock{microphone->mutex};
+            if (!microphone->done) {
+                return;
+            }
+            opened = microphone->stream;
+        }
+        microphone.reset();
+        TakeMicrophone(opened);
+        if (engaged) {
+            StartHostMicrophone();
+        }
+    }
+
+    /// Leave an open still waiting on its helper thread to close the stream it opens.
+    void AbandonMicrophone() {
+        if (!microphone) {
+            return;
+        }
+        AudioCore::Sink::SinkStream* opened{};
+        {
+            std::scoped_lock lock{microphone->mutex};
+            microphone->abandoned = true;
+            opened = std::exchange(microphone->stream, nullptr);
+        }
+        microphone.reset();
+        if (opened) {
+            sink.CloseStream(opened);
+        }
     }
 
     /// Stop admission and notify the guest after invalid memory or a fatal host-stream failure.
@@ -141,7 +281,12 @@ struct SysmixOutput::Impl {
     Kernel::KEvent* state_event{};
     Kernel::KEvent* data_event{};
     AudioCore::Sink::SinkStream* host{};
-    std::unique_ptr<AudioCore::Sink::SinkStream> silent_input;
+    /// The host microphone's open while it runs on a helper thread
+    std::shared_ptr<MicrophoneOpen> microphone;
+    std::chrono::steady_clock::time_point microphone_requested_at{};
+    bool microphone_requested{};
+    /// Another stream's open was waiting when this one asked; Pump asks again when it returns
+    bool microphone_deferred{};
     mutable std::mutex mutex;
     u32 id;
     u64 buffer;
@@ -229,15 +374,14 @@ Result SysmixOutput::Open(u32 sample_type, u32 channels, u32 rate, u32 frames, u
                  memory.Read32Acquire(p.buffer + WriteOffset, write) && read < slots &&
                  write < slots,
              ResultInvalidAddressInfo);
-    p.host = p.sink.AcquireSinkStream(p.system, channels, "sysmix-" + std::to_string(p.id),
-                                      p.input_stream ? AudioCore::Sink::StreamType::In
-                                                     : AudioCore::Sink::StreamType::Sysmix);
-    if (p.input_stream && (!p.host || !p.host->IsReady())) {
-        p.UseSilentInput(channels);
-    }
-    if (!p.host || !p.host->IsReady()) {
-        p.ReleaseHost();
-        R_RETURN(ResultOperationFailed);
+    // A capture stream opens the host microphone only when the guest starts capturing.
+    if (!p.input_stream) {
+        p.host = p.sink.AcquireSinkStream(p.system, channels, "sysmix-" + std::to_string(p.id),
+                                          AudioCore::Sink::StreamType::Sysmix);
+        if (!p.host || !p.host->IsReady()) {
+            p.ReleaseHost();
+            R_RETURN(ResultOperationFailed);
+        }
     }
     p.slots = static_cast<u32>(slots);
     p.format = format;
@@ -252,9 +396,10 @@ Result SysmixOutput::Open(u32 sample_type, u32 channels, u32 rate, u32 frames, u
     p.state_event->Signal(p.system.Kernel());
     p.Notify(static_cast<u32>((write + slots - read) % slots));
     LOG_INFO(Service_Audio,
-             "sysmix stream {} host ready: input={} sample type {} channels={} 48000 slots={} "
+             "sysmix stream {} {}: input={} sample type {} channels={} 48000 slots={} "
              "payload={:#x}",
-             p.id, p.input_stream, sample_type, channels, p.slots, PayloadOffset);
+             p.id, p.input_stream ? "ready, host microphone opens on capture" : "host ready",
+             p.input_stream, sample_type, channels, p.slots, PayloadOffset);
     R_SUCCEED();
 }
 
@@ -265,18 +410,20 @@ void SysmixOutput::Close() {
 Result SysmixOutput::SetEngaged(bool engaged) {
     auto& p = *impl;
     std::scoped_lock lock{p.mutex};
-    R_UNLESS(p.open && !p.faulted && p.host && p.host->IsReady(), ResultOperationFailed);
+    // A capture stream without a host microphone (not open yet, or unavailable) hears silence.
+    R_UNLESS(p.open && !p.faulted && (p.host ? p.host->IsReady() : p.input_stream),
+             ResultOperationFailed);
     if (p.engaged == engaged) {
         R_SUCCEED();
     }
     if (engaged) {
-        p.host->Start();
-        if (p.input_stream && (!p.host->IsReady() || p.host->IsPaused())) {
-            p.UseSilentInput(p.channels);
+        if (p.input_stream) {
+            p.StartMicrophone();
+        } else {
             p.host->Start();
+            R_UNLESS(p.host->IsReady() && !p.host->IsPaused(), ResultOperationFailed);
         }
-        R_UNLESS(p.host->IsReady() && !p.host->IsPaused(), ResultOperationFailed);
-    } else {
+    } else if (p.host) {
         p.host->Stop();
         R_UNLESS(p.host->IsReady(), p.Fault(ResultOperationFailed));
     }
@@ -320,7 +467,7 @@ Result SysmixOutput::Purge(u32 frames, u32& purged) {
         }
         R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
         purged = count;
-        if (frames == 0) {
+        if (frames == 0 && p.host) {
             p.host->DrainInputSamples(0x10000);
         }
         p.Notify(filled);
@@ -356,6 +503,7 @@ void SysmixOutput::Pump() {
         return;
     }
     ++p.counters.ticks;
+    p.AdoptMicrophone();
     u32 read{}, write{}, filled{};
     if (!p.ReadOccupancy(read, write, filled)) {
         p.Fault();
@@ -365,7 +513,7 @@ void SysmixOutput::Pump() {
         p.Notify(filled);
         return;
     }
-    if (!p.host->IsReady()) {
+    if (p.host && !p.host->IsReady()) {
         p.Fault(ResultOperationFailed);
         return;
     }
@@ -376,7 +524,10 @@ void SysmixOutput::Pump() {
             p.Notify(filled);
             return;
         }
-        const auto captured = p.host->DrainInputSamples(available);
+        // Without a host microphone the guest hears silence, a block per 5 ms tick as a
+        // microphone would deliver it: games do not expect capture to stop.
+        const auto captured = p.host ? p.host->DrainInputSamples(available)
+                                     : std::vector<s16>(std::size_t{available} * p.channels);
         const auto taken = static_cast<u32>(captured.size() / p.channels);
         if (!taken) {
             p.Notify(filled);

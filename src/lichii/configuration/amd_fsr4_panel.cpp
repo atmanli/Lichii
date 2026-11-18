@@ -105,12 +105,12 @@ AmdFsr4Panel::AmdFsr4Panel(QWidget* parent) : QWidget(parent) {
     folder_button = new QPushButton(Tr("Open Folder"), this);
 #if defined(__linux__)
     QLabel* about =
-        new QLabel(QStringLiteral("<a href=\"https://github.com/Astyyyyy/fsr4-vk\">%1</a>")
-                       .arg(Tr("About fsr4-vk")),
+        new QLabel(QStringLiteral("<a href=\"https://github.com/auz466/fsr4up-vk\">%1</a>")
+                       .arg(Tr("About fsr4up-vk")),
                    this);
     about->setOpenExternalLinks(true);
-    about->setToolTip(Tr("fsr4-vk on GitHub (GPL-3.0). Its licence and AMD's notice ship in the "
-                         "package's share/licenses/fsr4-vk folder."));
+    about->setToolTip(Tr("fsr4up-vk on GitHub (MIT). Its licence and AMD's notice ship in the "
+                         "package's share/licenses/fsr4up-vk folder."));
     download_button->setVisible(false);
 #else
     QLabel* about = new QLabel(
@@ -153,15 +153,15 @@ void AmdFsr4Panel::Refresh() {
     icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
                               : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
     status_label->setText(
-        ready ? Tr("<b>Ready.</b> Found fsr4-vk, the community Vulkan port of FSR 4 (not AMD's "
-                   "official FSR 4). It runs if the GPU and driver support it; otherwise FSR 3.1 "
-                   "does.")
-              : Tr("<b>Not in this build:</b> Lichii's x86-64 Linux packages include fsr4-vk. For "
-                   "a build without it, put %1 from fsr4-vk in the folder. Until then, FSR 3.1 is "
-                   "used.")
-                    .arg(QString::fromUtf8(
-                        FfxRuntime::PORT_LIBRARY.data(),
-                        static_cast<qsizetype>(FfxRuntime::PORT_LIBRARY.size()))));
+        ready
+            ? Tr("<b>Ready.</b> Found fsr4up-vk, the community Vulkan port of FSR 4.1.2 (not "
+                 "AMD's official FSR 4). It runs if the GPU and driver support it; otherwise "
+                 "FSR 3.1 does.")
+            : Tr("<b>Not in this build:</b> Lichii's x86-64 Linux packages include fsr4up-vk. "
+                 "For a build without it, put %1 from fsr4up-vk in the folder. Until then, "
+                 "FSR 3.1 is used.")
+                  .arg(QString::fromUtf8(FfxRuntime::PORT_LIBRARY.data(),
+                                         static_cast<qsizetype>(FfxRuntime::PORT_LIBRARY.size()))));
     status_label->setToolTip(ready ? PathText(library)
                                    : Tr("Folder: %1").arg(PathText(FfxRuntime::Folder())));
 #else

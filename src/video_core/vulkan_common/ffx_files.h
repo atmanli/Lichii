@@ -5,7 +5,7 @@
 // GitHub. Nothing of AMD's ships with the Windows build: the user downloads the files into the user
 // folder's "fidelityfx" folder from the Graphics settings. Before loading, every file must match
 // the pinned size and SHA-256 and carry AMD's Authenticode signature. On Linux, the packages ship
-// the fsr4-vk port instead (PortLibrary).
+// the fsr4up-vk port instead (PortLibrary).
 
 #pragma once
 
@@ -59,8 +59,8 @@ inline constexpr std::array FILES{
 [[nodiscard]] bool HasSha256(const std::filesystem::path& path, std::string_view sha256);
 
 #if defined(__linux__) && !defined(__ANDROID__)
-/// fsr4-vk (github.com/Astyyyyy/fsr4-vk), the community Vulkan port of FSR 4 the Linux packages
-/// ship.
+/// fsr4up-vk (github.com/auz466/fsr4up-vk), the community native Linux Vulkan implementation of
+/// FSR 4.1.2 the Linux packages ship.
 inline constexpr std::string_view PORT_LIBRARY = "amd_fidelityfx_upscaler_vk.so";
 
 /// Where the port is: in the package's lib folder (<exe dir>/../lib), else in Folder() for builds

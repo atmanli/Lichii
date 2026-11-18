@@ -199,12 +199,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
 #if defined(__linux__) && !defined(__ANDROID__)
-    INSERT(Settings, amd_fsr4, tr("Use FSR 4 (fsr4-vk community Vulkan port) in place of FSR 3.1"),
-           tr("Uses fsr4-vk, a community Vulkan port of AMD's ML-based FSR 4.1.1 that Lichii's "
-              "x86-64 Linux packages include, where FSR replaces a game's upscaler (Ocarina of Time with "
-              "the setting above). It is not AMD's official FSR 4 and is not affiliated with or "
-              "endorsed by AMD. Radeon RX 6000 or newer, or an RDNA 3 Ryzen GPU, on Mesa's RADV "
-              "driver; RDNA 4 runs the FP8 network, older GPUs the INT8 one.\nIf FSR 4 can't run, "
+    INSERT(Settings, amd_fsr4,
+           tr("Use FSR 4 (fsr4up-vk community Vulkan port) in place of FSR 3.1"),
+           tr("Uses fsr4up-vk, a community native Linux Vulkan port of AMD's ML-based FSR 4.1.2 "
+              "that Lichii's x86-64 Linux packages include, where FSR replaces a game's upscaler "
+              "(Ocarina of Time with the setting above). It runs AMD's own FSR 4.1.2 shaders and "
+              "networks, but it is not AMD's official FSR 4 and is not affiliated with or endorsed "
+              "by AMD. Radeon RX 6000 or newer, or an RDNA 2 or newer Ryzen GPU, on Mesa's RADV "
+              "driver; RDNA 4 runs the FP8 network, older GPUs an INT8 one.\nIf FSR 4 can't run, "
               "FSR 3.1 is used and the log says why. Takes effect when a game starts."));
 #else
     INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of FSR 3.1"),

@@ -390,8 +390,10 @@ bool Maxwell3D::IsFastDrawVertexBuffer(u32 method) {
     constexpr u32 streams = MAXWELL3D_REG_INDEX(vertex_streams);
     constexpr u32 stream_words = sizeof(Regs::VertexStream) / sizeof(u32);
     if (method >= streams && method < streams + Regs::NumVertexArrays * stream_words) {
+        // address_high and address_low; stride, enable and frequency where they are dynamic.
         const u32 word = (method - streams) % stream_words;
-        return word == 1 || word == 2; // address_high, address_low
+        return word == 1 || word == 2 ||
+               VideoCommon::Nx2FastDraw::g_dynamic_vertex_streams.load(std::memory_order_relaxed);
     }
     constexpr u32 sizes = 0x600 / sizeof(u32); // SET_VERTEX_STREAM_SIZE_A/B (NativeVertexStreamSize)
     constexpr u32 limits = MAXWELL3D_REG_INDEX(vertex_stream_limits);

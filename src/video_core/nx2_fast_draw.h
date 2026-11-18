@@ -69,6 +69,11 @@ alignas(64) inline std::atomic<bool> g_enabled{true};
 /// in the pipeline key. Set by the pipeline cache before the GPU threads run, read on the back.
 inline std::atomic<bool> g_dynamic_vertex_input{};
 
+/// Whether vertex stream strides, enables and divisors are dynamic state too: dynamic vertex
+/// input with extended dynamic state keeps them out of the pipeline key, and UpdateVertexInput
+/// and the vertex buffer binds record them for every draw. Set with g_dynamic_vertex_input.
+inline std::atomic<bool> g_dynamic_vertex_streams{};
+
 /// Any thread: whether fast draws run (always, unless a test turned them off). The rasterizer
 /// latches it per draw (on the thread that draws) and starts with a full resolve when it turns on.
 [[nodiscard]] inline bool Enabled() {

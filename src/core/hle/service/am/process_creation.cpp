@@ -112,6 +112,16 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, 
     return nullptr;
 }
 
+bool IsSwitch2Application(Core::System& system, u64 program_id) {
+    auto& storage = system.GetContentProviderUnion();
+    auto nca_raw = storage.GetEntryRaw(FileSys::GetUpdateTitleID(program_id),
+                                       FileSys::ContentRecordType::Program);
+    if (!nca_raw) {
+        nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
+    }
+    return nca_raw != nullptr && Core::FindSwitch2Program(nca_raw, program_id, 0).has_value();
+}
+
 bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id) {
     auto& storage = system.GetContentProviderUnion();
     const auto nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);

@@ -30,6 +30,7 @@ add_executable(tests
     core/nx2_gpu_only_regions.cpp
     core/nx2_video_ready.cpp
     core/general_channel.cpp
+    core/home_menu.cpp
     core/kernel_finish_termination.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp

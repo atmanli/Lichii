@@ -507,6 +507,8 @@ jobs:
             cp -r "$RUNNER_TEMP/fsr4up-vk/licenses/fsr4up-vk" AppDir/usr/share/licenses/
             fsr4_library=(--library "$RUNNER_TEMP/fsr4up-vk/$fsr4")
           fi
+          # The shipped Adventure Notes modules sit next to the program.
+          cp -r build/release/bin/notes AppDir/usr/bin/
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/lichii \
             --executable build/release/bin/eden-cli \

@@ -173,6 +173,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applet_web_browser_types.h"
+#include "core/hle/service/bcat/backend/nextendo.h"
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
@@ -2505,6 +2506,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         watcher.setFuture(QtConcurrent::run([&loader, title_id] {
             Common::NplnPatchCatalog::PrepareForGame(
                 title_id, [&] { return loader->ReadMainBuildIdHex(*QtCommon::system); });
+            Service::BCAT::Nextendo::PrepareForGame(title_id);
         }));
         progress.show();
         loop.exec();

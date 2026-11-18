@@ -243,6 +243,7 @@ add_executable(tests
     core/core_timing.cpp
     core/host_wait_margin.cpp
     core/local_redirect.cpp
+    core/nextendo_bcat.cpp
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp

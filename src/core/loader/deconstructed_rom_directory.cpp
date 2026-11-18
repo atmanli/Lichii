@@ -462,6 +462,13 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     // Define an nce patch context for each potential module.
     PatchCollection patch_ctx{is_application};
 
+    // The layout pass must see the same patched bytes as the load pass: NCE's PatchText
+    // computes its trampolines from the module text it is given here, and RelocateAndCopy
+    // installs those trampolines in the load pass. Passing no PatchManager here left the
+    // trampolines computed over unpatched text while the load pass ran patched code (#96).
+    const FileSys::PatchManager pm{metadata.GetTitleID(), system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+
     // Use the NSO module loader to figure out the code layout
     for (size_t i = 0; i < static_modules.size(); i++) {
         const auto& module = static_modules[i];
@@ -472,7 +479,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
 
         const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
         const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
-            process, system, *module_file, code_size, should_pass_arguments, false, {},
+            process, system, *module_file, code_size, should_pass_arguments, false, pm,
             patch_ctx.GetPatchers(), patch_ctx.GetLastIndex());
         if (!tentative_next_load_addr) {
             return {ResultStatus::ErrorLoadingNSO, {}};
@@ -508,8 +515,6 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     modules.clear();
     const VAddr base_address{GetInteger(process.GetEntryPoint())};
     VAddr next_load_addr{base_address};
-    const FileSys::PatchManager pm{metadata.GetTitleID(), system.GetFileSystemController(),
-                                   system.GetContentProvider()};
     for (size_t i = 0; i < static_modules.size(); i++) {
         const auto& module = static_modules[i];
         const FileSys::VirtualFile module_file{dir->GetFile(module)};

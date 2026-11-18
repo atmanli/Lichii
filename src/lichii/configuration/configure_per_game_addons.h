@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <QList>
+#include <QString>
 #include <QWidget>
 
 #include "core/file_sys/vfs/vfs_types.h"
@@ -74,6 +75,9 @@ private:
 
     std::vector<QList<QStandardItem*>> list_items;
     std::vector<QStandardItem*> update_items;
+
+    /// The name the player chose for the mod being imported, when it is one mod.
+    QString install_name;
 
     Core::System& system;
 };

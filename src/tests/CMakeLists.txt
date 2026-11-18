@@ -19,14 +19,19 @@ add_executable(tests
     video_core/back_idle_trace.cpp
     video_core/list_macro_trace.cpp
     video_core/host_mip_limits.cpp
+    video_core/writeback_ranges.cpp
+    video_core/writeback_switches.cpp
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
+    video_core/host_vsync.cpp
     core/mii_model.cpp
     core/nx2_streamplay.cpp
     core/nx2_gpu_only_regions.cpp
     core/nx2_video_ready.cpp
     core/general_channel.cpp
+    core/home_menu.cpp
+    core/native_home_bootstrap.cpp
     core/kernel_finish_termination.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
@@ -38,6 +43,7 @@ add_executable(tests
     core/perf_stats.cpp
     core/service_auto_stub.cpp
     core/key_derivation.cpp
+    core/profile_manager_reset.cpp
     core/eticket_title_key.cpp
     core/keyblob_cmac.cpp
     core/aes_xts.cpp
@@ -54,6 +60,7 @@ add_executable(tests
     video_core/ampere_yoshi_title.cpp
     video_core/ampere_yoshi_compute.cpp
     video_core/scaled_image_fits.cpp
+    video_core/vulkan_address_map.cpp
     video_core/texture_rect_descriptor.cpp
     video_core/join_whole_copy.cpp
     video_core/padded_square.cpp
@@ -170,6 +177,7 @@ add_executable(tests
     video_core/ampere_ported_textures.cpp
     video_core/ampere_tennis_i2f.cpp
     video_core/ampere_tennis_tessellation.cpp
+    video_core/ampere_stage_buffer_output.cpp
     video_core/pipeline_cache_files.cpp
     video_core/shader_cache_v2.cpp
     video_core/evicted_pointer_slots.cpp
@@ -177,6 +185,7 @@ add_executable(tests
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
     video_core/vulkan_buffer_oom.cpp
+    video_core/pipeline_layout_cache.cpp
     video_core/shader_precache.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
@@ -234,6 +243,7 @@ add_executable(tests
     core/core_timing.cpp
     core/host_wait_margin.cpp
     core/local_redirect.cpp
+    core/nextendo_bcat.cpp
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp
@@ -263,6 +273,7 @@ add_executable(tests
     video_core/nx2_perf_draw_binds.cpp
     video_core/nx2_perf_texture_writes.cpp
     video_core/h264_packet.cpp
+    video_core/vp9_range_encoder.cpp
     video_core/nx2_gpu_mapping.cpp
     video_core/vertex_repack.cpp
     video_core/ampere_lowering.cpp
@@ -413,7 +424,8 @@ add_test(NAME shader_translation_tests COMMAND shader_translation_tests)
 
 if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp
-                                 input_common/rumble_mapping.cpp)
+                                 input_common/rumble_mapping.cpp
+                                 input_common/switch2_protocol.cpp)
     target_link_libraries(tests PRIVATE SDL3::SDL3)
 
     add_executable(config_tests

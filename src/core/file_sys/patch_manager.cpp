@@ -565,6 +565,7 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = RENDER_ULTRA_RECORDS,
         .ocarina_render_scale = Settings::OcarinaRenderScale::Scale50,
+    },
     // Text speed: off until checked in Add-Ons; with more than one checked, the fastest wins.
     BuiltinPatch{
         .name = "Text Speed Instant (built-in)",

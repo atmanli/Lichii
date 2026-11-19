@@ -26,6 +26,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/swap.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 
 namespace FileSys {
@@ -166,6 +167,26 @@ constexpr std::size_t DecoderCharge = 256 * 1024;
 /// Partly decoded spilled members that keep their decoder, and with it a window of up to
 /// 128 MiB; another one restarts from its first frame when read past its prefix again.
 constexpr std::size_t MaxSpillDecoders = 2;
+
+/// An upgrade pack carries patched game data, so its RomFS holds the AoC version marker or the
+/// Switch 2 resource tables. Plain add-on content has neither.
+bool HasUpgradePackMarker(const VirtualDir& dir) {
+    if (dir == nullptr) {
+        return false;
+    }
+    for (const auto& file : dir->GetFiles()) {
+        const auto& name = file->GetName();
+        if (name == "AoCUpgradeVersion.txt" || name.find(".Nin_Ounce") != std::string::npos) {
+            return true;
+        }
+    }
+    for (const auto& subdir : dir->GetSubdirectories()) {
+        if (HasUpgradePackMarker(subdir)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 } // namespace
 
@@ -869,6 +890,32 @@ std::optional<std::size_t> NupContainer::FindBestUpdatePackage() const {
         }
     }
     return best;
+}
+
+std::optional<std::size_t> NupContainer::FindUpgradePack(u64 program_id) {
+    // A Switch 2 Edition program keeps its add-ons under the Switch 1 application's ID, while
+    // a program's own add-ons stay under its own. Only the former can be an upgrade pack.
+    const u64 own_base = GetBaseTitleID(program_id);
+    const u64 switch1_base = GetSwitch1ApplicationID(own_base);
+    if (switch1_base == own_base) {
+        return std::nullopt;
+    }
+
+    std::optional<std::size_t> pack;
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        const auto& package = packages[i];
+        if (package.kind != PackageKind::Addon ||
+            GetBaseTitleID(package.title_id) != switch1_base) {
+            continue;
+        }
+        if (pack && package.version <= packages[*pack].version) {
+            continue;
+        }
+        if (HasUpgradePackMarker(GetRomFSDir(i))) {
+            pack = i;
+        }
+    }
+    return pack;
 }
 
 VirtualFile NupContainer::OpenFile(std::size_t file_index) {

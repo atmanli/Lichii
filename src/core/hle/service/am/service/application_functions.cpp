@@ -184,12 +184,19 @@ Result IApplicationFunctions::GetDesiredLanguage(Out<u64> out_language_code) {
     LOG_DEBUG(Service_AM, "called");
 
     // Get supported languages from NACP, if possible
-    // Default to 0 (all languages supported)
     u32 supported_languages = 0;
 
     const auto res = GetApplicationMetadata(system, m_applet->program_id);
     if (res.first != nullptr) {
         supported_languages = res.first->GetSupportedLanguages();
+    } else {
+        // Without control data there is no real mask, and 0 means "all languages" to ns: the
+        // game would be told it wants the configured language even when it ships no text for it
+        // (Kirby and the Forgotten Land's blank text with the system in Brazilian Portuguese,
+        // #2150). Report the priority lists' universal fallback below instead.
+        LOG_WARNING(Service_AM,
+                    "No control data for program_id={:016X}; reporting the fallback language",
+                    m_applet->program_id);
     }
 
     // Call IApplicationManagerInterface implementation.
@@ -198,6 +205,15 @@ Result IApplicationFunctions::GetDesiredLanguage(Out<u64> out_language_code) {
 
     std::shared_ptr<NS::IApplicationManagerInterface> app_man;
     R_TRY(ns_am2->GetApplicationManagerInterface(&app_man));
+
+    if (res.first == nullptr) {
+        // Every priority list contains American English; it is the safe answer when no mask
+        // exists (#2150).
+        R_TRY(app_man->ConvertApplicationLanguageToLanguageCode(
+            out_language_code, NS::ApplicationLanguage::AmericanEnglish));
+        LOG_DEBUG(Service_AM, "got desired_language={:016X}", *out_language_code);
+        R_SUCCEED();
+    }
 
     // Get desired application language
     NS::ApplicationLanguage desired_language{};

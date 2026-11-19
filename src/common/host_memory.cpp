@@ -1269,9 +1269,11 @@ std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
             VirtualUnlock(reinterpret_cast<void*>(page), PageAlignment);
         }
     };
+    constexpr size_t MaxUnlockPages = (size_t{1} << 20) / PageAlignment;
     for (size_t i = 0; i < trim.size();) {
         size_t j = i + 1;
-        while (j < trim.size() && trim[j] == trim[j - 1] + PageAlignment) {
+        while (j < trim.size() && j - i < MaxUnlockPages &&
+               trim[j] == trim[j - 1] + PageAlignment) {
             ++j;
         }
         unlock(trim[i], trim[j - 1] + PageAlignment);

@@ -410,10 +410,11 @@ Contents ReadPackage(std::span<const u8> zip, u64 title_id) {
 
 bool RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_wait) {
     std::error_code ec;
-    // Most titles never had an install: don't leave a lock file beside every cache the services
-    // open. A stage without a target is a first install, which may still be running.
+    // Nothing to put back while there is no backup and target holds a cache. Without a lock file,
+    // no install of this title ever started (an install creates it before its stage), so titles
+    // that never had one get no lock file beside the cache the services open.
     if (!fs::is_directory(BackupPath(target), ec) &&
-        (fs::exists(target, ec) || !fs::exists(StagePath(target), ec))) {
+        (HasDirectories(target) || !fs::exists(LockPath(target), ec))) {
         return true;
     }
     // Taken before install_mutex, so this waits no longer for an install in this process than for
@@ -421,13 +422,19 @@ bool RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_w
     // running there.
     std::optional<Common::FS::FileLock> other_processes;
     TakeLock(other_processes, LockPath(target), lock_wait);
+    if (other_processes->Busy()) {
+        LOG_WARNING(Service_BCAT,
+                    "Nextendo BCAT: {}: another Lichii is installing it, leaving it for the next "
+                    "check",
+                    Common::FS::PathToUTF8String(target));
+        // Without a cache in target, the other process is between its renames or on its first
+        // install.
+        return HasDirectories(target);
+    }
     if (!other_processes->Held()) {
-        const bool busy = other_processes->Busy();
-        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: {}, leaving it for the next check",
-                    Common::FS::PathToUTF8String(target),
-                    busy ? "another Lichii is installing it" : "cannot lock the cache");
-        // Without a cache in target, the other process is between its renames.
-        return !busy || HasDirectories(target);
+        // A file system without file locks: recover as before, ordered within this process only.
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: cannot lock the cache, going on without it",
+                    Common::FS::PathToUTF8String(target));
     }
     std::scoped_lock lock{install_mutex};
     RecoverInterruptedLocked(target);
@@ -444,10 +451,13 @@ bool Install(const Contents& contents, const fs::path& target, std::string_view 
     // this waits for another process.
     std::optional<Common::FS::FileLock> other_processes;
     TakeLock(other_processes, LockPath(target), lock_wait);
+    if (other_processes->Busy()) {
+        throw std::runtime_error("Another Lichii is installing this BCAT cache");
+    }
     if (!other_processes->Held()) {
-        throw std::runtime_error(other_processes->Busy()
-                                     ? "Another Lichii is installing this BCAT cache"
-                                     : "Cannot lock the BCAT cache");
+        // A file system without file locks: install as before, ordered within this process only.
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: cannot lock the cache, going on without it",
+                    Common::FS::PathToUTF8String(target));
     }
     std::scoped_lock lock{install_mutex};
     const bool recovered = RecoverInterruptedLocked(target);
@@ -532,7 +542,8 @@ Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch,
         if (!Install(contents, target, hash, LockWait(InstallLockWait, deadline),
                      previous_hash)) {
             LOG_INFO(Service_BCAT,
-                     "Nextendo BCAT: {:016X}: another Lichii installed it meanwhile, keeping that",
+                     "Nextendo BCAT: {:016X}: the cache changed during the check (another "
+                     "Lichii installed it, or an interrupted install was put back), keeping it",
                      title_id);
             return Outcome::Unchanged;
         }

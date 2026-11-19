@@ -19,6 +19,7 @@
 #include <openssl/evp.h>
 #include <zlib.h>
 
+#include "common/fs/file_lock.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/httplib.h"
@@ -144,6 +145,16 @@ fs::path StagePath(const fs::path& target) {
 fs::path BackupPath(const fs::path& target) {
     auto path = target;
     path += ".nextendo-backup";
+    return path;
+}
+
+// Beside the stage and backup. install_mutex only orders this process's installs: another Lichii
+// installing the same title would clear the stage this one is writing, or take a backup it is
+// still swapping for an interrupted install. The file stays (empty) after use, since deleting a
+// lock file another process may have open would let two processes hold "the" lock at once.
+fs::path LockPath(const fs::path& target) {
+    auto path = target;
+    path += ".nextendo-lock";
     return path;
 }
 
@@ -364,17 +375,40 @@ Contents ReadPackage(std::span<const u8> zip, u64 title_id) {
     return contents;
 }
 
-void RecoverInterrupted(const fs::path& target) {
+void RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_wait) {
     std::scoped_lock lock{install_mutex};
+    std::error_code ec;
+    // Most titles never had an install: don't leave a lock file beside every cache the services
+    // open.
+    if (!fs::is_directory(BackupPath(target), ec)) {
+        return;
+    }
+    // A backup another process holds the lock for belongs to an install still running there.
+    const Common::FS::FileLock other_processes{LockPath(target), lock_wait};
+    if (!other_processes.Held()) {
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: {}, leaving its backup for the next check",
+                    Common::FS::PathToUTF8String(target),
+                    other_processes.Busy() ? "another Lichii is installing it"
+                                           : "cannot lock the cache");
+        return;
+    }
     RecoverInterruptedLocked(target);
 }
 
-void Install(const Contents& contents, const fs::path& target, std::string_view hash) {
+void Install(const Contents& contents, const fs::path& target, std::string_view hash,
+             std::chrono::milliseconds lock_wait) {
     std::scoped_lock lock{install_mutex};
     const auto stage = StagePath(target);
     const auto backup = BackupPath(target);
-    RecoverInterruptedLocked(target);
     std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    const Common::FS::FileLock other_processes{LockPath(target), lock_wait};
+    if (!other_processes.Held()) {
+        throw std::runtime_error(other_processes.Busy()
+                                     ? "Another Lichii is installing this BCAT cache"
+                                     : "Cannot lock the BCAT cache");
+    }
+    RecoverInterruptedLocked(target);
     // The backup may be the only copy of the previous cache; keep it for the next recovery.
     if (fs::is_directory(backup, ec) && !HasDirectories(target)) {
         throw std::runtime_error("Cannot restore the previous BCAT cache");

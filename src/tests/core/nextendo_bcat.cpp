@@ -9,12 +9,14 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "common/fs/file_lock.h"
 #include "core/debugger/nx2_zip.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/bcat/backend/nextendo.h"
@@ -208,8 +210,16 @@ TEST_CASE("Nextendo BCAT installs, keeps and replaces a title's cache", "[core][
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "new");
     REQUIRE_FALSE(fs::exists(target / "vsdata" / "VSSetting_1.byaml"));
     REQUIRE_FALSE(fs::exists(target / "coopdata"));
-    REQUIRE(std::distance(fs::directory_iterator{target.parent_path()},
-                          fs::directory_iterator{}) == 1);
+    // No stage or backup is left beside the cache, only the empty lock file other Lichii
+    // processes take.
+    std::vector<std::string> beside;
+    for (const auto& entry : fs::directory_iterator{target.parent_path()}) {
+        beside.push_back(entry.path().filename().string());
+    }
+    std::ranges::sort(beside);
+    REQUIRE(beside ==
+            std::vector<std::string>{"0100F8F0000A2000", "0100F8F0000A2000.nextendo-lock"});
+    REQUIRE(fs::file_size(target.parent_path() / "0100F8F0000A2000.nextendo-lock") == 0);
 }
 
 TEST_CASE("Nextendo BCAT reinstalls over a hash marker it can't read", "[core][bcat]") {
@@ -263,6 +273,80 @@ TEST_CASE("Nextendo BCAT restores a cache an interrupted install moved away", "[
         fs::create_directories(target);
         RecoverInterrupted(target);
     }
+    REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "old");
+    REQUIRE_FALSE(fs::exists(backup));
+}
+
+namespace {
+
+fs::path WithSuffix(const fs::path& target, std::string_view suffix) {
+    auto path = target;
+    path += suffix;
+    return path;
+}
+
+void WriteText(const fs::path& path, std::string_view text) {
+    fs::create_directories(path.parent_path());
+    std::ofstream out{path, std::ios::binary};
+    out << text;
+}
+
+} // Anonymous namespace
+
+// Another Lichii process installing the same title holds target + ".nextendo-lock" while it writes
+// its stage and swaps it in. A second installer that cleared that stage, or a recovery that took
+// its backup, left the target with part of a package under a complete hash marker (#2207).
+TEST_CASE("Nextendo BCAT waits for another process installing the same title", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    const auto stage = WithSuffix(target, ".nextendo-stage");
+    const auto lock_path = WithSuffix(target, ".nextendo-lock");
+    const auto package = Package(Schedule);
+    const auto contents = ReadPackage(package, Splatoon2);
+    fs::create_directories(target.parent_path());
+
+    // The other process is halfway through writing its stage.
+    std::optional<Common::FS::FileLock> other{std::in_place, lock_path};
+    REQUIRE(other->Held());
+    WriteText(stage / "vsdata" / "VSSetting_0.byaml", "other's first file");
+
+    SECTION("it keeps the lock past the wait") {
+        REQUIRE_THROWS(Install(contents, target, "other-hash", 100ms));
+        REQUIRE(ReadText(stage / "vsdata" / "VSSetting_0.byaml") == "other's first file");
+        REQUIRE_FALSE(fs::exists(target));
+    }
+    SECTION("it finishes during the wait") {
+        std::thread finish{[&] {
+            std::this_thread::sleep_for(200ms);
+            other.reset();
+        }};
+        Install(contents, target, std::string(64, 'a'), 10s);
+        finish.join();
+        for (const auto& [name, data] : contents) {
+            REQUIRE(ReadText(target / name) == std::string(data.begin(), data.end()));
+        }
+        REQUIRE(ReadText(target / ".nextendo_bcat_hash") == std::string(64, 'a'));
+        REQUIRE_FALSE(fs::exists(stage));
+    }
+}
+
+TEST_CASE("Nextendo BCAT recovery leaves another process's swap alone", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    const auto backup = WithSuffix(target, ".nextendo-backup");
+    // Between the other process's two renames: the old cache is its backup, the target is gone.
+    WriteText(backup / "vsdata" / "VSSetting_0.byaml", "old");
+    {
+        const Common::FS::FileLock other{WithSuffix(target, ".nextendo-lock")};
+        REQUIRE(other.Held());
+        RecoverInterrupted(target, 100ms);
+        REQUIRE(ReadText(backup / "vsdata" / "VSSetting_0.byaml") == "old");
+        REQUIRE_FALSE(fs::exists(target));
+    }
+    // Once no process holds it, the backup is an interrupted install's and is put back.
+    RecoverInterrupted(target, 100ms);
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "old");
     REQUIRE_FALSE(fs::exists(backup));
 }

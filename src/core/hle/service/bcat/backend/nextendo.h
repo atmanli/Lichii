@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -44,13 +45,23 @@ using Contents = std::map<std::string, std::vector<u8>>;
 // Splatoon 3's must hold all four regions' Splatfest files. Throws std::runtime_error otherwise.
 Contents ReadPackage(std::span<const u8> zip, u64 title_id);
 
+// How long recovery and installs wait for another Lichii process installing the same title. The
+// services recover on their own thread, so theirs is short.
+constexpr std::chrono::milliseconds RecoverLockWait{2000};
+constexpr std::chrono::milliseconds InstallLockWait{10000};
+
 // Puts back the cache an install moved aside when it was cut off between its two renames, unless
-// target already holds directories. Runs whether or not Nextendo is on.
-void RecoverInterrupted(const std::filesystem::path& target);
+// target already holds directories. Runs whether or not Nextendo is on. Leaves the backup alone
+// while another process holds the title's install lock (target + ".nextendo-lock").
+void RecoverInterrupted(const std::filesystem::path& target,
+                        std::chrono::milliseconds lock_wait = RecoverLockWait);
 
 // Writes contents as the cache folder target with the package hash, in a folder beside it that
-// replaces target only once every file is written. On failure the previous cache stays.
-void Install(const Contents& contents, const std::filesystem::path& target, std::string_view hash);
+// replaces target only once every file is written. On failure the previous cache stays. Holds the
+// title's install lock against other Lichii processes throughout, and throws when another one
+// keeps it past lock_wait.
+void Install(const Contents& contents, const std::filesystem::path& target, std::string_view hash,
+             std::chrono::milliseconds lock_wait = InstallLockWait);
 
 struct Response {
     int status{};

@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -422,6 +423,33 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
     if (std::FILE* const out = std::fopen((std::string{path} + ".folded").c_str(), "w")) {
         for (const auto& [line, count] : folded) {
             std::fprintf(out, "%s %u\n", line.c_str(), count);
+        }
+        std::fclose(out);
+    }
+    // <out>.addrs: every sampled instruction as "thread module offset count", for a line-level
+    // profile with llvm-symbolizer --inlines --relative-address.
+    std::map<std::tuple<unsigned, DWORD64>, unsigned> instructions;
+    for (const Sample& sample : samples) {
+        if (sample.depth != 0) {
+            ++instructions[{sample.thread, sample.frames[0]}];
+        }
+    }
+    if (std::FILE* const out = std::fopen((std::string{path} + ".addrs").c_str(), "w")) {
+        for (const auto& [key, count] : instructions) {
+            const auto [thread, address] = key;
+            HMODULE module{};
+            char module_path[MAX_PATH] = "?";
+            DWORD64 offset = address;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(address), &module)) {
+                GetModuleFileNameA(module, module_path, sizeof(module_path));
+                offset = address - reinterpret_cast<DWORD64>(module);
+            }
+            const char* base = std::strrchr(module_path, '\\');
+            std::fprintf(out, "%s %s %#llx %u\n", targets[thread].name.c_str(),
+                         base != nullptr ? base + 1 : module_path,
+                         static_cast<unsigned long long>(offset), count);
         }
         std::fclose(out);
     }

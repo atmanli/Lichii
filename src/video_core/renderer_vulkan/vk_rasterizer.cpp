@@ -2441,16 +2441,10 @@ void RasterizerVulkan::DispatchCompute() {
     const bool can_replace = OcarinaTemporalEnabled() &&
                              oot_pass != VideoCommon::OcarinaUpscalePass::None &&
                              pipeline->CanReplaceOcarinaUpscale() &&
-                             (oot_pass != VideoCommon::OcarinaUpscalePass::FullSize ||
+                             (oot_pass != VideoCommon::OcarinaUpscalePass::OneToOne ||
                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
                               oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
                              !indirect_address && !list_slot && !frame_dump.Capturing();
-    const bool can_replace =
-        OcarinaTemporalEnabled() &&
-        VideoCommon::FindOcarinaUpscalePass(native_key, pipeline->ShaderHash()) !=
-            VideoCommon::OcarinaUpscalePass::None &&
-        pipeline->CanReplaceOcarinaUpscale() && !indirect_address && !list_slot &&
-        !frame_dump.Capturing();
     // Until a dispatch overwrites the scene, each direct one binds only after the effects are
     // marked. The indirect path records its bind at once.
     const bool marking_effects = oot_effects_frame == render_trace_frame &&
@@ -3745,11 +3739,9 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
     const bool three_quarter_1440p =
         pass == ThreeQuarter &&
         Settings::AppliedOcarinaRenderScale() == Settings::OcarinaRenderScale::Scale75 &&
-        target.size.width == 2560 &&
-                                     target.size.height == 1440;
-    const bool pass_1440p = pass == Pass1440p || three_quarter_1440p;
-    const bool pass_1440p = target_1440p && (pass == OneToOne || pass == Scaled ||
-                                             (pass == ThreeQuarter && oot_performance_scale));
+        target.size.width == 2560 && target.size.height == 1440;
+    const bool pass_1440p = target_1440p &&
+                            (pass == OneToOne || pass == Scaled || three_quarter_1440p);
     // Handheld with the Max Resolution add-on: FSR runs as native AA. DLAA through it is untested.
     const bool native_size = pass == OneToOne && !target_1440p;
     if (native_size && oot_backend != VideoCommon::OcarinaUpscaleBackend::Fsr) {

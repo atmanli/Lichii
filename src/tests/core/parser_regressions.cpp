@@ -15,6 +15,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,7 @@
 
 #include "common/common_funcs.h"
 #include "common/fs/path_util.h"
+#include "common/scope_exit.h"
 #include "core/crypto/key_manager.h"
 #include "core/crypto/ncz_decompressor.h"
 #include "core/file_sys/control_metadata.h"
@@ -32,6 +34,7 @@
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/loader.h"
 #include "core/memory/cheat_engine.h"
+#include "tests/common/restore_eden_path.h"
 
 namespace {
 
@@ -310,12 +313,27 @@ TEST_CASE("Fuzzed keys file: keyblob indices past the table", "[core][fuzz_regre
     const auto source = keys.GetKey(Core::Crypto::S128KeyType::Source,
                                     u64(Core::Crypto::SourceKeyType::Titlekek));
     const auto previous = Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir);
-    Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, directory);
-    keys.ReloadKeys();
-    Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, previous);
-    CHECK(keys.GetKey(Core::Crypto::S128KeyType::Source,
-                      u64(Core::Crypto::SourceKeyType::Titlekek)) == source);
-    std::filesystem::remove_all(directory);
+    {
+        // Put KeysDir back and read the user's keys again even if a check fails, then remove the
+        // folder. A plain SetEdenPath is dropped on a fresh profile, where the keys folder does
+        // not exist yet, and KeysDir kept naming the removed folder.
+        bool reloaded = false;
+        SCOPE_EXIT {
+            Tests::RestoreEdenPath(Common::FS::EdenPath::KeysDir, previous);
+            if (reloaded) {
+                keys.ReloadKeys();
+            }
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+        };
+        Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, directory);
+        reloaded = true;
+        keys.ReloadKeys();
+        CHECK(keys.GetKey(Core::Crypto::S128KeyType::Source,
+                          u64(Core::Crypto::SourceKeyType::Titlekek)) == source);
+    }
+    CHECK(Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir) == previous);
+    CHECK_FALSE(std::filesystem::exists(directory));
 }
 
 TEST_CASE("Fuzzed metadata: the meta harness's readers on every input above",

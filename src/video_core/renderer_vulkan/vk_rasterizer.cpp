@@ -71,6 +71,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/texture_cache/depth_resolve.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -2381,6 +2382,13 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         return;
     }
 
+    if ((aspect_flags & VK_IMAGE_ASPECT_DEPTH_BIT) != 0 &&
+        regs.zeta.format == Tegra::DepthFormat::Z32_FLOAT &&
+        regs.anti_alias_samples_mode == Tegra::Texture::MsaaMode::Msaa2x2 &&
+        clear_covers_render_area && clear_layers.covers_all_layers) {
+        texture_cache.MarkFullDepthClear(render_area.width, render_area.height);
+    }
+
     if (use_stencil && framebuffer->HasAspectStencilBit() && regs.stencil_front_mask != 0xFF &&
         regs.stencil_front_mask != 0) {
         Region2D dst_region = {
@@ -3983,6 +3991,16 @@ bool RasterizerVulkan::HasDrawTransformFeedback() {
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    if (VideoCommon::IsFourSampleDepthResolve(dst, src, copy_config) &&
+        texture_cache_runtime.CanResolveFourSampleDepthToColor()) {
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        return texture_cache.BlitImage(dst, src, copy_config, [this](DAddr addr, size_t size) {
+            // Query writeback may take the buffer lock while holding the query lock.
+            return query_cache.page_filter.Any(addr, size) ||
+                   buffer_cache_runtime.Nx2Slots().Owes(addr, size) ||
+                   buffer_cache.IsRegionGpuModified(addr, size);
+        });
+    }
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }

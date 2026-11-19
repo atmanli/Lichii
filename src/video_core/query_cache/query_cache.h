@@ -286,6 +286,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
     const u64 report_size = has_timestamp ? 16 : 4;
+    // An immediate report can update backing bytes without entering the query cache.
+    page_filter.Mark(cpu_addr, report_size);
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
@@ -437,7 +439,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     {
         std::scoped_lock lock(cache_mutex);
         auto it1 = cached_queries.try_emplace(cont_addr);
-        page_filter.Mark(cpu_addr, 16);
         auto& sub_container = it1.first->second;
         auto it_current = sub_container.find(base);
         if (it_current == sub_container.end()) {

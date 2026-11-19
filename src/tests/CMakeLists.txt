@@ -81,6 +81,7 @@ add_executable(tests
     core/parser_edge_values.cpp
     core/cheat_parser.cpp
     core/builtin_font_glyphs.cpp
+    core/parser_regressions.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp

@@ -159,7 +159,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                                    0, barrier);
         });
     }
-    if (runtime.device.HasDebuggingToolAttached()) {
+    if (runtime.device.NamesObjects()) {
         buffer.SetObjectNameEXT(fmt::format("Buffer {:#x}", CpuAddr()).c_str());
     }
     if (device->IsBufferDeviceAddressSupported()) {
@@ -247,7 +247,7 @@ public:
             .pQueueFamilyIndices = nullptr,
         };
         buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
-        if (device.HasDebuggingToolAttached()) {
+        if (device.NamesObjects()) {
             buffer.SetObjectNameEXT("Quad LUT");
         }
 
@@ -411,7 +411,8 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
                                        ComputePassDescriptorQueue& compute_pass_descriptor_queue,
                                        DescriptorPool& descriptor_pool)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
-      staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
+      master_semaphore{scheduler_.GetMasterSemaphore()}, staging_pool{staging_pool_},
+      guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
@@ -509,10 +510,6 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
             it->ResetUsageTracking();
         }
     }
-}
-
-u64 BufferCacheRuntime::CurrentTick() {
-    return scheduler.CurrentTick();
 }
 
 bool BufferCacheRuntime::IsFree(u64 tick) {
@@ -979,7 +976,7 @@ vk::Buffer BufferCacheRuntime::CreateNullBuffer() {
         create_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     vk::Buffer ret = memory_allocator.CreateBuffer(create_info, MemoryUsage::DeviceLocal);
-    if (device.HasDebuggingToolAttached()) {
+    if (device.NamesObjects()) {
         ret.SetObjectNameEXT("Null buffer");
     }
 

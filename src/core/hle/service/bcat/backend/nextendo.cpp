@@ -13,6 +13,7 @@
 #include <set>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -52,6 +53,8 @@ constexpr std::array Splatoon3Files{"summary.yml",    "base.pack.zs.enc", "bh.pa
                                     "wa.pack.zs.enc", "wb.pack.zs.enc",   "wc.pack.zs.enc"};
 
 std::mutex install_mutex;
+
+constexpr std::chrono::milliseconds LockRetry{10};
 
 u16 Read16(std::span<const u8> data, std::size_t offset) {
     if (offset > data.size() || data.size() - offset < 2) {
@@ -158,6 +161,34 @@ fs::path LockPath(const fs::path& target) {
     return path;
 }
 
+// Takes the title's lock, trying again every LockRetry for up to wait. FileLock's own timed wait
+// marks a path that stayed taken through a whole wait, and later waits for it only try once: right
+// for the pipeline cache, which goes on without the lock, but here the install after a recovery
+// that timed out would give up at once.
+void TakeLock(std::optional<Common::FS::FileLock>& lock, const fs::path& path,
+              std::chrono::milliseconds wait) {
+    const auto deadline = std::chrono::steady_clock::now() + wait;
+    for (;;) {
+        lock.emplace(path);
+        if (lock->Held() || !lock->Busy() || std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+        lock.reset();
+        std::this_thread::sleep_for(LockRetry);
+    }
+}
+
+// cap, or less when the deadline comes first.
+std::chrono::milliseconds LockWait(std::chrono::milliseconds cap,
+                                   std::chrono::steady_clock::time_point deadline) {
+    if (deadline == std::chrono::steady_clock::time_point::max()) {
+        return cap;
+    }
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    return std::clamp(left, std::chrono::milliseconds::zero(), cap);
+}
+
 void WriteFile(const fs::path& path, std::span<const char> data) {
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
     out.write(data.data(), static_cast<std::streamsize>(data.size()));
@@ -193,15 +224,17 @@ bool HasDirectories(const fs::path& target) {
 }
 
 // An install cut off between its two renames leaves the previous cache in the backup folder, and
-// the services may have created an empty target since. Caller holds install_mutex.
-void RecoverInterruptedLocked(const fs::path& target) {
+// the services may have created an empty target since. Caller holds the title's lock and
+// install_mutex. True when it put the backup back.
+bool RecoverInterruptedLocked(const fs::path& target) {
     std::error_code ec;
     const auto backup = BackupPath(target);
     if (!fs::is_directory(backup, ec) || HasDirectories(target)) {
-        return;
+        return false;
     }
     fs::remove_all(target, ec);
     fs::rename(backup, target, ec);
+    return !ec;
 }
 
 std::string Sha256Hex(std::span<const u8> data) {
@@ -375,43 +408,60 @@ Contents ReadPackage(std::span<const u8> zip, u64 title_id) {
     return contents;
 }
 
-void RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_wait) {
-    std::scoped_lock lock{install_mutex};
+bool RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_wait) {
     std::error_code ec;
     // Most titles never had an install: don't leave a lock file beside every cache the services
-    // open.
-    if (!fs::is_directory(BackupPath(target), ec)) {
-        return;
+    // open. A stage without a target is a first install, which may still be running.
+    if (!fs::is_directory(BackupPath(target), ec) &&
+        (fs::exists(target, ec) || !fs::exists(StagePath(target), ec))) {
+        return true;
     }
-    // A backup another process holds the lock for belongs to an install still running there.
-    const Common::FS::FileLock other_processes{LockPath(target), lock_wait};
-    if (!other_processes.Held()) {
-        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: {}, leaving its backup for the next check",
+    // Taken before install_mutex, so this waits no longer for an install in this process than for
+    // one in another. A backup another process holds the lock for belongs to an install still
+    // running there.
+    std::optional<Common::FS::FileLock> other_processes;
+    TakeLock(other_processes, LockPath(target), lock_wait);
+    if (!other_processes->Held()) {
+        const bool busy = other_processes->Busy();
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: {}, leaving it for the next check",
                     Common::FS::PathToUTF8String(target),
-                    other_processes.Busy() ? "another Lichii is installing it"
-                                           : "cannot lock the cache");
-        return;
+                    busy ? "another Lichii is installing it" : "cannot lock the cache");
+        // Without a cache in target, the other process is between its renames.
+        return !busy || HasDirectories(target);
     }
+    std::scoped_lock lock{install_mutex};
     RecoverInterruptedLocked(target);
+    return true;
 }
 
-void Install(const Contents& contents, const fs::path& target, std::string_view hash,
-             std::chrono::milliseconds lock_wait) {
-    std::scoped_lock lock{install_mutex};
+bool Install(const Contents& contents, const fs::path& target, std::string_view hash,
+             std::chrono::milliseconds lock_wait, std::optional<std::string_view> previous_hash) {
     const auto stage = StagePath(target);
     const auto backup = BackupPath(target);
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
-    const Common::FS::FileLock other_processes{LockPath(target), lock_wait};
-    if (!other_processes.Held()) {
-        throw std::runtime_error(other_processes.Busy()
+    // Before install_mutex, so the services' recovery never waits on install_mutex for as long as
+    // this waits for another process.
+    std::optional<Common::FS::FileLock> other_processes;
+    TakeLock(other_processes, LockPath(target), lock_wait);
+    if (!other_processes->Held()) {
+        throw std::runtime_error(other_processes->Busy()
                                      ? "Another Lichii is installing this BCAT cache"
                                      : "Cannot lock the BCAT cache");
     }
-    RecoverInterruptedLocked(target);
+    std::scoped_lock lock{install_mutex};
+    const bool recovered = RecoverInterruptedLocked(target);
     // The backup may be the only copy of the previous cache; keep it for the next recovery.
     if (fs::is_directory(backup, ec) && !HasDirectories(target)) {
         throw std::runtime_error("Cannot restore the previous BCAT cache");
+    }
+    // Another process may have installed while this one fetched the package or waited for the
+    // lock: keep its install, which is this package or one fetched about as recently.
+    if (HasDirectories(target)) {
+        const auto installed = InstalledHash(target);
+        if (installed == hash || (previous_hash && !recovered && installed != *previous_hash)) {
+            return false;
+        }
     }
     fs::remove_all(stage, ec);
     if (ec || fs::exists(stage, ec)) {
@@ -442,10 +492,13 @@ void Install(const Contents& contents, const fs::path& target, std::string_view 
         fs::remove_all(stage, ec);
         throw;
     }
+    return true;
 }
 
-Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
-    RecoverInterrupted(target);
+Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch,
+               std::chrono::steady_clock::time_point deadline) {
+    RecoverInterrupted(target, LockWait(RecoverLockWait, deadline));
+    const auto previous_hash = InstalledHash(target);
     auto response = fetch(title_id);
     // Scarlet and Violet share one event package, published under Violet's title ID.
     if (title_id == PokemonScarlet && response &&
@@ -476,7 +529,13 @@ Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
             return Outcome::Unchanged;
         }
         const auto contents = ReadPackage(response->body, title_id);
-        Install(contents, target, hash);
+        if (!Install(contents, target, hash, LockWait(InstallLockWait, deadline),
+                     previous_hash)) {
+            LOG_INFO(Service_BCAT,
+                     "Nextendo BCAT: {:016X}: another Lichii installed it meanwhile, keeping that",
+                     title_id);
+            return Outcome::Unchanged;
+        }
         LOG_INFO(Service_BCAT, "Nextendo BCAT: {:016X}: installed package {}: {}", title_id,
                  hash.substr(0, 12), Summary(contents));
     } catch (const std::exception& error) {
@@ -497,8 +556,9 @@ void PrepareForGame(u64 title_id) {
         return;
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
-    Update(title_id, CacheDirectory(title_id),
-           [deadline](u64 title) { return Download(title, deadline); });
+    Update(
+        title_id, CacheDirectory(title_id),
+        [deadline](u64 title) { return Download(title, deadline); }, deadline);
 }
 
 } // namespace Service::BCAT::Nextendo

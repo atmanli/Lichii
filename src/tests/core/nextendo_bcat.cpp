@@ -321,8 +321,16 @@ TEST_CASE("Nextendo BCAT waits for another process installing the same title", "
             std::this_thread::sleep_for(200ms);
             other.reset();
         }};
-        Install(contents, target, std::string(64, 'a'), 10s);
+        std::string error;
+        bool installed = false;
+        try {
+            installed = Install(contents, target, std::string(64, 'a'), 10s);
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
         finish.join();
+        REQUIRE(error == "");
+        REQUIRE(installed);
         for (const auto& [name, data] : contents) {
             REQUIRE(ReadText(target / name) == std::string(data.begin(), data.end()));
         }
@@ -341,12 +349,122 @@ TEST_CASE("Nextendo BCAT recovery leaves another process's swap alone", "[core][
     {
         const Common::FS::FileLock other{WithSuffix(target, ".nextendo-lock")};
         REQUIRE(other.Held());
-        RecoverInterrupted(target, 100ms);
+        // The services serve an empty cache rather than create the target it renames its stage to.
+        REQUIRE_FALSE(RecoverInterrupted(target, 100ms));
         REQUIRE(ReadText(backup / "vsdata" / "VSSetting_0.byaml") == "old");
         REQUIRE_FALSE(fs::exists(target));
     }
     // Once no process holds it, the backup is an interrupted install's and is put back.
-    RecoverInterrupted(target, 100ms);
+    REQUIRE(RecoverInterrupted(target, 100ms));
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "old");
     REQUIRE_FALSE(fs::exists(backup));
+}
+
+TEST_CASE("Nextendo BCAT recovery waits on another process's first install", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    const auto lock_path = WithSuffix(target, ".nextendo-lock");
+    // Nothing installed and nothing being installed: no lock file is left beside the cache.
+    REQUIRE(RecoverInterrupted(target, 100ms));
+    REQUIRE_FALSE(fs::exists(lock_path));
+
+    WriteText(WithSuffix(target, ".nextendo-stage") / "vsdata" / "VSSetting_0.byaml", "new");
+    const Common::FS::FileLock other{lock_path};
+    REQUIRE(other.Held());
+    REQUIRE_FALSE(RecoverInterrupted(target, 100ms));
+    REQUIRE_FALSE(fs::exists(target));
+}
+
+// FileLock's timed wait only tries once on a path that already stayed taken through a wait, so a
+// recovery that timed out made the install right after it give up at once.
+TEST_CASE("Nextendo BCAT installs wait in full after a recovery timed out", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    const auto contents = ReadPackage(Package(Schedule), Splatoon2);
+    WriteText(WithSuffix(target, ".nextendo-backup") / "vsdata" / "VSSetting_0.byaml", "old");
+
+    std::optional<Common::FS::FileLock> other{std::in_place, WithSuffix(target, ".nextendo-lock")};
+    REQUIRE(other->Held());
+    REQUIRE_FALSE(RecoverInterrupted(target, 100ms));
+    std::thread finish{[&] {
+        std::this_thread::sleep_for(200ms);
+        other.reset();
+    }};
+    // Joined before any check fails, so a failure doesn't end the run.
+    std::string error;
+    bool installed = false;
+    try {
+        installed = Install(contents, target, std::string(64, 'a'), 2s);
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    finish.join();
+    REQUIRE(error == "");
+    REQUIRE(installed);
+    REQUIRE(ReadText(target / "coopdata" / "CoopSetting.byaml") == "coop");
+}
+
+TEST_CASE("Nextendo BCAT keeps what another process installed while it waited", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    const auto lock_path = WithSuffix(target, ".nextendo-lock");
+    REQUIRE(Update(Splatoon2, target, Serve(Ok({{"vsdata/VSSetting_0.byaml", "first"}}))) ==
+            Outcome::Installed);
+
+    const auto package = Package(Schedule);
+    std::string package_hash;
+    {
+        const TempDir scratch;
+        REQUIRE(Update(Splatoon2, scratch.Target(), Serve(Response{200, package})) ==
+                Outcome::Installed);
+        package_hash = ReadText(scratch.Target() / HashFileName);
+    }
+
+    // The other process takes the lock after this one looked at target, and installs while this
+    // one fetches and waits.
+    std::string other_hash;
+    SECTION("the same package") {
+        other_hash = package_hash;
+    }
+    SECTION("a newer package") {
+        other_hash = std::string(64, 'c');
+    }
+    std::optional<Common::FS::FileLock> other;
+    std::thread finish;
+    const Fetch fetch = [&](u64) -> std::optional<Response> {
+        other.emplace(lock_path);
+        REQUIRE(other->Held());
+        finish = std::thread{[&] {
+            std::this_thread::sleep_for(200ms);
+            WriteText(target / "vsdata" / "VSSetting_0.byaml", "other's");
+            WriteText(target / HashFileName, other_hash);
+            other.reset();
+        }};
+        return Response{200, package};
+    };
+    const auto outcome = Update(Splatoon2, target, fetch);
+    finish.join();
+    REQUIRE(outcome == Outcome::Unchanged);
+    REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "other's");
+    REQUIRE(ReadText(target / HashFileName) == other_hash);
+}
+
+TEST_CASE("Nextendo BCAT waits for another process no later than the deadline", "[core][bcat]") {
+    using namespace std::chrono_literals;
+    const TempDir temp;
+    const auto target = temp.Target();
+    REQUIRE(Update(Splatoon2, target, Serve(Ok({{"vsdata/VSSetting_0.byaml", "first"}}))) ==
+            Outcome::Installed);
+    // A backup makes the recovery wait for the lock too.
+    WriteText(WithSuffix(target, ".nextendo-backup") / "vsdata" / "VSSetting_0.byaml", "old");
+
+    const Common::FS::FileLock other{WithSuffix(target, ".nextendo-lock")};
+    REQUIRE(other.Held());
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(Update(Splatoon2, target, Serve(Ok(Schedule)), start + 300ms) == Outcome::Failed);
+    REQUIRE(std::chrono::steady_clock::now() - start < 1500ms);
+    REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "first");
 }

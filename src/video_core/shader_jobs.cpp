@@ -5,6 +5,10 @@
 #include <optional>
 #include <utility>
 
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
+
 #include "common/literals.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
@@ -12,6 +16,43 @@
 #include "video_core/shader_jobs.h"
 
 namespace VideoCommon {
+namespace {
+
+#ifdef __APPLE__
+// A secondary thread on macOS gets 512 KiB of stack. MoltenVK converts SPIR-V to MSL on the thread
+// that builds the pipeline, and SPIRV-Cross's recursive control-flow walk overflowed that on a
+// compute program of Ocarina of Time; 256 MiB held. Pages never touched cost no memory.
+constexpr size_t WorkerStackSize = size_t{256} << 20;
+
+template <typename Body>
+void* RunBody(void* body) {
+    (*static_cast<Body*>(body))();
+    return nullptr;
+}
+#endif
+
+/// Runs `body` on a thread with WorkerStackSize of stack where the platform's default is too
+/// small, and on this thread otherwise or when that thread can't be made.
+template <typename Body>
+void RunOnWorkerStack(Body& body) {
+#ifdef __APPLE__
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) == 0) {
+        pthread_t thread;
+        const bool created = pthread_attr_setstacksize(&attr, WorkerStackSize) == 0 &&
+                             pthread_create(&thread, &attr, &RunBody<Body>, &body) == 0;
+        pthread_attr_destroy(&attr);
+        if (created) {
+            pthread_join(thread, nullptr);
+            return;
+        }
+    }
+    LOG_WARNING(HW_GPU, "Shader job worker runs on the default stack: no larger one");
+#endif
+    body();
+}
+
+} // Anonymous namespace
 
 struct ShaderJobBatchState {
     mutable std::mutex mutex;
@@ -157,10 +198,13 @@ ShaderJobScheduler::ShaderJobScheduler(const ShaderJobConfig& config)
     stats.budget_bytes = budget;
     const auto start{[this](std::string name, bool driver) {
         threads.emplace_back([this, name = std::move(name), driver] {
-            Common::SetCurrentThreadName(name.c_str());
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
-            Common::SetCurrentThreadToBackgroundWork();
-            Worker(driver);
+            auto body = [&] {
+                Common::SetCurrentThreadName(name.c_str());
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+                Common::SetCurrentThreadToBackgroundWork();
+                Worker(driver);
+            };
+            RunOnWorkerStack(body);
         });
     }};
     for (size_t i = 0; i < std::max<size_t>(config.cpu_threads, 1); ++i) {

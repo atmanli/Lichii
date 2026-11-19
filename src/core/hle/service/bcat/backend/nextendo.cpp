@@ -422,19 +422,17 @@ bool RecoverInterrupted(const fs::path& target, std::chrono::milliseconds lock_w
     // running there.
     std::optional<Common::FS::FileLock> other_processes;
     TakeLock(other_processes, LockPath(target), lock_wait);
-    if (other_processes->Busy()) {
-        LOG_WARNING(Service_BCAT,
-                    "Nextendo BCAT: {}: another Lichii is installing it, leaving it for the next "
-                    "check",
-                    Common::FS::PathToUTF8String(target));
+    if (!other_processes->Held()) {
+        // A lock that can't be opened (permissions, a file system without locks) can't tell
+        // whether another process is swapping, so the backup stays too: it is never lost, only
+        // put back later.
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: {}, leaving it for the next check",
+                    Common::FS::PathToUTF8String(target),
+                    other_processes->Busy() ? "another Lichii is installing it"
+                                            : "cannot lock the cache");
         // Without a cache in target, the other process is between its renames or on its first
         // install.
         return HasDirectories(target);
-    }
-    if (!other_processes->Held()) {
-        // A file system without file locks: recover as before, ordered within this process only.
-        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: cannot lock the cache, going on without it",
-                    Common::FS::PathToUTF8String(target));
     }
     std::scoped_lock lock{install_mutex};
     RecoverInterruptedLocked(target);
@@ -451,13 +449,12 @@ bool Install(const Contents& contents, const fs::path& target, std::string_view 
     // this waits for another process.
     std::optional<Common::FS::FileLock> other_processes;
     TakeLock(other_processes, LockPath(target), lock_wait);
-    if (other_processes->Busy()) {
-        throw std::runtime_error("Another Lichii is installing this BCAT cache");
-    }
+    // A lock that can't be opened may still be held by another process (one whose lock file this
+    // user can't open), so it stops the install too; Update keeps the local cache.
     if (!other_processes->Held()) {
-        // A file system without file locks: install as before, ordered within this process only.
-        LOG_WARNING(Service_BCAT, "Nextendo BCAT: {}: cannot lock the cache, going on without it",
-                    Common::FS::PathToUTF8String(target));
+        throw std::runtime_error(other_processes->Busy()
+                                     ? "Another Lichii is installing this BCAT cache"
+                                     : "Cannot lock the BCAT cache");
     }
     std::scoped_lock lock{install_mutex};
     const bool recovered = RecoverInterruptedLocked(target);

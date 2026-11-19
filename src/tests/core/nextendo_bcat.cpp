@@ -483,19 +483,30 @@ TEST_CASE("Nextendo BCAT recovery waits on a first install before its stage exis
     REQUIRE_FALSE(fs::exists(target));
 }
 
-TEST_CASE("Nextendo BCAT installs and recovers where the cache can't be locked", "[core][bcat]") {
+TEST_CASE("Nextendo BCAT leaves the cache alone where it can't be locked", "[core][bcat]") {
     using namespace std::chrono_literals;
     const TempDir temp;
     const auto target = temp.Target();
-    // A folder where the lock file would go: the lock can't be taken, and no one else holds it.
-    fs::create_directories(WithSuffix(target, ".nextendo-lock"));
+    const auto lock_path = WithSuffix(target, ".nextendo-lock");
     REQUIRE(Update(Splatoon2, target, Serve(Ok({{"vsdata/VSSetting_0.byaml", "first"}}))) ==
             Outcome::Installed);
+
+    // A folder where the lock file goes: the lock can't be opened, so whether another process holds
+    // it is unknown.
+    fs::remove(lock_path);
+    fs::create_directories(lock_path);
+    REQUIRE(Update(Splatoon2, target, Serve(Ok({{"vsdata/VSSetting_0.byaml", "second"}}))) ==
+            Outcome::Failed);
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "first");
 
-    // An install cut off between its renames is still put back.
+    // The backup of an install cut off between its renames stays until the lock can be taken.
     const auto backup = WithSuffix(target, ".nextendo-backup");
     fs::rename(target, backup);
+    REQUIRE_FALSE(RecoverInterrupted(target, 100ms));
+    REQUIRE_FALSE(fs::exists(target));
+    REQUIRE(ReadText(backup / "vsdata" / "VSSetting_0.byaml") == "first");
+
+    fs::remove(lock_path);
     REQUIRE(RecoverInterrupted(target, 100ms));
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "first");
     REQUIRE_FALSE(fs::exists(backup));

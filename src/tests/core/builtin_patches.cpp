@@ -16,6 +16,7 @@
 #include "common/common_funcs.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/patch_manager.h"
@@ -24,6 +25,7 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/nso.h"
 #include "core/memory/cheat_engine.h"
+#include "tests/common/restore_eden_path.h"
 
 namespace {
 
@@ -188,7 +190,7 @@ public:
 
     ~PatchManagerTestContext() {
         for (size_t i = 0; i < TestDirectories.size(); ++i) {
-            Common::FS::SetEdenPath(TestDirectories[i].first, previous[i]);
+            Tests::RestoreEdenPath(TestDirectories[i].first, previous[i]);
         }
         Settings::values.disabled_addons.erase(OcarinaTitleId);
         std::error_code error;
@@ -266,6 +268,64 @@ TEST_CASE("Built-in Max Resolution patch is gated on build id and original word"
     SECTION("Disabled in Add-Ons skips") {
         Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
         REQUIRE(PatchMain(context, OcarinaBuildId, TbzInstruction) == TbzInstruction);
+    }
+}
+
+TEST_CASE("Yoshi 2.0.0 Full Scene Resolution with FXAA is an exact opt-in patch",
+          "[patch_manager]") {
+    constexpr u64 TitleId = 0x0400245021D2C000;
+    constexpr std::string_view Name = "Full Scene Resolution with FXAA (built-in)";
+    constexpr size_t SiteOffset = sizeof(Loader::NSOHeader) + 0x7582677;
+    constexpr u8 Original = 0x35;
+    constexpr u8 Replacement = 0x19;
+    PatchManagerTestContext context;
+    const auto manager = context.Manager(TitleId);
+    Settings::values.disabled_addons.erase(TitleId);
+    SCOPE_EXIT {
+        Settings::values.disabled_addons.erase(TitleId);
+    };
+
+    Loader::NSOHeader header{};
+    header.magic = Common::MakeMagic('N', 'S', 'O', '0');
+    header.build_id = {0x89, 0x3C, 0x30, 0xE7, 0x55, 0x21, 0xAF, 0xB8,
+                       0xB2, 0x33, 0x26, 0xEB, 0x6A, 0xA0, 0xE2, 0xDC};
+    std::vector<u8> nso(SiteOffset + 2);
+    std::memcpy(nso.data(), &header, sizeof(header));
+    nso[SiteOffset] = Original;
+
+    SECTION("Listed unchecked and left unchanged by default") {
+        const auto patches = manager.GetPatches();
+        const auto patch = std::ranges::find(patches, Name, &FileSys::Patch::name);
+        REQUIRE(patch != patches.end());
+        CHECK(patch->off_by_default);
+        CHECK_FALSE(patch->enabled);
+        CHECK_FALSE(patch->description.empty());
+        CHECK_FALSE(manager.HasNSOPatch(header.build_id, "main"));
+        REQUIRE(manager.PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Checked in Add-Ons") {
+        Settings::values.disabled_addons[TitleId] = FileSys::StoredDisabledAddons(TitleId, {});
+        SECTION("Only the profile byte changes on the matching module") {
+            CHECK(manager.HasNSOPatch(header.build_id, "main"));
+            const auto patched = manager.PatchNSO(nso, "main");
+            nso[SiteOffset] = Replacement;
+            REQUIRE(patched == nso);
+        }
+        SECTION("Different build id sharing the same first 16 bytes is refused") {
+            header.build_id.back() = 1;
+            CHECK_FALSE(manager.HasNSOPatch(header.build_id, "main"));
+            std::memcpy(nso.data(), &header, sizeof(header));
+            REQUIRE(manager.PatchNSO(nso, "main") == nso);
+        }
+        SECTION("Unexpected original byte is refused") {
+            nso[SiteOffset] = 0x36;
+            REQUIRE(manager.PatchNSO(nso, "main") == nso);
+        }
+        SECTION("Different module is refused") {
+            CHECK_FALSE(manager.HasNSOPatch(header.build_id, "sdk"));
+            REQUIRE(manager.PatchNSO(nso, "sdk") == nso);
+        }
     }
 }
 
@@ -418,7 +478,9 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
     REQUIRE(listed(DynamicFps).enabled);
     REQUIRE(listed(DynamicFps).version ==
             fmt::format("IPS, replaced by {} when it applies", FpsUnlock));
-    auto patched = manager.PatchNSO(nso, "main");
+    bool frame_rate_unlocked = false;
+    auto patched = manager.PatchNSO(nso, "main", &frame_rate_unlocked);
+    REQUIRE_FALSE(frame_rate_unlocked);
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
     REQUIRE(routine(patched, UnlockRoutineSize) ==
             std::string{RoutineHead} + "E300001C4268231EC300001C4278231E4840201EC0035FD6"
@@ -467,7 +529,11 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock}};
     REQUIRE_FALSE(listed(FpsUnlock).enabled);
     REQUIRE(listed(DynamicFps).version == "IPS");
-    patched = manager.PatchNSO(nso, "main");
+    // Dark's step never drops below 1.0, so the game keeps the vsync timer's rate
+    // (KProcess::IsFrameRateUnlocked stays false).
+    frame_rate_unlocked = false;
+    patched = manager.PatchNSO(nso, "main", &frame_rate_unlocked);
+    REQUIRE_FALSE(frame_rate_unlocked);
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
     REQUIRE(routine(patched, DynamicRoutineSize) ==
             std::string{RoutineHead} + "C300001C0309231E4020231E4D0000544840201EC0035FD6"
@@ -497,7 +563,9 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
     // Both unchecked: hook and code cave stay untouched.
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock},
                                                         std::string{DynamicFps}};
-    patched = manager.PatchNSO(nso, "main");
+    frame_rate_unlocked = false;
+    patched = manager.PatchNSO(nso, "main", &frame_rate_unlocked);
+    REQUIRE_FALSE(frame_rate_unlocked);
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicOriginalInstruction);
     REQUIRE(WordAt(patched, DynamicRoutineOffset) == 0);
     REQUIRE(water_untouched(patched));
@@ -1025,6 +1093,89 @@ TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_
     }
 }
 
+TEST_CASE("Built-in text speed is off until checked in Add-Ons", "[patch_manager]") {
+    constexpr size_t SiteOffset = sizeof(Loader::NSOHeader) + 0xAFE1B4;
+    constexpr size_t CaveOffset = sizeof(Loader::NSOHeader) + 0x3C46F00;
+    constexpr u32 LdrhInstruction = 0x7940DE69;
+    constexpr u32 BranchToCave = 0x14C52353;
+    constexpr std::string_view Double = "Text Speed 2x (built-in)";
+    constexpr std::string_view Quadruple = "Text Speed 4x (built-in)";
+    constexpr std::string_view Instant = "Text Speed Instant (built-in)";
+    PatchManagerTestContext context;
+    const auto manager = context.Manager();
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + SiteOffset, &LdrhInstruction, sizeof(LdrhInstruction));
+
+    SECTION("Unchecked by default: listed off and not applied") {
+        for (const auto& patch : manager.GetPatches()) {
+            if (patch.name.starts_with("Text Speed")) {
+                REQUIRE_FALSE(patch.enabled);
+                REQUIRE(patch.off_by_default);
+            }
+        }
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, SiteOffset) == LdrhInstruction);
+        REQUIRE(WordAt(patched, CaveOffset) == 0);
+    }
+
+    SECTION("Each speed branches to the cave with its scale once checked") {
+        const std::array<std::pair<std::string_view, u32>, 3> speeds{{
+            {Double, 0x40000000},    // 2.0f
+            {Quadruple, 0x40800000}, // 4.0f
+            {Instant, 0x49742400},   // 1e6f
+        }};
+        for (const auto& [name, scale] : speeds) {
+            Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(name)};
+            const auto patches = manager.GetPatches();
+            REQUIRE(std::ranges::any_of(patches, [&](const FileSys::Patch& patch) {
+                return patch.name == name && patch.enabled;
+            }));
+            const auto patched = manager.PatchNSO(nso, "main");
+            REQUIRE(WordAt(patched, SiteOffset) == BranchToCave);
+            REQUIRE(Common::HexToString(std::span{patched}.subspan(CaveOffset, 16)) ==
+                    "9000001C0008301E69DE4079ABDC3A17");
+            REQUIRE(WordAt(patched, CaveOffset + 16) == scale);
+        }
+    }
+
+    SECTION("With more than one checked, the fastest applies") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Double),
+                                                            FileSys::EnabledAddonKey(Quadruple)};
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, CaveOffset + 16) == 0x40800000);
+    }
+
+    SECTION("Another word at the site skips") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Double)};
+        std::memcpy(nso.data() + SiteOffset, &NopInstruction, sizeof(NopInstruction));
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, SiteOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, CaveOffset) == 0);
+    }
+}
+
+TEST_CASE("Unchecked add-on lists store off-by-default built-ins when checked", "[patch_manager]") {
+    const std::string Double{"Text Speed 2x (built-in)"};
+    const std::string Quadruple{"Text Speed 4x (built-in)"};
+    const std::string Instant{"Text Speed Instant (built-in)"};
+    const std::string MaxResolutionName{MaxResolution};
+
+    SECTION("Unchecked off-by-default built-ins are not stored, checked ones get their key") {
+        auto stored = FileSys::StoredDisabledAddons(OcarinaTitleId,
+                                                    {MaxResolutionName, Double, Instant});
+        std::ranges::sort(stored);
+        std::vector<std::string> expected{MaxResolutionName,
+                                          FileSys::EnabledAddonKey(Quadruple)};
+        std::ranges::sort(expected);
+        REQUIRE(stored == expected);
+    }
+
+    SECTION("Other titles are stored as given") {
+        REQUIRE(FileSys::StoredDisabledAddons(OtherTitleId, {Double}) ==
+                std::vector<std::string>{Double});
+    }
+}
+
 namespace {
 
 std::vector<FileSys::BuiltinCheatOverlap> CheatOverlaps(
@@ -1167,4 +1318,27 @@ TEST_CASE("Built-in FPS Unlock still applies beside a cheat that writes its cave
     const auto patched = context.Manager().PatchNSO(MakeDynamicMain(), "main");
     REQUIRE(WordAt(patched, HudHookOffset) == HudHookInstruction);
     REQUIRE(WordAt(patched, AmbientHookOffset) == AmbientHookInstruction);
+}
+
+TEST_CASE("Host redirect mods load only while the redirect is on", "[patch_manager]") {
+    PatchManagerTestContext context;
+    constexpr FileSys::PatchManager::BuildID TestBuildId{
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA,
+        0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x12, 0x34, 0x56, 0x78, 0x9A,
+    };
+    const auto exefs = Common::FS::GetEdenPath(Common::FS::EdenPath::LoadDir) /
+                       fmt::format("{:016X}", OtherTitleId) / "[Host redirect] Test server" /
+                       "exefs";
+    std::filesystem::create_directories(exefs);
+    WriteIps(exefs / fmt::format("{}.ips", Common::HexToString(TestBuildId)), BranchInstruction);
+
+    SCOPE_EXIT {
+        Settings::values.online_service_redirect = false;
+    };
+    Settings::values.online_service_redirect = false;
+    REQUIRE(PatchMain(context, TestBuildId, NopInstruction, "main", OtherTitleId) ==
+            NopInstruction);
+    Settings::values.online_service_redirect = true;
+    REQUIRE(PatchMain(context, TestBuildId, NopInstruction, "main", OtherTitleId) ==
+            BranchInstruction);
 }

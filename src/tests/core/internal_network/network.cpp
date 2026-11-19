@@ -162,6 +162,19 @@ TEST_CASE("Network::DefaultProtocol", "[core][sockets]") {
     SCOPE_EXIT {
         Common::Log::SetRingCapacity(0);
     };
+    // Markers around the sockets: the end one shows the ring caught this test's lines, so the
+    // check below can't pass on an empty ring, and only lines between them are checked.
+    const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::string begin = "protocol ip begin " + stamp;
+    const std::string end = "protocol ip end " + stamp;
+    LOG_INFO(Network, "{}", begin);
+    u64 after = 0;
+    for (const auto& line : Common::Log::ReadRing(0)) {
+        if (line.text.find(begin) != std::string::npos) {
+            after = line.sequence;
+        }
+    }
+    REQUIRE(after != 0);
 
     Network::Socket v4;
     CHECK(v4.Initialize(Network::Domain::INET, Network::Type::DGRAM, Network::Protocol::IP) ==
@@ -171,9 +184,16 @@ TEST_CASE("Network::DefaultProtocol", "[core][sockets]") {
     const bool has_v6 = v6.Initialize(Network::Domain::INET6, Network::Type::DGRAM,
                                       Network::Protocol::IP) == Network::Errno::SUCCESS;
     INFO("host IPv6 socket: " << has_v6);
+    LOG_INFO(Network, "{}", end);
 
-    for (const auto& line : Common::Log::ReadRing(0)) {
+    bool ended = false;
+    for (const auto& line : Common::Log::ReadRing(after)) {
+        if (line.text.find(end) != std::string::npos) {
+            ended = true;
+            break;
+        }
         INFO(line.text);
         CHECK(line.text.find("Unimplemented protocol") == std::string::npos);
     }
+    REQUIRE(ended);
 }

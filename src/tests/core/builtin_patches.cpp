@@ -22,6 +22,7 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/nso.h"
 #include "core/memory/cheat_engine.h"
@@ -1422,4 +1423,40 @@ TEST_CASE("Host redirect mods load only while the redirect is on", "[patch_manag
     Settings::values.online_service_redirect = true;
     REQUIRE(PatchMain(context, TestBuildId, NopInstruction, "main", OtherTitleId) ==
             BranchInstruction);
+}
+
+TEST_CASE("GetPatches lists a packed container update on the union provider path",
+          "[patch_manager]") {
+    PatchManagerTestContext context;
+    const auto update_raw =
+        std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>(0x100), "update.nca");
+
+    SECTION("No provider update and a packed update lists one PACKED entry") {
+        const auto patches = context.Manager().GetPatches(update_raw);
+        const auto it = std::find_if(patches.cbegin(), patches.cend(), [](const auto& patch) {
+            return patch.type == FileSys::PatchType::Update;
+        });
+        REQUIRE(it != patches.cend());
+        REQUIRE(it->name == "Update");
+        REQUIRE(it->version == "PACKED");
+        REQUIRE(it->source == FileSys::PatchSource::Packed);
+        REQUIRE(it->enabled);
+    }
+
+    SECTION("No packed update lists no update entry") {
+        const auto patches = context.Manager().GetPatches(nullptr);
+        REQUIRE(std::none_of(patches.cbegin(), patches.cend(), [](const auto& patch) {
+            return patch.type == FileSys::PatchType::Update;
+        }));
+    }
+
+    SECTION("A disabled packed update lists as disabled") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {"Update"};
+        const auto patches = context.Manager().GetPatches(update_raw);
+        const auto it = std::find_if(patches.cbegin(), patches.cend(), [](const auto& patch) {
+            return patch.type == FileSys::PatchType::Update;
+        });
+        REQUIRE(it != patches.cend());
+        REQUIRE_FALSE(it->enabled);
+    }
 }

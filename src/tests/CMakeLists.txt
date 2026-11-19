@@ -349,6 +349,10 @@ add_executable(profile_migration_tests
 target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
 add_test(NAME profile_migration_tests COMMAND profile_migration_tests)
 
+add_executable(ryujinx_save_link_tests common/ryujinx_save_link.cpp)
+target_link_libraries(ryujinx_save_link_tests PRIVATE common Catch2::Catch2WithMain)
+add_test(NAME ryujinx_save_link_tests COMMAND ryujinx_save_link_tests)
+
 add_executable(log_file_flush_tests
     common/log_file_flush.cpp)
 target_link_libraries(log_file_flush_tests PRIVATE common Catch2::Catch2WithMain)

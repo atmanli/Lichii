@@ -30,6 +30,8 @@ add_executable(tests
     core/nx2_gpu_only_regions.cpp
     core/nx2_video_ready.cpp
     core/general_channel.cpp
+    core/home_menu.cpp
+    core/native_home_bootstrap.cpp
     core/kernel_finish_termination.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
@@ -103,6 +105,8 @@ add_executable(tests
     core/ncz_io_guards.cpp
     core/ncz_container.cpp
     core/file_sys_parsers.cpp
+    core/nca_header_authentication.cpp
+    core/system_data_view.cpp
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
     video_core/ampere_logged_textures.cpp
@@ -183,6 +187,7 @@ add_executable(tests
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
     video_core/vulkan_buffer_oom.cpp
+    video_core/pipeline_layout_cache.cpp
     video_core/shader_precache.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
@@ -240,6 +245,7 @@ add_executable(tests
     core/core_timing.cpp
     core/host_wait_margin.cpp
     core/local_redirect.cpp
+    core/nextendo_bcat.cpp
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp

@@ -38,6 +38,7 @@
 #include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/loader.h"
+#include "tests/common/test_log.h"
 
 namespace {
 
@@ -411,7 +412,7 @@ TEST_CASE("NSP discovery skips unreadable NCA metadata", "[core][file_sys][nca_d
     if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
         SKIP("A header key is installed");
     }
-    Common::Log::Initialize();
+    Tests::InitializeTestLog();
     Common::Log::SetRingCapacity(1024);
     SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
 
@@ -760,7 +761,7 @@ TEST_CASE("XCI discovery skips unreadable normal-partition NCAs",
     if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
         SKIP("A header key is installed");
     }
-    Common::Log::Initialize();
+    Tests::InitializeTestLog();
     Common::Log::SetRingCapacity(256);
     SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
 

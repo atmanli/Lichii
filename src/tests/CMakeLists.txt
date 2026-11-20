@@ -98,6 +98,7 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     frontend_common/cloud_sync_zip.cpp
+    frontend_common/cloud_sync_save.cpp
     core/vfs_vector.cpp
     core/vfs_real.cpp
     core/kip_ini.cpp

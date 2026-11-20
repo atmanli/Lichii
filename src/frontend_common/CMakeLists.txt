@@ -20,7 +20,8 @@ add_library(frontend_common STATIC
     update_installer.h update_installer.cpp
     mod_manager.h mod_manager.cpp
     nx_archive.h nx_archive.cpp
-    cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp)
+    cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp
+    cloud_sync/save_archive.h cloud_sync/save_archive.cpp)
 
 target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
     OpenSSL::SSL OpenSSL::Crypto minizip::minizip)

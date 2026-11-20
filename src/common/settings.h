@@ -258,13 +258,11 @@ struct Values {
 
     // Cpu
     SwitchableSetting<CpuBackend, true> cpu_backend{linkage,
-#ifdef HAS_NCE
-                                                    CpuBackend::Nce,
-#else
                                                     CpuBackend::Dynarmic,
-#endif
                                                     CpuBackend::Dynarmic,
-#ifdef HAS_NCE
+#ifdef HAS_HYPERVISOR
+                                                    CpuBackend::Hypervisor,
+#elif defined(HAS_NCE)
                                                     CpuBackend::Nce,
 #else
                                                     CpuBackend::Dynarmic,
@@ -491,7 +489,7 @@ struct Values {
                                       Specialization::Default, true, false};
 
     SwitchableSetting<FrameGenType> frame_gen_type{linkage,
-                                                   FrameGenType::Fsr3,
+                                                   FrameGenType::OpticalFlow,
                                                    "frame_gen_type",
                                                    Category::Renderer,
                                                    Specialization::Default,
@@ -699,6 +697,9 @@ struct Values {
                                                          Specialization::Countable,
                                                          true,
                                                          true};
+
+    SwitchableSetting<bool> skip_unbuilt_mesh_draws{linkage, false, "skip_unbuilt_mesh_draws",
+                                                    Category::RendererAdvanced};
 
     // Precache shaders before the game starts: the compute programs in the game files are built on
     // the loading screen, so the driver's cache holds them before the game first uses them.
@@ -1182,7 +1183,7 @@ bool IsGPUFenceBehaviorBalanced();
 bool IsGPUFenceBehaviorAccurate();
 
 bool IsFastmemEnabled();
-void SetNceEnabled(bool is_64bit);
+void SetNceEnabled(bool enabled);
 bool IsNceEnabled();
 
 void SetCurrentProgramID(u64 program_id);

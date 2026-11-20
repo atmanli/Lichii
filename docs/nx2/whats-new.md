@@ -8,4 +8,4 @@ Lichii's What's New dialog reads notes embedded in the binary as Qt resources. I
 
 Each change has three plain-text string fields: `icon`, `title`, and `body`. Use one of these icon names: `cpu`, `clock`, `apps`, `layers`, `bug`, `gamepad`, `globe`, `download`, or `sparkles`.
 
-Leave **Include What's New notes** off for test builds or when the staged notes don't match. If the current build has no matching notes, the dialog says so and still offers older releases. It never shows the staged draft or another build's notes as the current release.
+Leave **Include What's New notes** off for test builds or when the staged notes don't match. A build without its own highlights is recorded without opening a dialog. **Help → What's New in Lichii** can still show the staged notes as a clearly labelled next-release preview and lets you browse older releases. Preview notes are never labelled as the installed build's notes.

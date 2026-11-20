@@ -120,11 +120,12 @@ quint32 WhatsNewDialog::ParseBuildTag(std::string_view tag) {
 }
 
 WhatsNewDialog::StartupAction WhatsNewDialog::OnStartup(quint32 build, quint32 last_seen,
-                                                        bool first_start, bool launching_content) {
+                                                        bool first_start, bool launching_content,
+                                                        bool include_pending) {
     if (!build || build == last_seen) {
         return StartupAction::None;
     }
-    if (first_start) {
+    if (first_start || LoadReleases(build, {}, include_pending).first().build != build) {
         return StartupAction::Remember;
     }
     return launching_content ? StartupAction::None : StartupAction::Show;
@@ -156,14 +157,20 @@ QList<WhatsNewDialog::Release> WhatsNewDialog::LoadReleases(quint32 build, QDate
         if (number <= 0 || !release_date.isValid() || (build && quint32(number) > build)) {
             continue;
         }
-        result.append(read(object, quint32(number), release_date));
+        auto release = read(object, quint32(number), release_date);
+        if (!release.changes.isEmpty()) {
+            result.append(std::move(release));
+        }
     }
     std::ranges::sort(result, std::greater{}, &Release::build);
-    if (build && (result.isEmpty() || result.first().build != build)) {
-        const auto object = include_pending
-                                ? ReadNotes(QStringLiteral(":/whats-new/next.json")).object()
-                                : QJsonObject{};
-        result.prepend(read(object, build, date));
+    if (result.isEmpty() || result.first().build != build) {
+        const bool preview = !build || !include_pending;
+        auto pending = read(ReadNotes(QStringLiteral(":/whats-new/next.json")).object(),
+                            preview ? 0 : build, preview ? QDate{} : date);
+        pending.preview = preview;
+        if (!pending.changes.isEmpty()) {
+            result.prepend(std::move(pending));
+        }
     }
     if (result.isEmpty()) {
         result.append(Release{});
@@ -296,11 +303,12 @@ void WhatsNewDialog::ShowRelease(qsizetype index) {
     const auto& release = releases[index];
     const auto build = release.build ? tr("Lichii build %1").arg(release.build) : tr("Lichii");
     metadata->setText(
-        release.date.isValid()
+        release.preview ? tr("Coming in the next release (preview)")
+        : release.date.isValid()
             ? tr("%1 · %2").arg(build,
                                 locale().toString(release.date, QStringLiteral("MMM d, yyyy")))
             : build);
-    summary->setText(release.summary.isEmpty() ? tr("No highlights were bundled for this build.")
+    summary->setText(release.changes.isEmpty() ? tr("No release highlights were bundled.")
                                                : release.summary);
 
     while (auto* const item = highlights->takeAt(0)) {

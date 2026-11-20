@@ -23,7 +23,7 @@ public:
 
     [[nodiscard]] static quint32 ParseBuildTag(std::string_view tag);
     [[nodiscard]] static StartupAction OnStartup(quint32 build, quint32 last_seen, bool first_start,
-                                                 bool launching_content);
+                                                 bool launching_content, bool include_pending);
 
 private:
     struct Change {
@@ -37,6 +37,7 @@ private:
         QDate date;
         QString summary;
         QList<Change> changes;
+        bool preview{};
     };
 
     static QList<Release> LoadReleases(quint32 build, QDate date, bool include_pending);

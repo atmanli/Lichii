@@ -941,11 +941,13 @@ std::optional<NupContainer::ProgramSelection> NupContainer::SelectProgram() {
                 GetSwitch1ApplicationID(base_id) == executable_id + 1) {
                 return select_base();
             }
-            if ((!have_base_metadata || !base_metadata.IsSwitch2()) &&
-                update_metadata.IsSwitch2() && (base_id >> 56) == 0x01 &&
-                base_id == GetBaseTitleID(base_id) && (executable_id >> 56) == 0x04 &&
-                executable_id == GetBaseTitleIDWithProgramIndex(executable_id, 1)) {
-                if (GetSwitch1ApplicationID(executable_id) != base_id + 1) {
+            if (update_metadata.IsSwitch2()) {
+                const bool matching_edition =
+                    (!have_base_metadata || !base_metadata.IsSwitch2()) &&
+                    (base_id >> 56) == 0x01 && base_id == GetBaseTitleID(base_id) &&
+                    (executable_id >> 56) == 0x04 &&
+                    GetSwitch1ApplicationID(executable_id) == base_id + 1;
+                if (executable_id != base_id && !matching_edition) {
                     return std::nullopt;
                 }
                 program_id = executable_id;

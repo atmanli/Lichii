@@ -27,12 +27,17 @@ void WhatsNewTest::startup() {
          {"", "build-", "build-0", "build-+1", "build-42 ", "build-4294967296", "dev-401"}) {
         QCOMPARE(WhatsNewDialog::ParseBuildTag(tag), 0u);
     }
-    QCOMPARE(WhatsNewDialog::OnStartup(0, 341, false, false), Action::None);
-    QCOMPARE(WhatsNewDialog::OnStartup(401, 0, true, false), Action::Remember);
-    QCOMPARE(WhatsNewDialog::OnStartup(401, 0, true, true), Action::Remember);
-    QCOMPARE(WhatsNewDialog::OnStartup(401, 341, false, true), Action::None);
-    QCOMPARE(WhatsNewDialog::OnStartup(401, 341, false, false), Action::Show);
-    QCOMPARE(WhatsNewDialog::OnStartup(401, 401, false, false), Action::None);
+    constexpr auto unpublished = 4000000000u;
+    QCOMPARE(WhatsNewDialog::OnStartup(0, 341, false, false, false), Action::None);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 0, true, false, true), Action::Remember);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 0, true, true, true), Action::Remember);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 341, false, true, true), Action::None);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 341, false, false, true), Action::Show);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 341, false, false, false), Action::Remember);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, 341, false, true, false), Action::Remember);
+    QCOMPARE(WhatsNewDialog::OnStartup(unpublished, unpublished, false, false, false),
+             Action::None);
+    QCOMPARE(WhatsNewDialog::OnStartup(341, 316, false, false, false), Action::Show);
 }
 
 void WhatsNewTest::navigateAndDismiss() {
@@ -83,11 +88,17 @@ void WhatsNewTest::navigateAndDismiss() {
 void WhatsNewTest::onlyShowSelectedNotes() {
     const QDate build_date(2026, 11, 20);
     const auto badge = QStringLiteral("WhatsNewBadge");
-    WhatsNewDialog without_notes(4000000000u, build_date, false, nullptr);
-    QVERIFY(without_notes.findChildren<QLabel*>(badge).isEmpty());
-    const auto* const metadata =
-        without_notes.findChild<QLabel*>(QStringLiteral("WhatsNewMetadata"));
-    QVERIFY(metadata->text().contains(QStringLiteral("4000000000")));
+    WhatsNewDialog preview(4000000000u, build_date, false, nullptr);
+    QVERIFY(!preview.findChildren<QLabel*>(badge).isEmpty());
+    const auto* const metadata = preview.findChild<QLabel*>(QStringLiteral("WhatsNewMetadata"));
+    const auto preview_label = QStringLiteral("Coming in the next release (preview)");
+    QCOMPARE(metadata->text(), preview_label);
+    auto* const previous = preview.findChild<QToolButton*>(QStringLiteral("WhatsNewPrevious"));
+    QVERIFY(previous->isEnabled());
+    previous->click();
+    QVERIFY(metadata->text().startsWith(QStringLiteral("Lichii build ")));
+    preview.findChild<QToolButton*>(QStringLiteral("WhatsNewNext"))->click();
+    QCOMPARE(metadata->text(), preview_label);
 
     WhatsNewDialog archived(316, build_date, true, nullptr);
     QVERIFY(!archived.findChildren<QLabel*>(badge).isEmpty());

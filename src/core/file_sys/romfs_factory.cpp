@@ -69,7 +69,7 @@ VirtualFile RomFSFactory::OpenPatchedRomFSWithProgramIndex(u64 title_id, u8 prog
     const auto res_title_id = GetBaseTitleIDWithProgramIndex(title_id, program_index);
 
     auto romfs = OpenPatchedRomFS(res_title_id, type);
-    if (romfs == nullptr && !updatable &&
+    if (romfs == nullptr && file != nullptr && !updatable &&
         (program_index == 0 || (type == ContentRecordType::Program && res_title_id == title_id))) {
         // NUP containers and loose dumps aren't in the content provider: use the loader's RomFS.
         return program_index == 0 ? file : OpenCurrentProcess(title_id);

@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 #include <openssl/evp.h>
 
+#include "common/cpu_features.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/file_sys/common_funcs.h"
@@ -29,12 +30,17 @@
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/frontend/emu_window.h"
+#include "core/frontend/graphics_context.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/deconstructed_rom_directory.h"
 #include "core/loader/nup.h"
+#include "tests/common/host_memory_test_access.h"
 #include "tests/core/system_test_context.h"
 
 namespace {
@@ -1650,6 +1656,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     bool base_switch2 = true;
     bool update_switch2 = false;
     bool foreign_update = false;
+    u64 native_update_id = edition_program;
     std::optional<u64> embedded_id;
     bool embedded_switch2 = true;
     bool have_embedded_romfs = true;
@@ -1670,6 +1677,17 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
         base_switch2 = false;
         update_switch2 = true;
         foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native base does not claim a foreign native update") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native update for a different program index cannot replace the base") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 1;
     }
     SECTION("legacy update supersedes its legacy base") {
         base_switch2 = false;
@@ -1720,8 +1738,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
                     base_switch2, 'B');
         Put(root / "base/romfs/base.bin", "base");
     }
-    const auto update_program_id =
-        update_switch2 ? edition_program + (foreign_update ? 0x2000 : 0) : legacy_program;
+    const auto update_program_id = update_switch2 ? native_update_id : legacy_program;
     write_exefs(root / "updates/65536/exefs", update_program_id, update_switch2, 'U');
     if (embedded_id) {
         write_exefs(root / "updates/65536/program1/exefs", *embedded_id, embedded_switch2, 'E');
@@ -1792,6 +1809,37 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     }
 }
 
+TEST_CASE("The own-index fallback does not mount mods without a RomFS", "[boot-inputs]") {
+    TempDir t;
+    constexpr u64 program_id = TitleId + 1;
+    const auto exefs = t.path / "Game/exefs";
+    Put(exefs / "main", "main");
+    Put(exefs / "main.npdm", BootNpdm(program_id, true));
+
+    using Common::FS::EdenPath;
+    const auto old_load = Common::FS::GetEdenPath(EdenPath::LoadDir);
+    SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::LoadDir, old_load); };
+    const auto load_root = t.path / "load";
+    Put(load_root / fmt::format("{:016X}", program_id) / "Synthetic/romfs/mod.bin", "mod");
+    Common::FS::SetEdenPath(EdenPath::LoadDir, load_root);
+    ScopedSystemTestContext context;
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    Core::System system;
+    system.SetFilesystem(vfs);
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    auto& controller = system.GetFileSystemController();
+    controller.CreateFactories(*vfs);
+
+    Loader::AppLoader_DeconstructedRomDirectory loader{
+        Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(exefs / "main"))};
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::ErrorNoRomFS);
+    const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
+    constexpr auto type = FileSys::ContentRecordType::Program;
+    REQUIRE(factory.OpenCurrentProcess(program_id) != nullptr);
+    CHECK_FALSE(factory.OpenPatchedRomFSWithProgramIndex(program_id, 1, type));
+}
+
 TEST_CASE("Loose Edition folders read program, matching update and base data", "[boot-inputs]") {
     TempDir t;
     const auto root = t.path / "Game";
@@ -1802,6 +1850,13 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool boot_edition = true;
     bool native_npdm = true;
     bool have_base = true;
+    bool root_main = false;
+    bool base_romfs_image = false;
+    bool have_base_data = true;
+    bool have_foreign_base = false;
+    std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
+    auto base = root / "base";
+    auto base_romfs = fs::path{};
     u64 program_id = edition_program;
 
     SECTION("direct program1") {}
@@ -1819,12 +1874,81 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     SECTION("a standalone native program does not require a base") {
         have_base = false;
     }
+    SECTION("a matching native program keeps the root base RomFS") {
+        base = root;
+    }
+    SECTION("a foreign program1 cannot replace the root ExeFS") {
+        base = root;
+        program_id += 0x2000;
+        boot_edition = false;
+    }
+    SECTION("a matching native program supersedes a bare root main") {
+        base = root;
+        root_main = true;
+    }
+    SECTION("a bare root main can use shared RomFS from the base package") {
+        base = root;
+        root_main = true;
+        base_romfs = root / "base/romfs";
+    }
+    SECTION("a root executable prefers its own RomFS over a foreign base's directory") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+    }
+    SECTION("a root executable without data does not borrow a foreign base's RomFS") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+        have_base_data = false;
+    }
+    SECTION("a matching native program layers over a file-backed base RomFS") {
+        base = root;
+        root_main = true;
+        base_romfs_image = true;
+    }
+    SECTION("a native root main cannot be replaced by another program index") {
+        base = root;
+        root_main = true;
+        base_npdm = BootNpdm(TitleId + 2, true);
+        boot_edition = false;
+    }
+    SECTION("a bare root main with no NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm.reset();
+        boot_edition = false;
+    }
+    SECTION("a bare root main with an empty NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm = "";
+        boot_edition = false;
+    }
 
-    const auto base = root / "base";
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    const auto base_exefs = root_main ? base : base / "exefs";
     if (have_base) {
-        Put(base / "exefs/main", "legacy");
-        Put(base / "exefs/main.npdm", BootNpdm(legacy_program, false));
-        Put(base / "romfs/base.bin", "base data");
+        Put(base_exefs / "main", "legacy");
+        if (base_npdm) {
+            Put(base_exefs / "main.npdm", *base_npdm);
+        }
+        if (base_romfs_image) {
+            const auto data = t.path / "base-image";
+            Put(data / "base.bin", "base data");
+            Put(data / "shared.bin", "base override");
+            const auto image = FileSys::CreateRomFS(
+                vfs->OpenDirectory(Common::FS::PathToUTF8String(data), FileSys::OpenMode::Read));
+            REQUIRE(image != nullptr);
+            Put(base_exefs / "data.romfs", Read(image));
+        } else if (have_base_data) {
+            Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
+        }
+    }
+    if (have_foreign_base) {
+        Put(root / "base/exefs/main", "foreign");
+        Put(root / "base/exefs/main.npdm", BootNpdm(legacy_program + 0x2000, false));
+        Put(root / "base/romfs/base.bin", "foreign data");
     }
     Put(version / "romfs/update.bin", "update data");
     Put(version / "romfs/shared.bin", "legacy data");
@@ -1832,15 +1956,28 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     Put(edition / "exefs/main.npdm", BootNpdm(program_id, native_npdm));
     Put(edition / "romfs/shared.bin", "edition data");
 
-    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
     const auto native = Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(root));
     REQUIRE(native != nullptr);
     CHECK(Read(native) == (boot_edition ? "edition" : "legacy"));
     if (have_base) {
         const auto explicit_legacy =
-            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base / "exefs/main"));
+            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base_exefs / "main"));
         REQUIRE(explicit_legacy != nullptr);
         CHECK(Read(explicit_legacy) == "legacy");
+    }
+    if (root_main && !boot_edition) {
+        const auto explicit_edition = Core::GetGameFileFromPath(
+            vfs, Common::FS::PathToUTF8String(edition / "exefs/main"));
+        REQUIRE(explicit_edition != nullptr);
+        Loader::AppLoader_DeconstructedRomDirectory loader{explicit_edition};
+        FileSys::VirtualFile romfs;
+        REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+        const auto tree = FileSys::ExtractRomFS(romfs);
+        REQUIRE(tree != nullptr);
+        REQUIRE(tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(tree->GetFile("update.bin")) == "update data");
+        CHECK_FALSE(tree->GetFile("base.bin"));
+        return;
     }
 
     Loader::AppLoader_DeconstructedRomDirectory loader{native};
@@ -1848,7 +1985,11 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
     const auto tree = FileSys::ExtractRomFS(romfs);
     REQUIRE(tree != nullptr);
-    CHECK(static_cast<bool>(tree->GetFile("base.bin")) == have_base);
+    const auto base_member = tree->GetFile("base.bin");
+    CHECK(static_cast<bool>(base_member) == (have_base && have_base_data));
+    if (base_member) {
+        CHECK(Read(base_member) == "base data");
+    }
     if (boot_edition) {
         REQUIRE(tree->GetFile("update.bin") != nullptr);
         CHECK(Read(tree->GetFile("update.bin")) == "update data");
@@ -1858,4 +1999,37 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         CHECK_FALSE(tree->GetFile("update.bin"));
         CHECK_FALSE(tree->GetFile("shared.bin"));
     }
+}
+
+TEST_CASE("A fresh System resolves its boot file before kernel allocation", "[boot-inputs]") {
+    struct TestWindow final : Core::Frontend::EmuWindow {
+        std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override {
+            FAIL("Allocation failure must not initialize the renderer");
+            return {};
+        }
+        bool IsShown() const override {
+            return false;
+        }
+    } window;
+    const bool previous_switch2 = Settings::CurrentProgramIsSwitch2();
+    const auto previous_frequency = Common::g_wall_clock.GetGuestCNTFRQ();
+    const auto previous_global = Settings::values.memory_layout_mode.UsingGlobal();
+    SCOPE_EXIT {
+        Settings::SetCurrentProgramIsSwitch2(previous_switch2);
+        Common::g_wall_clock.SetGuestCNTFRQ(previous_frequency);
+        Settings::values.memory_layout_mode.SetGlobal(previous_global);
+        Kernel::KSystemControl::SetApplicationProgramId(0);
+    };
+    Settings::values.memory_layout_mode.SetGlobal(false);
+    ScopedSystemTestContext context;
+    TempDir t;
+    Put(t.path / "main", "main");
+    Put(t.path / "main.npdm", BootNpdm(TitleId + 1, true));
+    Common::HostMemoryTestAccess allocations;
+    Core::System system;
+    Service::AM::FrontendAppletParameters params{};
+    params.launch_type = Service::AM::LaunchType::ApplicationInitiated;
+    CHECK(system.Load(window, Common::FS::PathToUTF8String(t.path / "main"), params) ==
+          Core::SystemResultStatus::ErrorMemoryAllocation);
+    CHECK(Settings::CurrentProgramIsSwitch2());
 }

@@ -28,6 +28,7 @@
 #include "common/nextendo_game_catalog.h"
 #include "common/settings_enums.h"
 #include "core/file_sys/nup_writer.h"
+#include "frontend_common/cloud_sync/sync_engine.h"
 #include "frontend_common/content_manager.h"
 #include "input_common/drivers/tas_input.h"
 #include "qt_common/config/qt_config.h"
@@ -58,6 +59,7 @@ class GRenderWindow;
 class LoadingScreen;
 class OverlayDialog;
 class BugReportDialog;
+class CloudSyncController;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
@@ -593,6 +595,9 @@ private:
     QTimer nextendo_social_timer;
     QFutureWatcher<void> nextendo_social_watcher;
     QFutureWatcher<std::optional<Common::Nextendo::ProfilePull>> nextendo_profile_watcher;
+    CloudSyncController* cloud_sync = nullptr;
+    // The title booted with cloud sync, whose saves are pushed when it stops.
+    std::optional<FrontendCommon::CloudSync::Title> cloud_sync_title;
     Common::UUID nextendo_profile_user;
     // A forced pull that has to wait for the game to stop or for the running pull.
     bool nextendo_profile_force{};

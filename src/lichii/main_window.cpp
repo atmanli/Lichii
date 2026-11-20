@@ -46,6 +46,7 @@
 #include "ryujinx_dialog.h"
 #include "set_play_time_dialog.h"
 #include "util/util.h"
+#include "lichii/cloud_sync_controller.h"
 #include "lichii/game/game_list.h"
 #include "lichii/mod_store/mod_store_dialog.h"
 #include "lichii/nup_dialogs.h"
@@ -600,7 +601,10 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 if (pull && Common::Nextendo::OnlinePlayActive() &&
                     Settings::values.nextendo_sync_profile.GetValue()) {
                     // A game that booted meanwhile reads the profile: write it once the game stops.
+                    // Nor while a cloud sync may be changing the profiles.
                     if (QtCommon::system->IsPoweredOn() ||
+                        FrontendCommon::CloudSync::SyncRunning() ||
+                        (cloud_sync && cloud_sync->Busy()) ||
                         !WriteNextendoProfile(QtCommon::system->GetProfileManager(),
                                               nextendo_profile_user, *pull)) {
                         nextendo_profile_force = true;
@@ -1805,6 +1809,26 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::GameChosen, this, &MainWindow::OnGameListLoadFile);
     connect(game_list, &GameList::OpenDirectory, this, &MainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &MainWindow::OnGameListOpenFolder);
+    cloud_sync = new CloudSyncController(this);
+    cloud_sync->SetTitleSource([this] {
+        std::vector<FrontendCommon::CloudSync::Title> titles;
+        for (const auto& [program_id, name] : game_list->GameTitles()) {
+            titles.push_back({program_id, name.toStdString()});
+        }
+        return titles;
+    });
+    connect(cloud_sync, &CloudSyncController::StatusMessage, this,
+            [this](const QString& message) { statusBar()->showMessage(message, 15000); });
+    // A Nextendo profile pulled during the sync was left for now.
+    connect(cloud_sync, &CloudSyncController::BusyChanged, this, [this](bool busy) {
+        if (!busy) {
+            SyncNextendoProfile(false);
+        }
+    });
+    connect(game_list, &GameList::SyncSaveRequested, this,
+            [this](u64 program_id, const QString& title) {
+                cloud_sync->SyncTitle({program_id, title.toStdString()});
+            });
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
             [this](u64 program_id) { QtCommon::Path::OpenShaderCache(program_id, this); });
     connect(game_list, &GameList::RemoveInstalledEntryRequested, this,
@@ -2442,6 +2466,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         boot_in_progress = false;
         LOG_INFO(Frontend, "Launch finished: elapsed_ms={} running={}", boot_timer.elapsed(),
                  emulation_running);
+        if (!emulation_running && cloud_sync_title) {
+            cloud_sync->GuestStopped(*cloud_sync_title, false);
+            cloud_sync_title.reset();
+        }
         if (!emulation_running && !close_pending) {
             game_list->SetScanEnabled(true);
             game_list->PopulateAsync(UISettings::values.game_dirs);
@@ -2503,6 +2531,22 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
+
+    // No cloud sync touches the title (or, while it runs, the profiles) from here on; the saves
+    // changed on Drive come in first. A cancelled or failed pull still boots. Before the user
+    // picker, which reads the profiles a sync may be changing.
+    {
+        std::string name = QtCommon::Game::ReadCustomTitle(title_id);
+        if (name.empty() && loader) {
+            loader->ReadTitle(name);
+        }
+        cloud_sync_title = FrontendCommon::CloudSync::Title{
+            title_id, name.empty() ? fmt::format("{:016X}", title_id) : name};
+        cloud_sync->PrepareBoot(*cloud_sync_title);
+        if (close_pending) {
+            return;
+        }
+    }
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
         const Core::Frontend::ProfileSelectParameters parameters{
@@ -3003,6 +3047,10 @@ void MainWindow::OnEmulationStopped() {
 
     emulation_running = false;
     nextendo_version_check.reset();
+    if (cloud_sync_title) {
+        cloud_sync->GuestStopped(*cloud_sync_title, true);
+        cloud_sync_title.reset();
+    }
 
     nextendo_social_timer.stop();
     if (Common::Nextendo::OnlinePlayActive()) {
@@ -5887,6 +5935,7 @@ void MainWindow::SyncNextendoProfile(bool force) {
     nextendo_profile_force |= force;
     if (!Common::Nextendo::OnlinePlayActive() ||
         !Settings::values.nextendo_sync_profile.GetValue() || QtCommon::system->IsPoweredOn() ||
+        FrontendCommon::CloudSync::SyncRunning() || (cloud_sync && cloud_sync->Busy()) ||
         nextendo_profile_watcher.isRunning()) {
         return;
     }
@@ -6725,6 +6774,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
     LOG_INFO(Frontend, "Closing frontend after emulation cleanup");
+    cloud_sync->Shutdown();
 
     UpdateUISettings();
     game_list->SaveInterfaceLayout();

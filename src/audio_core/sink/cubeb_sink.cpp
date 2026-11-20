@@ -89,12 +89,15 @@ public:
             return;
         }
         StopLocked();
+        backend_open = false;
         cubeb_stream_destroy(stream_backend);
         stream_backend = nullptr;
     }
 
+    /// Callers outside backend_mutex read this while the watchdog replaces the backend: it reads
+    /// backend_open, published under the mutex, not the pointer.
     bool IsReady() const override {
-        return stream_backend != nullptr && !failed;
+        return backend_open && !failed;
     }
 
     /**
@@ -105,7 +108,14 @@ public:
      */
     void Start(bool resume = false) override {
         std::scoped_lock lk{backend_mutex};
-        if (!IsReady() || !paused) {
+        if (failed || !paused) {
+            return;
+        }
+        if (!stream_backend) {
+            // Being reopened after a lost device: the watchdog starts it once it is open again.
+            if (device_lost) {
+                paused = false;
+            }
             return;
         }
 
@@ -160,6 +170,7 @@ public:
             LOG_WARNING(Audio_Sink, "cubeb stream {}: {}, reopening it", name, why);
         }
         if (stream_backend) {
+            backend_open = false;
             cubeb_stream_stop(stream_backend);
             cubeb_stream_destroy(stream_backend);
             stream_backend = nullptr;
@@ -193,12 +204,14 @@ private:
     }
 
     void StopLocked() {
-        if (!stream_backend || paused) {
+        if (paused) {
             return;
         }
 
+        // Recorded even with no backend (a reopen that failed): the watchdog must not start the
+        // stream again when it reopens it.
         SignalPause();
-        if (cubeb_stream_stop(stream_backend) != CUBEB_OK) {
+        if (stream_backend && cubeb_stream_stop(stream_backend) != CUBEB_OK) {
             device_lost = true;
             LOG_ERROR(Audio_Sink, "Error stopping cubeb stream {}, it will be reopened", name);
         }
@@ -242,13 +255,14 @@ private:
         }
 
         auto init_error{0};
+        cubeb_stream* opened{};
         if (type == StreamType::In) {
-            init_error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), input_device,
+            init_error = cubeb_stream_init(ctx, &opened, name.c_str(), input_device,
                                            &params, output_device, nullptr, minimum_latency,
                                            &CubebSinkStream::DataCallback,
                                            &CubebSinkStream::StateCallback, this);
         } else {
-            init_error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), input_device,
+            init_error = cubeb_stream_init(ctx, &opened, name.c_str(), input_device,
                                            nullptr, output_device, &params, minimum_latency,
                                            &CubebSinkStream::DataCallback,
                                            &CubebSinkStream::StateCallback, this);
@@ -258,9 +272,10 @@ private:
             if (!reopen_logged) {
                 LOG_CRITICAL(Audio_Sink, "Error initializing cubeb stream, error: {}", init_error);
             }
-            stream_backend = nullptr;
             return false;
         }
+        stream_backend = opened;
+        backend_open = true;
         return true;
     }
 
@@ -317,6 +332,7 @@ private:
     cubeb* ctx{};
     /// Cubeb stream backend
     cubeb_stream* stream_backend{};
+    std::atomic<bool> backend_open{}; ///< stream_backend is set; IsReady reads this
     /// The devices the backend stream is opened on (null: the default one)
     cubeb_devid output_device{};
     cubeb_devid input_device{};

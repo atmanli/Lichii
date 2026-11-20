@@ -84,6 +84,7 @@ import io.github.zortos293.lichii.model.EmulationViewModel
 import io.github.zortos293.lichii.model.Game
 import io.github.zortos293.lichii.overlay.model.OverlayControl
 import io.github.zortos293.lichii.overlay.model.OverlayLayout
+import io.github.zortos293.lichii.utils.CloudSyncManager
 import io.github.zortos293.lichii.utils.DirectoryInitialization
 import io.github.zortos293.lichii.utils.FileUtil
 import io.github.zortos293.lichii.utils.GameHelper
@@ -142,6 +143,10 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private var isCustomSettingsIntent = false
     private var isStoppingForRomSwap = false
     private var deferGameSetupUntilStopCompletes = false
+
+    // The game boots once nothing syncs its saves and the cloud sync pull is done.
+    private var cloudSyncBoot: CloudSyncManager.Boot? = null
+    private var cloudSyncReady = false
 
     private var perfStatsRunnable: Runnable? = null
     private var socRunnable: Runnable? = null
@@ -361,7 +366,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         emulationState = EmulationState(game!!.path) {
             return@EmulationState driverViewModel.isInteractionAllowed.value &&
-                !isStoppingForRomSwap
+                !isStoppingForRomSwap && cloudSyncReady
+        }
+        cloudSyncBoot = CloudSyncManager.prepareBoot(requireActivity(), game!!) {
+            cloudSyncReady = true
+            runEmulationIfAllowed()
         }
     }
 
@@ -1032,18 +1041,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
 
         driverViewModel.isInteractionAllowed.collect(viewLifecycleOwner) {
-            if (it &&
-                !isStoppingForRomSwap &&
-                !NativeLibrary.isRunning() &&
-                !NativeLibrary.isPaused()
-            ) {
-                if (!DirectoryInitialization.areDirectoriesReady) {
-                    DirectoryInitialization.start()
-                }
-
-                updateScreenLayout()
-
-                emulationState.run(emulationActivity!!.isActivityRecreated)
+            if (it) {
+                runEmulationIfAllowed()
             }
         }
 
@@ -1468,6 +1467,37 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             }
         }
         super.onPause()
+    }
+
+    private fun runEmulationIfAllowed() {
+        if (_binding == null ||
+            !driverViewModel.isInteractionAllowed.value ||
+            !cloudSyncReady ||
+            isStoppingForRomSwap ||
+            NativeLibrary.isRunning() ||
+            NativeLibrary.isPaused()
+        ) {
+            return
+        }
+        if (!DirectoryInitialization.areDirectoriesReady) {
+            DirectoryInitialization.start()
+        }
+
+        updateScreenLayout()
+
+        emulationState.run(emulationActivity!!.isActivityRecreated)
+    }
+
+    override fun onDestroy() {
+        // A game that never started: its emulation run would have ended the cloud sync guest.
+        cloudSyncBoot?.let { boot ->
+            val started = this::emulationState.isInitialized &&
+                runCatching { emulationState.emulationThread }.isSuccess
+            if (!started) {
+                CloudSyncManager.abandonBoot(boot)
+            }
+        }
+        super.onDestroy()
     }
 
     override fun onDestroyView() {

@@ -45,6 +45,7 @@ import io.github.zortos293.lichii.model.InstallableProperty
 import io.github.zortos293.lichii.model.SubMenuPropertySecondaryAction
 import io.github.zortos293.lichii.model.SubmenuProperty
 import io.github.zortos293.lichii.model.TaskState
+import io.github.zortos293.lichii.utils.CloudSyncManager
 import io.github.zortos293.lichii.utils.DirectoryInitialization
 import io.github.zortos293.lichii.utils.FileUtil
 import io.github.zortos293.lichii.utils.GameHelper
@@ -437,6 +438,17 @@ class GamePropertiesFragment : Fragment() {
                         }
                     )
                 )
+
+                if (CloudSyncManager.isEnabled()) {
+                    add(
+                        SubmenuProperty(
+                            R.string.cloud_sync_sync_save,
+                            R.string.cloud_sync_sync_save_description,
+                            R.drawable.ic_refresh,
+                            action = { CloudSyncManager.syncTitle(args.game) }
+                        )
+                    )
+                }
 
                 val saveDirFile = File(args.game.saveDir)
                 if (saveDirFile.exists()) {

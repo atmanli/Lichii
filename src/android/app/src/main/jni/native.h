@@ -44,7 +44,8 @@ public:
     void UnPauseEmulation();
     void HaltEmulation();
     void RunEmulation();
-    void ShutdownEmulation();
+    // True when it hands over to the next program, which boots right away.
+    bool ShutdownEmulation();
     void RequestDiskShaderCacheReload(u64 program_id);
 
     const Core::PerfStatsResults& PerfStats();

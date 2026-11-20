@@ -91,6 +91,7 @@ extern "C" {
 #include "hid_core/hid_types.h"
 #include "input_common/drivers/virtual_amiibo.h"
 #include "jni/native.h"
+#include "jni/native_cloud_sync.h"
 #include "video_core/frame_gen/lossless_dll.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
@@ -354,10 +355,11 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
     return Core::SystemResultStatus::Success;
 }
 
-void EmulationSession::ShutdownEmulation() {
+bool EmulationSession::ShutdownEmulation() {
     std::scoped_lock lock(m_mutex);
 
-    if (m_next_program_index != -1) {
+    const bool program_changes = m_next_program_index != -1;
+    if (program_changes) {
         ChangeProgram(m_next_program_index);
         m_next_program_index = -1;
     }
@@ -377,11 +379,12 @@ void EmulationSession::ShutdownEmulation() {
         m_load_result = Core::SystemResultStatus::ErrorNotInitialized;
         m_window.reset();
         OnEmulationStopped(Core::SystemResultStatus::Success);
-        return;
+        return program_changes;
     }
 
     // Tear down the render window.
     m_window.reset();
+    return program_changes;
 }
 
 void EmulationSession::PauseEmulation() {
@@ -526,11 +529,15 @@ static Core::SystemResultStatus RunEmulation(const std::string& filepath,
 
     if (filepath.empty()) {
         LOG_CRITICAL(Frontend, "failed to load: filepath empty!");
+        AndroidCloudSync::GuestStopped();
         return Core::SystemResultStatus::ErrorLoader;
     }
 
     SCOPE_EXIT {
-        EmulationSession::GetInstance().ShutdownEmulation();
+        // A program change boots the next program right away: the guest goes on.
+        if (!EmulationSession::GetInstance().ShutdownEmulation()) {
+            AndroidCloudSync::GuestStopped();
+        }
     };
 
     jconst result = EmulationSession::GetInstance().InitializeEmulation(filepath, program_index,
@@ -538,6 +545,7 @@ static Core::SystemResultStatus RunEmulation(const std::string& filepath,
     if (result != Core::SystemResultStatus::Success) {
         return result;
     }
+    AndroidCloudSync::GuestLoaded();
 
     EmulationSession::GetInstance().RunEmulation();
 

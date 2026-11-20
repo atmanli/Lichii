@@ -19,15 +19,20 @@ add_library(frontend_common STATIC
     settings_generator.h settings_generator.cpp
     update_installer.h update_installer.cpp
     mod_manager.h mod_manager.cpp
-    nx_archive.h nx_archive.cpp)
+    nx_archive.h nx_archive.cpp
+    cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp)
+
+target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
+    OpenSSL::SSL OpenSSL::Crypto minizip::minizip)
+
+# The build-time Drive sync OAuth client, in a generated header so changing it rebuilds one file.
+configure_file(cloud_sync/build_client.h.in frontend_common/cloud_sync/build_client.h @ONLY)
+target_include_directories(frontend_common PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 if (ENABLE_UPDATE_CHECKER)
-    target_link_libraries(frontend_common PRIVATE httplib::httplib)
-    target_link_libraries(frontend_common PRIVATE nlohmann_json::nlohmann_json)
     target_sources(frontend_common PRIVATE
         update_checker.cpp
         update_checker.h)
-    target_link_libraries(frontend_common PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
 create_target_directory_groups(frontend_common)

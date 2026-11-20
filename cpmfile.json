@@ -382,7 +382,8 @@
         "options": [
             "ZLIB_BUILD_SHARED OFF",
             "ZLIB_BUILD_TESTING OFF",
-            "ZLIB_INSTALL OFF"
+            "ZLIB_INSTALL OFF",
+            "ZLIB_BUILD_MINIZIP ON"
         ],
         "package": "ZLIB",
         "repo": "madler/zlib",

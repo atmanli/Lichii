@@ -112,6 +112,12 @@ Result FlushDataCache(AddressType addr, u64 size) {
 }
 
 constexpr Common::MemoryPermission ConvertToMemoryPermission(KMemoryPermission perm) {
+#ifdef HAS_HYPERVISOR
+    if (True(perm & KMemoryPermission::NotMapped)) {
+        return {};
+    }
+    perm &= KMemoryPermission::UserMask;
+#endif
     Common::MemoryPermission perms{};
     if (True(perm & KMemoryPermission::UserRead)) {
         perms |= Common::MemoryPermission::Read;
@@ -119,7 +125,7 @@ constexpr Common::MemoryPermission ConvertToMemoryPermission(KMemoryPermission p
     if (True(perm & KMemoryPermission::UserWrite)) {
         perms |= Common::MemoryPermission::Write;
     }
-#ifdef HAS_NCE
+#if defined(HAS_NCE) || defined(HAS_HYPERVISOR)
     if (True(perm & KMemoryPermission::UserExecute)) {
         perms |= Common::MemoryPermission::Execute;
     }
@@ -203,7 +209,7 @@ Result KPageTableBase::InitializeForKernel(bool is_64_bit, KVirtualAddress start
                                                m_memory_block_slab_manager));
 }
 
-Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool enable_aslr, bool enable_das_merge, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource* system_resource, KResourceLimit* resource_limit, Core::Memory::Memory& memory, KProcessAddress aslr_space_start) {
+Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool enable_aslr, bool enable_das_merge, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource* system_resource, KResourceLimit* resource_limit, Core::Memory::Memory& memory, KProcessAddress aslr_space_start, u64 switch2_program_id) {
     // Calculate region extents.
     const size_t as_width = GetAddressSpaceWidth(as_type);
     const KProcessAddress start = 0;
@@ -235,7 +241,8 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
         return KAddressSpaceInfo::GetAddressSpaceStart(m_address_space_width, type);
     };
     auto GetSpaceSize = [&](KAddressSpaceInfo::Type type) {
-        return KAddressSpaceInfo::GetAddressSpaceSize(m_address_space_width, type);
+        return KAddressSpaceInfo::GetAddressSpaceSize(m_address_space_width, type,
+                                                      switch2_program_id);
     };
 
     // Set our bit width and heap/alias sizes.

@@ -70,6 +70,7 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
         std::filesystem::path path;
         u64 size;
         std::filesystem::file_time_type mtime;
+        bool read{};                        ///< Its records are in the log
         std::unordered_map<u64, u64> rekeyed; ///< Key hash with the driver -> without
     };
     std::vector<Source> sources;
@@ -163,6 +164,7 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
             records.push_back(record);
         }
         sources[s].rekeyed = std::move(rekeyed);
+        sources[s].read = true;
         newest_source = sources[s].version;
     }
     if (!newest_source) {
@@ -181,18 +183,19 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
         ++(is_graphics ? result.graphics : result.compute);
     }
 
-    // The second pass copies the records the first kept, file by file. A source another process
-    // wrote in between no longer matches the offsets. The migration fails then, as when the log is
-    // busy, rather than falling back to the sources that are still there.
-    for (const Source& source : sources) {
+    // A source another process wrote since the first pass no longer matches the offsets. Only the
+    // sources read whole take part; one that wasn't is left out of the log as if it weren't there.
+    const auto unchanged = [](const Source& source) {
         std::error_code check_error;
         const auto size = std::filesystem::file_size(source.path, check_error);
         if (check_error || size != source.size) {
-            builder.Discard();
-            return {.failed = true};
+            return false;
         }
         const auto mtime = std::filesystem::last_write_time(source.path, check_error);
-        if (check_error || mtime != source.mtime) {
+        return !check_error && mtime == source.mtime;
+    };
+    for (const Source& source : sources) {
+        if (source.read && !unchanged(source)) {
             builder.Discard();
             return {.failed = true};
         }
@@ -209,6 +212,10 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
         if (opened != record.source) {
             kept_source.close();
             kept_source.clear();
+            if (!unchanged(sources[record.source])) {
+                appended = false;
+                break;
+            }
             kept_source.open(sources[record.source].path, std::ios::binary);
             opened = record.source;
         }
@@ -229,6 +236,13 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
         }
         appended = builder.Append(record.kind, record.key, bytes);
     }
+    // A source written while its records were copied no longer holds the bytes the offsets were
+    // taken from
+    for (const Source& source : sources) {
+        if (appended && source.read && !unchanged(source)) {
+            appended = false;
+        }
+    }
     if (!appended) {
         builder.Discard();
         return {.failed = true};
@@ -238,6 +252,9 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
     std::unordered_map<u64, u8> merged_used;
     std::vector<u32> used_by_source(sources.size());
     for (size_t s = 0; s < sources.size(); ++s) {
+        if (!sources[s].read) {
+            continue; // Its records are not in the log, so its use of them is not either
+        }
         const auto used = LoadUsedPipelines(
             VideoCommon::VersionedPipelineCachePath(directory, "vulkan_used", sources[s].version),
             max_used_age);
@@ -266,8 +283,13 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
     }
     result.used = static_cast<u32>(merged_used.size());
 
-    // One record per source, naming the file it came from, oldest first
+    // One record per source that made it into the log, naming the file it came from, oldest first
+    u32 read_sources{};
     for (size_t s = sources.size(); s-- > 0;) {
+        if (!sources[s].read) {
+            continue;
+        }
+        ++read_sources;
         const ShaderCacheV2::MigratedRecord migrated{
             .source = Common::FS::PathToUTF8String(sources[s].path.filename()),
             .source_size = sources[s].size,
@@ -291,7 +313,7 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
     switch (builder.Commit()) {
     case ShaderCacheV2::WriteResult::Written:
         result.version = newest_source;
-        result.sources = static_cast<u32>(sources.size());
+        result.sources = read_sources;
         break;
     case ShaderCacheV2::WriteResult::Exists:
         result = {}; // Another emulator migrated it first

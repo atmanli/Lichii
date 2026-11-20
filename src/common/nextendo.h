@@ -103,9 +103,16 @@ u64 NetworkServiceAccountId(u64 program_id, const Account& account);
 // /api/me's "nsa": 16 hex digits, else 0.
 u64 ParseBaasNsa(std::string_view text);
 
-std::optional<Account> LoadAccount();
-void SaveAccount(const Account& account);
-void ClearAccount();
+// Each guest profile has its own account, in <config>/nextendo/<profile uuid>.json.
+std::optional<Account> LoadAccount(const Common::UUID& profile);
+void SaveAccount(const Common::UUID& profile, const Account& account);
+void ClearAccount(const Common::UUID& profile);
+// The profiles with an account file that are not in profiles: deleted by a build that left the
+// account behind, or on another NAND, since the accounts live with the config. Empty when profiles
+// is, which is what a profile list that could not be read looks like.
+std::vector<Common::UUID> OrphanAccounts(std::span<const Common::UUID> profiles);
+// Moves the account of builds that kept a single one to profile, unless profile has one already.
+void MigrateAccountFile(const Common::UUID& profile);
 
 // Timeouts, redirects and, with the bundled OpenSSL, the CA store for nextendo.network.
 void ConfigureClient(httplib::Client& client, time_t timeout_seconds);
@@ -124,7 +131,7 @@ enum class SignOutReason {
     // The sign-in didn't grant game.matchmaking, so nextendo.network won't issue a game token.
     MissingScope,
 };
-SignOutReason LastSignOutReason();
+SignOutReason LastSignOutReason(const Common::UUID& profile);
 
 // True when a refused token request says invalid_grant: the refresh token is expired or revoked
 // and only a new sign-in helps.
@@ -196,21 +203,26 @@ struct SignInResult {
 };
 
 // Opens the authorize page through open_url, waits up to five minutes (or until stop) for the
-// loopback callback and exchanges the code for tokens. The callback listens on CallbackPort, or on
-// a free port when another program holds that one. Only one sign-in runs at a time.
-SignInResult SignIn(std::string_view client_id,
-                    const std::function<void(const std::string&)>& open_url,
-                    std::stop_token stop);
+// loopback callback, exchanges the code for tokens and saves the account to profile. The callback
+// listens on CallbackPort, or on a free port when another program holds that one. Only one sign-in
+// runs at a time. When the user signs the profile out or deletes it while it runs, nothing is
+// saved and the result has an error and an empty account; it also asks the server to revoke the new
+// refresh token, but only logs a failed revoke, so the token may stay valid there until it expires.
+// A session that a renewal signed out in the meantime (the site ended it, or refused its refresh
+// token) doesn't count: the new sign-in replaces it.
+SignInResult SignIn(std::string_view client_id, const Common::UUID& profile,
+                    const std::function<void(const std::string&)>& open_url, std::stop_token stop);
 
-// The stored account with a game token that is still valid, renewing the game token (and the
+// The profile's account with a game token that is still valid, renewing the game token (and the
 // access token it is fetched with) RenewAheadSeconds before it expires. Keeps the stored tokens
 // and retries five minutes later when nextendo.network can't be reached. Signs out when it refuses
 // the refresh token, refuses a new access token (401) or the sign-in lacks game.matchmaking (403).
-std::optional<Account> EnsureGameToken(std::string_view client_id);
+std::optional<Account> EnsureGameToken(std::string_view client_id, const Common::UUID& profile);
 
-// Whether the signed-in account may play online, and why not. nullopt without a game token or
+// Whether the profile's account may play online, and why not. nullopt without a game token or
 // when nextendo.network can't be reached.
-std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id);
+std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id,
+                                              const Common::UUID& profile);
 
 // The game catalogue's signed envelope, not yet verified. nullopt when nextendo.network can't be
 // reached. Blocks on the request.
@@ -219,10 +231,11 @@ std::optional<std::string> FetchGameCatalog(std::string_view client_id);
 // Ends a signed-out session's tokens on nextendo.network. Blocks on the request.
 void RevokeToken(std::string_view client_id, const std::string& refresh_token);
 
-// For online play: renews the game token when it is due, lists this device as connected on
-// nextendo.network and signs out when the site has ended its session. Returns why it signed
-// the account out, or None when it didn't.
-SignOutReason KeepSessionAlive(std::string_view client_id);
+// For online play: renews the profile's game token when it is due, lists this device as connected
+// on nextendo.network and signs the profile out when the site has ended its session. Returns why
+// it signed the profile out, or None when it didn't. Run it for one profile only: each one spends
+// two requests of the budget.
+SignOutReason KeepSessionAlive(std::string_view client_id, const Common::UUID& profile);
 
 struct Friend {
     u64 pid{};
@@ -264,15 +277,17 @@ struct SocialResult {
     int http_status{};
 };
 
-// Fetches the friend list with the access token for CachedFriends.
-SocialResult RefreshFriends(std::string_view client_id);
-// The friend list from the last refresh, empty after a sign-out. Never waits on the network, so
-// the friend service reads it during IPC.
-FriendList CachedFriends();
+// Fetches the profile's friend list with the access token for CachedFriends.
+SocialResult RefreshFriends(std::string_view client_id, const Common::UUID& profile);
+// The profile's friend list from the last refresh, empty after a sign-out. Never waits on the
+// network, so the friend service reads it during IPC.
+FriendList CachedFriends(const Common::UUID& profile);
 
-SocialResult AddFriend(std::string_view client_id, std::string_view friend_code);
+SocialResult AddFriend(std::string_view client_id, const Common::UUID& profile,
+                       std::string_view friend_code);
 enum class FriendAction { Accept, Decline, Remove };
-SocialResult AnswerFriend(std::string_view client_id, FriendAction action, u64 pid);
+SocialResult AnswerFriend(std::string_view client_id, const Common::UUID& profile,
+                          FriendAction action, u64 pid);
 
 struct Presence {
     // nn::friends PresenceStatus; Lichii sends 2 while a game runs and 0 when it stops.
@@ -290,8 +305,8 @@ bool PresenceDue(const std::optional<Presence>& last,
                  std::chrono::steady_clock::duration since_last, const Presence& next);
 // The presence data the game set with UpdateUserPresence, sent while app_id runs.
 void SetGameAppField(u64 app_id, std::string app_field);
-// Sends that app_id is being played, or offline when it is 0, when PresenceDue says so.
-SocialResult UpdatePresence(std::string_view client_id, u64 app_id);
+// Sends that the profile plays app_id, or is offline when it is 0, when PresenceDue says so.
+SocialResult UpdatePresence(std::string_view client_id, const Common::UUID& profile, u64 app_id);
 
 // A username as a guest profile nickname: at most size bytes, without a split UTF-8 character.
 std::string ProfileNickname(std::string_view username, std::size_t size);
@@ -302,9 +317,9 @@ struct ProfilePull {
     // picture is the one the last pull for this guest profile returned.
     std::optional<std::string> avatar;
 };
-// With nextendo_sync_profile on and an account signed in: its username and, from the public
-// GET /api/avatar, its picture for the guest profile user, even an unchanged one when force is
-// set. nullopt when another sign-in or a sign-out happened meanwhile. Blocks on the request.
-std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& user, bool force);
+// With nextendo_sync_profile on and the guest profile signed in: its account's username and, from
+// the public GET /api/avatar, its picture, even an unchanged one when force is set. nullopt when
+// the profile signed in again or out meanwhile. Blocks on the request.
+std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& profile, bool force);
 
 } // namespace Common::Nextendo

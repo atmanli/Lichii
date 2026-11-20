@@ -104,12 +104,6 @@ AppLoader_NSP::LoadResult AppLoader_NSP::Load(Kernel::KProcess& process, Core::S
         return {ResultStatus::ErrorAlreadyLoaded, {}};
     }
 
-    const auto title_id = nsp->GetProgramTitleID();
-
-    if (!nsp->IsExtractedType() && title_id == 0) {
-        return {ResultStatus::ErrorNSPMissingProgramNCA, {}};
-    }
-
     const auto nsp_status = nsp->GetStatus();
     if (nsp_status != ResultStatus::Success) {
         return {nsp_status, {}};
@@ -118,6 +112,12 @@ AppLoader_NSP::LoadResult AppLoader_NSP::Load(Kernel::KProcess& process, Core::S
     const auto nsp_program_status = nsp->GetProgramStatus();
     if (nsp_program_status != ResultStatus::Success) {
         return {nsp_program_status, {}};
+    }
+
+    const auto title_id = nsp->GetProgramTitleID();
+
+    if (!nsp->IsExtractedType() && title_id == 0) {
+        return {ResultStatus::ErrorNSPMissingProgramNCA, {}};
     }
 
     if (!nsp->IsExtractedType() &&
@@ -203,8 +203,7 @@ ResultStatus AppLoader_NSP::ReadUpdateRaw(FileSys::VirtualFile& out_file) {
         return ResultStatus::ErrorNoPackedUpdate;
     }
 
-    const auto read = nsp->GetNCAFile(FileSys::GetUpdateTitleID(nsp->GetProgramTitleID()),
-                                      FileSys::ContentRecordType::Program);
+    const auto read = nsp->GetPackedUpdateFile(nsp->GetProgramTitleID());
 
     if (read == nullptr) {
         return ResultStatus::ErrorNoPackedUpdate;
@@ -228,7 +227,7 @@ ResultStatus AppLoader_NSP::ReadProgramId(u64& out_program_id) {
 }
 
 ResultStatus AppLoader_NSP::ReadProgramIds(std::vector<u64>& out_program_ids) {
-    out_program_ids = nsp->GetProgramTitleIDs();
+    out_program_ids = nsp->GetApplicationProgramTitleIDs();
     return ResultStatus::Success;
 }
 

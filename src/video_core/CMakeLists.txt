@@ -139,6 +139,8 @@ add_library(video_core STATIC
     nx2_back_idle_trace.h
     nx2_list_macro_trace.cpp
     nx2_list_macro_trace.h
+    nx2_mme_capture.cpp
+    nx2_mme_capture.h
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
@@ -227,6 +229,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_buffer_cache_base.cpp
     renderer_vulkan/vk_buffer_cache.cpp
     renderer_vulkan/vk_buffer_cache.h
+    renderer_vulkan/vk_texel_buffer_range.h
     renderer_vulkan/vk_command_pool.cpp
     renderer_vulkan/vk_command_pool.h
     renderer_vulkan/vk_compute_pass.cpp
@@ -419,8 +422,8 @@ if (ENABLE_LSFG)
         frame_gen/lsfg_translate.h
         renderer_vulkan/present/frame_gen.cpp
         renderer_vulkan/present/frame_gen.h
-        renderer_vulkan/present/fsr3_frame_gen.cpp
-        renderer_vulkan/present/fsr3_frame_gen.h
+        renderer_vulkan/present/optical_flow_frame_gen.cpp
+        renderer_vulkan/present/optical_flow_frame_gen.h
         renderer_vulkan/present/frame_gen_pacer.cpp
         renderer_vulkan/present/frame_gen_pacer.h
         renderer_vulkan/present/lsfg_alpha.cpp

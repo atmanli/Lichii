@@ -114,7 +114,8 @@ public:
     bool SetProfileBaseAndData(Common::UUID uuid, const ProfileBase& profile_new,
                                const UserData& data_new);
 
-    void WriteUserSaveFile();
+    /// False when profiles.dat couldn't be written; the changes stay to be written next time.
+    bool WriteUserSaveFile();
 
     void ResetUserSaveFile();
     /// Whether the last load read the users from profiles.dat, rather than making the default one.

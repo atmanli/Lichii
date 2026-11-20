@@ -107,9 +107,7 @@ bool ProfileManager::RemoveProfileAtIndex(std::size_t index) {
     profiles[index] = ProfileInfo{};
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
-    if (IsScratch()) {
-        --user_count;
-    }
+    --user_count;
 
     is_save_needed = true;
     WriteUserSaveFile();
@@ -450,9 +448,9 @@ void ProfileManager::ParseUserSaveFile() {
     user_save_file_read = user_count > 0;
 }
 
-void ProfileManager::WriteUserSaveFile() {
+bool ProfileManager::WriteUserSaveFile() {
     if (IsScratch() || !is_save_needed) {
-        return;
+        return true;
     }
 
     ProfileDataRaw raw{};
@@ -469,7 +467,7 @@ void ProfileManager::WriteUserSaveFile() {
 
     const auto raw_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / "system/save/8000000000000010");
     if (FS::IsFile(raw_path) && !FS::RemoveFile(raw_path)) {
-        return;
+        return false;
     }
 
     const auto save_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / ACC_SAVE_AVATORS_BASE_PATH /
@@ -477,7 +475,7 @@ void ProfileManager::WriteUserSaveFile() {
 
     if (FS::IsFile(save_path) && !FS::RemoveFile(save_path)) {
         LOG_WARNING(Service_ACC, "Could not remove existing profiles.dat");
-        return;
+        return false;
     } else {
         LOG_INFO(Service_ACC, "Writing profiles.dat to {}",
                  Common::FS::PathToUTF8String(save_path));
@@ -487,18 +485,21 @@ void ProfileManager::WriteUserSaveFile() {
         LOG_WARNING(Service_ACC, "Failed to create full path of profiles.dat. Create the directory "
                                  "nand/system/save/8000000000000010/su/avators to mitigate this "
                                  "issue.");
-        return;
+        return false;
     }
 
     FS::IOFile save(save_path, FS::FileAccessMode::Write, FS::FileType::BinaryFile);
 
-    if (!save.IsOpen() || !save.SetSize(sizeof(ProfileDataRaw)) || !save.WriteObject(raw)) {
+    // Closed here, as a failed flush shows only then.
+    if (!save.IsOpen() || !save.SetSize(sizeof(ProfileDataRaw)) || !save.WriteObject(raw) ||
+        !save.Close()) {
         LOG_WARNING(Service_ACC, "Failed to write save data to file... No changes to user data "
                                  "made in current session will be saved.");
-        return;
+        return false;
     }
 
     is_save_needed = false;
+    return true;
 }
 
 void ProfileManager::ResetUserSaveFile()

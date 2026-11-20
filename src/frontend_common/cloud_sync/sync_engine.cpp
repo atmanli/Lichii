@@ -13,9 +13,9 @@
 #include <fmt/format.h>
 
 #include "common/assert.h"
-#include "common/string_util.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "frontend_common/cloud_sync/drive_client.h"
+#include "frontend_common/cloud_sync/profile_sync.h"
 #include "frontend_common/cloud_sync/save_archive.h"
 #include "frontend_common/cloud_sync/sync_engine.h"
 #include "frontend_common/cloud_sync/sync_layout.h"
@@ -28,39 +28,6 @@ namespace {
 constexpr std::string_view ZipMimeType = "application/zip";
 
 enum class Direction { Pull, Push, Both };
-
-enum class Action { None, Push, Pull, Conflict };
-
-// A side that is missing takes the other's save: nothing is deleted because one side lacks it.
-Action Decide(const std::optional<std::string>& local, const std::optional<std::string>& remote,
-              const std::optional<std::string>& base) {
-    if (!local && !remote) {
-        return Action::None;
-    }
-    if (!remote) {
-        return Action::Push;
-    }
-    if (!local) {
-        return Action::Pull;
-    }
-    if (*local == *remote) {
-        return Action::None;
-    }
-    if (base == local) {
-        return Action::Pull;
-    }
-    if (base == remote) {
-        return Action::Push;
-    }
-    return Action::Conflict;
-}
-
-std::string Nickname(const Service::Account::ProfileManager& profiles, Common::UUID user) {
-    Service::Account::ProfileBase base{};
-    profiles.GetProfileBase(user, base);
-    return Common::StringFromFixedZeroTerminatedBuffer(
-        reinterpret_cast<const char*>(base.username.data()), base.username.size());
-}
 
 // One save of the title: a profile's or the device's.
 struct SaveItem {
@@ -214,15 +181,15 @@ struct TitleSync {
         const std::optional<std::string> local_hash =
             local ? std::optional{local->content_hash} : std::nullopt;
 
-        Action action = Decide(local_hash, remote_hash, base);
-        if (action == Action::None) {
+        SyncAction action = DecideSync(local_hash, remote_hash, base);
+        if (action == SyncAction::None) {
             // Both sides match: make that the base, so that the next change isn't a conflict.
             if (local && BaseOutdated(synced, *remote, *local_hash)) {
                 Record(key, {remote->id, *local_hash, remote->modified_time});
             }
             return true;
         }
-        if (action == Action::Conflict) {
+        if (action == SyncAction::Conflict) {
             const Conflict conflict{
                 .title_id = title.id,
                 .title_name = title.name,
@@ -232,20 +199,20 @@ struct TitleSync {
             };
             switch (callbacks.resolve_conflict(conflict, stop)) {
             case ConflictChoice::KeepLocal:
-                action = Action::Push;
+                action = SyncAction::Push;
                 break;
             case ConflictChoice::KeepRemote:
-                action = Action::Pull;
+                action = SyncAction::Pull;
                 break;
             case ConflictChoice::Skip:
                 ++result.skipped;
                 return true;
             }
-        } else if ((action == Action::Push && direction == Direction::Pull) ||
-                   (action == Action::Pull && direction == Direction::Push)) {
+        } else if ((action == SyncAction::Push && direction == Direction::Pull) ||
+                   (action == SyncAction::Pull && direction == Direction::Push)) {
             return true;
         }
-        if (action == Action::Push) {
+        if (action == SyncAction::Push) {
             // Drive v3 has no conditional update (files.update takes no revision or ETag), so
             // Drive's save is read again just before it is replaced: a change since the decision
             // (another machine's upload) is decided again, which makes it a conflict. A change in
@@ -307,7 +274,7 @@ struct TitleSync {
         for (const Common::UUID& user : profiles.GetAllUsers()) {
             if (user.IsValid()) {
                 items.push_back(
-                    {{title.id, user}, user.FormattedString(), Nickname(profiles, user)});
+                    {{title.id, user}, DriveUser(state, user), ProfileNickname(profiles, user)});
             }
         }
         items.push_back({{title.id, std::nullopt}, DeviceUser, {}});
@@ -350,6 +317,8 @@ struct TitleSync {
 // The syncs running, so that BeginGuest can stop those touching the guest's title.
 struct Job {
     std::span<const Title> titles;
+    // Syncs the profiles, which every guest uses.
+    bool profiles{};
     std::stop_source stop;
 };
 
@@ -360,8 +329,9 @@ bool guest_running = false;
 u64 guest_title = 0;
 
 bool Touches(const Job& job, u64 title_id) {
-    return std::ranges::any_of(job.titles,
-                               [title_id](const Title& title) { return title.id == title_id; });
+    return job.profiles || std::ranges::any_of(job.titles, [title_id](const Title& title) {
+               return title.id == title_id;
+           });
 }
 
 bool TitleInUse(u64 title_id) {
@@ -372,9 +342,11 @@ bool TitleInUse(u64 title_id) {
 // Registers a sync for its run. Its stop token is stopped by the caller's or by BeginGuest.
 class JobScope {
 public:
-    JobScope(std::span<const Title> titles, std::stop_token caller)
-        : job{titles, {}}, forward{caller, [this] { job.stop.request_stop(); }} {
+    // With profiles only while no guest runs: one could be using them.
+    JobScope(std::span<const Title> titles, bool profiles, std::stop_token caller)
+        : job{titles, false, {}}, forward{caller, [this] { job.stop.request_stop(); }} {
         std::scoped_lock lock{jobs_mutex};
+        job.profiles = profiles && !guest_running;
         jobs.push_back(&job);
     }
     ~JobScope() {
@@ -388,6 +360,9 @@ public:
     std::stop_token Token() const {
         return job.stop.get_token();
     }
+    bool Profiles() const {
+        return job.profiles;
+    }
 
 private:
     Job job;
@@ -395,10 +370,10 @@ private:
 };
 
 SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
-                      const SyncCallbacks& callbacks, Direction direction,
+                      const SyncCallbacks& callbacks, Direction direction, bool with_profiles,
                       std::stop_token caller_stop) {
     SyncResult result;
-    const JobScope job{titles, caller_stop};
+    const JobScope job{titles, with_profiles, caller_stop};
     const std::stop_token stop = job.Token();
     const auto lock = LockSyncState(stop);
     if (!lock) {
@@ -412,15 +387,25 @@ SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<cons
         return result;
     }
     SyncState& state = *loaded;
-    // PullTitle and PushTitle report saves, SyncAll titles.
-    const bool title_steps = direction == Direction::Both;
+    // PullTitle and PushTitle report saves; SyncAll and SyncSaves the profiles (if synced), then
+    // each title.
+    const bool sync_all = direction == Direction::Both;
+    const std::size_t steps = titles.size() + 1;
+    if (sync_all && callbacks.progress) {
+        callbacks.progress(0, steps);
+    }
+    // First, so that the saves of profiles new here are pulled too.
+    if (job.Profiles() &&
+        (!SyncProfiles(profiles, callbacks, state, result, stop) || result.cancelled)) {
+        return result;
+    }
     for (std::size_t done = 0; done < titles.size(); ++done) {
         if (stop.stop_requested()) {
             result.cancelled = true;
             return result;
         }
-        if (title_steps && callbacks.progress) {
-            callbacks.progress(done, titles.size());
+        if (sync_all && callbacks.progress) {
+            callbacks.progress(done + 1, steps);
         }
         // PullTitle runs before its title boots, after BeginGuest.
         if (direction != Direction::Pull && TitleInUse(titles[done].id)) {
@@ -429,12 +414,12 @@ SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<cons
             continue;
         }
         TitleSync sync{titles[done], callbacks, direction, state, result, stop};
-        if (!sync.Run(profiles, !title_steps) || result.cancelled) {
+        if (!sync.Run(profiles, !sync_all) || result.cancelled) {
             return result;
         }
     }
-    if (title_steps && callbacks.progress) {
-        callbacks.progress(titles.size(), titles.size());
+    if (sync_all && callbacks.progress) {
+        callbacks.progress(steps, steps);
     }
     return result;
 }
@@ -487,17 +472,22 @@ bool SyncRunning() {
 
 SyncResult PullTitle(Service::Account::ProfileManager& profiles, const Title& title,
                      const SyncCallbacks& callbacks, std::stop_token stop) {
-    return SyncTitles(profiles, {&title, 1}, callbacks, Direction::Pull, stop);
+    return SyncTitles(profiles, {&title, 1}, callbacks, Direction::Pull, false, stop);
 }
 
 SyncResult PushTitle(Service::Account::ProfileManager& profiles, const Title& title,
                      const SyncCallbacks& callbacks, std::stop_token stop) {
-    return SyncTitles(profiles, {&title, 1}, callbacks, Direction::Push, stop);
+    return SyncTitles(profiles, {&title, 1}, callbacks, Direction::Push, false, stop);
 }
 
 SyncResult SyncAll(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
                    const SyncCallbacks& callbacks, std::stop_token stop) {
-    return SyncTitles(profiles, titles, callbacks, Direction::Both, stop);
+    return SyncTitles(profiles, titles, callbacks, Direction::Both, true, stop);
+}
+
+SyncResult SyncSaves(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
+                     const SyncCallbacks& callbacks, std::stop_token stop) {
+    return SyncTitles(profiles, titles, callbacks, Direction::Both, false, stop);
 }
 
 } // namespace FrontendCommon::CloudSync

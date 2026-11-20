@@ -50,13 +50,15 @@ enum class ConflictChoice {
     Skip,
 };
 
-// A save that changed both here and on Drive since they were last synced, or that both sides
-// have but that was never synced from here.
+// A save or profile (its nickname and avatar) that changed both here and on Drive since they
+// were last synced, or that both sides have but that was never synced from here.
 struct Conflict {
+    // 0 and empty for a profile.
     u64 title_id{};
     std::string title_name;
     // The profile's nickname, empty for the device save.
     std::string nickname;
+    // For a profile, the newer of its avatar's and the shared profiles.dat's: approximate.
     std::chrono::system_clock::time_point local_time;
     std::chrono::system_clock::time_point remote_time;
 };
@@ -65,8 +67,8 @@ struct SyncCallbacks {
     // Required. Called on the syncing thread for every conflict. It should give up with Skip once
     // stop is requested (WaitForAnswer does).
     std::function<ConflictChoice(const Conflict&, std::stop_token stop)> resolve_conflict;
-    // Optional: steps done out of total, the saves of the title for PullTitle and PushTitle and
-    // the titles for SyncAll.
+    // Optional: steps done out of total, the saves of the title for PullTitle and PushTitle, and
+    // the profiles and then each title for SyncAll.
     std::function<void(std::size_t done, std::size_t total)> progress;
 };
 
@@ -105,9 +107,14 @@ SyncResult PullTitle(Service::Account::ProfileManager& profiles, const Title& ti
 SyncResult PushTitle(Service::Account::ProfileManager& profiles, const Title& title,
                      const SyncCallbacks& callbacks, std::stop_token stop);
 
-// "Sync now": both directions for every title. Stops at the first title Drive can't be reached
-// for.
+// "Sync now": both directions for the profiles (profile_sync.h), then every title. The profiles
+// wait for the next SyncAll while a guest runs, as it may be using them. Stops when Drive can't be
+// reached.
 SyncResult SyncAll(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
                    const SyncCallbacks& callbacks, std::stop_token stop);
+
+// Both directions for the titles' saves, without the profiles: safe while a guest runs.
+SyncResult SyncSaves(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
+                     const SyncCallbacks& callbacks, std::stop_token stop);
 
 } // namespace FrontendCommon::CloudSync

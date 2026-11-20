@@ -82,7 +82,8 @@ TEST_CASE("CloudSync: the first sync uploads every profile's save and the device
 
     auto result = SyncAll(*machine.profiles, {&Game, 1}, resolver.Callbacks(), {});
     REQUIRE(result.errors.empty());
-    REQUIRE(result.pushed == 2);
+    // The profile and the two saves.
+    REQUIRE(result.pushed == 3);
 
     const auto root = drive.Find({{"lichii", "root"}});
     REQUIRE(root.size() == 1);
@@ -166,7 +167,7 @@ TEST_CASE("CloudSync: a save changed on one side goes to the other", "[cloud_syn
 
     SECTION("The same on both sides without a sync state: nothing moves") {
         std::filesystem::remove(StatePath(drive));
-        const auto result = SyncAll(*machine.profiles, {&Game, 1}, resolver.Callbacks(), {});
+        const auto result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
         REQUIRE(result.pushed + result.pulled + result.skipped == 0);
         REQUIRE(resolver.asked.empty());
         REQUIRE(std::filesystem::exists(StatePath(drive)));
@@ -206,20 +207,20 @@ TEST_CASE("CloudSync: a save changed on both sides goes to the conflict callback
     }
 
     SECTION("Skip, and ask again next time") {
-        auto result = SyncAll(*machine.profiles, {&Game, 1}, resolver.Callbacks(), {});
+        auto result = PullTitle(*machine.profiles, Game, resolver.Callbacks(), {});
         REQUIRE(result.skipped == 1);
         REQUIRE(result.pushed + result.pulled == 0);
         REQUIRE(machine.ReadSave(account) == "here");
         REQUIRE(SaveFile(drive, user.FormattedString()).app_properties.at("contentHash") ==
                 machine.Packed("there").content_hash);
-        result = SyncAll(*machine.profiles, {&Game, 1}, resolver.Callbacks(), {});
+        result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
         REQUIRE(result.skipped == 1);
         REQUIRE(resolver.asked.size() == 2);
     }
 
     SECTION("Never synced from here") {
         std::filesystem::remove(StatePath(drive));
-        const auto result = SyncAll(*machine.profiles, {&Game, 1}, resolver.Callbacks(), {});
+        const auto result = PullTitle(*machine.profiles, Game, resolver.Callbacks(), {});
         REQUIRE(result.skipped == 1);
     }
 
@@ -266,7 +267,7 @@ TEST_CASE("CloudSync: a game folder named like another title's gets the title id
     machine.WriteSave({second.id, std::nullopt}, "second");
     Resolver resolver;
     const std::vector titles{first, second};
-    REQUIRE(SyncAll(*machine.profiles, titles, resolver.Callbacks(), {}).pushed == 2);
+    REQUIRE(SyncAll(*machine.profiles, titles, resolver.Callbacks(), {}).pushed == 3);
 
     REQUIRE(drive.Find({{"lichii", "game"}, {"titleId", "0100152000022000"}}).at(0).name ==
             "Same Name");

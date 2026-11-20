@@ -55,6 +55,36 @@ nlohmann::json VersionsJson(const std::map<std::string, SyncedVersion>& versions
 
 } // Anonymous namespace
 
+std::string DriveUser(const SyncState& state, const Common::UUID& user) {
+    const std::string local = user.FormattedString();
+    const auto link = state.links.find(local);
+    return link != state.links.end() ? link->second : local;
+}
+
+SyncAction DecideSync(const std::optional<std::string>& local,
+                      const std::optional<std::string>& remote,
+                      const std::optional<std::string>& base) {
+    if (!local && !remote) {
+        return SyncAction::None;
+    }
+    if (!remote) {
+        return SyncAction::Push;
+    }
+    if (!local) {
+        return SyncAction::Pull;
+    }
+    if (*local == *remote) {
+        return SyncAction::None;
+    }
+    if (base == local) {
+        return SyncAction::Pull;
+    }
+    if (base == remote) {
+        return SyncAction::Push;
+    }
+    return SyncAction::Conflict;
+}
+
 std::string SaveKey(u64 title_id, const std::string& drive_user) {
     return fmt::format("{:016X}/{}", title_id, drive_user);
 }
@@ -86,7 +116,16 @@ std::optional<SyncState> LoadSyncState() {
                   Common::FS::PathToUTF8String(path));
         return std::nullopt;
     }
-    return SyncState{.saves = ReadVersions(root, "saves")};
+    SyncState state{.saves = ReadVersions(root, "saves"),
+                    .profiles = ReadVersions(root, "profiles")};
+    if (const auto links = root.find("links"); links != root.end() && links->is_object()) {
+        for (const auto& [local, remote] : links->items()) {
+            if (remote.is_string()) {
+                state.links.emplace(local, remote.get<std::string>());
+            }
+        }
+    }
+    return state;
 }
 
 bool SaveSyncState(const SyncState& state) {
@@ -97,7 +136,10 @@ bool SaveSyncState(const SyncState& state) {
     std::filesystem::create_directories(path.parent_path(), ec);
     {
         std::ofstream file{temporary, std::ios::binary | std::ios::trunc};
-        file << nlohmann::json{{"saves", VersionsJson(state.saves)}}.dump(1, '\t');
+        file << nlohmann::json{{"saves", VersionsJson(state.saves)},
+                               {"profiles", VersionsJson(state.profiles)},
+                               {"links", state.links}}
+                    .dump(1, '\t');
         // Closed here, as a failed flush shows only then.
         file.close();
         if (file.fail()) {

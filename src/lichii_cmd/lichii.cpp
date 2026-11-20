@@ -49,7 +49,10 @@
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/bcat/backend/nextendo.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
@@ -705,6 +708,20 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         LOG_INFO(Frontend, "Restarted by the game: program index {}, {} user channel entries",
                  handoff->program_index, state->system.GetUserChannel().size());
     }
+    // SdlState read the profiles before the config named the NAND.
+    auto& profile_manager = state->system.GetProfileManager();
+    profile_manager.ResetUserSaveFile();
+    if (!lp.selected_user_name.empty()) {
+        // -u <name> was looked up in those profiles; look it up again in these.
+        if (const auto index = profile_manager.GetUserIndex(lp.selected_user_name);
+            index && static_cast<s32>(*index) != Settings::values.current_user.GetValue()) {
+            Settings::values.current_user = static_cast<s32>(*index);
+            profile_manager.ResetUserSaveFile();
+        } else if (!index) {
+            LOG_ERROR(Frontend, "Invalid user argument '{}'", lp.selected_user_name);
+        }
+    }
+    Common::Nextendo::MigrateAccountFile(Service::Account::Nextendo::CurrentProfile(state->system));
     if (Common::Nextendo::OnlinePlayActive()) {
         const auto loader = Loader::GetLoader(
             state->system, Core::GetGameFileFromPath(state->system.GetFilesystem(), lp.filepath),
@@ -713,6 +730,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         if (loader && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success) {
             Common::NplnPatchCatalog::PrepareForGame(
                 title_id, [&] { return loader->ReadMainBuildIdHex(state->system); });
+            Service::BCAT::Nextendo::PrepareForGame(title_id);
         }
     }
     const Core::SystemResultStatus load_result = state->system.Load(*state->emu_window, lp.filepath, load_parameters);

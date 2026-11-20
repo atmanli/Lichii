@@ -614,7 +614,10 @@ int TranslateTypeToNative(Type type) {
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDPLITE)
 #elif defined(_WIN32)
+// IP is protocol 0, the default a guest passes most often (since IPv6 sockets, Ocarina of Time's
+// boot probe opens an INET6 datagram socket with it). HOPOPTS is 0 too, so it stays out.
 #define NETWORK_PROTOCOL_TRANSLATE_LIST \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(IP) \
     /*NETWORK_PROTOCOL_TRANSLATE_ELEM(HOPOPTS)*/ \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(IGMP) \
@@ -644,9 +647,14 @@ int TranslateTypeToNative(Type type) {
     /*NETWORK_PROTOCOL_TRANSLATE_ELEM(L2TP)*/ \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
 #else
+// As on the hosts above: IP (protocol 0) is the default, and ICMP and ICMPV6 are the raw sockets
+// bsd:u allows.
 #define NETWORK_PROTOCOL_TRANSLATE_LIST \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(IP) \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(TCP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDP) \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMPV6) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
 #endif
 [[nodiscard]] Protocol TranslateProtocolFromNative(u32 protocol) {
@@ -801,10 +809,8 @@ std::optional<IPv4Address> GetRoomIPv4Address() {
     }
     if (const auto room_member = GetRoomMember().lock()) {
         // The room host and moderators are in the Moderator state instead of Joined
-        const auto state = room_member->GetState();
-        if (state == RoomMember::State::Joined || state == RoomMember::State::Moderator) {
-            return room_member->GetFakeIpAddress();
-        }
+        if (const auto identity = room_member->GetENetIdentity())
+            return identity->ip;
     }
     return std::nullopt;
 }

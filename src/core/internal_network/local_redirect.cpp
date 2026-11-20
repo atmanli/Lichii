@@ -121,18 +121,28 @@ bool IsLoopback(const SockAddrIn& address) {
 
 } // Anonymous namespace
 
+std::vector<std::string> ParseHosts(std::string_view text) {
+    std::vector<std::string> hosts;
+    while (!text.empty()) {
+        const size_t end = text.find_first_of(", \t\r\n");
+        std::string host = Normalize(text.substr(0, end));
+        if (host.starts_with("*.")) {
+            host.erase(0, 2);
+        }
+        // A wildcard anywhere else, or on its own, names no host.
+        if (!host.empty() && host.find('*') == std::string::npos &&
+            std::ranges::find(hosts, host) == hosts.end()) {
+            hosts.push_back(std::move(host));
+        }
+        text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
+    }
+    return hosts;
+}
+
 void Configure() {
     auto config = std::make_shared<Config>();
     if (Settings::values.online_service_redirect.GetValue()) {
-        std::string_view rest{Settings::values.online_redirect_hosts.GetValue()};
-        while (!rest.empty()) {
-            const size_t comma = rest.find(',');
-            std::string host = Normalize(rest.substr(0, comma));
-            if (!host.empty()) {
-                config->hosts.push_back(std::move(host));
-            }
-            rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
-        }
+        config->hosts = ParseHosts(Settings::values.online_redirect_hosts.GetValue());
         if (const auto& text = Settings::values.online_redirect_server.GetValue(); !text.empty()) {
             config->server = ParseServer(text);
             if (!config->server) {
@@ -194,11 +204,27 @@ std::optional<std::vector<AddrInfo>> Resolve(std::string_view host,
 
 SockAddrIn ConnectTarget(const SockAddrIn& address) {
     const auto config = Get();
-    if (!config->server || address.ip != IPv4Address{127, 0, 0, 1} || address.portno != 443) {
+    static constexpr IPv6Address mapped_loopback{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+                                                 127, 0, 0, 1};
+    // An INET6 socket (dual stack since IPv6 sockets landed) reaches the resolved 127.0.0.1 as
+    // ::ffff:127.0.0.1, and keeps `ip` zero. ::1 is never resolved here, so it is left alone.
+    const bool inet6 = address.family == Domain::INET6;
+    const bool to_loopback = inet6 ? address.ip6 == mapped_loopback
+                                   : address.ip == IPv4Address{127, 0, 0, 1};
+    if (!config->server || !to_loopback || address.portno != 443) {
         return address;
     }
-    LOG_DEBUG(Network, "Host redirect: 127.0.0.1:443 -> {}", SockAddrToString(*config->server));
-    return *config->server;
+    SockAddrIn target = *config->server;
+    if (inet6 && target.family == Domain::INET) {
+        // The socket stays INET6, so it connects to the server's v4-mapped address.
+        target.family = Domain::INET6;
+        target.ip6 = mapped_loopback;
+        std::copy(target.ip.begin(), target.ip.end(), target.ip6.begin() + 12);
+        target.ip = {};
+    }
+    LOG_DEBUG(Network, "Host redirect: {} -> {}", SockAddrToString(address),
+              SockAddrToString(target));
+    return target;
 }
 
 bool Allowed(const SockAddrIn& address) {

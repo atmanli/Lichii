@@ -2,13 +2,22 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <iterator>
+#include <string>
 #include <thread>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/fs/path_util.h"
+#include "common/logging.h"
+#include "common/scope_exit.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
+#include "tests/common/restore_eden_path.h"
+#include "tests/common/test_log.h"
 
 TEST_CASE("Network::Errors", "[core]") {
     Network::NetworkInstance network_instance; // initialize network
@@ -141,4 +150,50 @@ TEST_CASE("Network::UnconnectedUdpIgnoresPortUnreachable", "[core][sockets]") {
     REQUIRE(socket.SendTo(0, data, &own_address).second == Network::Errno::SUCCESS);
     REQUIRE(socket.SetRcvTimeo(2000) == Network::Errno::SUCCESS);
     CHECK(socket.RecvFrom(0, buffer, nullptr) == std::pair{1, Network::Errno::SUCCESS});
+}
+
+TEST_CASE("Network::DefaultProtocol", "[core][sockets]") {
+    // Protocol 0 (IP) asks the host for its default protocol: Ocarina of Time's boot probe opens
+    // an INET6 datagram socket with it. Outside FreeBSD it reached 0 only through the
+    // unimplemented path, which logged a critical line at every boot.
+    Network::NetworkInstance network_instance;
+    Tests::InitializeTestLog();
+    Common::Log::SetRingCapacity(1024);
+    SCOPE_EXIT {
+        Common::Log::SetRingCapacity(0);
+    };
+    // Markers around the sockets: the end one shows the ring caught this test's lines, so the
+    // check below can't pass on an empty ring, and only lines between them are checked.
+    const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::string begin = "protocol ip begin " + stamp;
+    const std::string end = "protocol ip end " + stamp;
+    LOG_INFO(Network, "{}", begin);
+    u64 after = 0;
+    for (const auto& line : Common::Log::ReadRing(0)) {
+        if (line.text.find(begin) != std::string::npos) {
+            after = line.sequence;
+        }
+    }
+    REQUIRE(after != 0);
+
+    Network::Socket v4;
+    CHECK(v4.Initialize(Network::Domain::INET, Network::Type::DGRAM, Network::Protocol::IP) ==
+          Network::Errno::SUCCESS);
+    // A host without IPv6 refuses the socket itself; only the translation is checked then.
+    Network::Socket v6;
+    const bool has_v6 = v6.Initialize(Network::Domain::INET6, Network::Type::DGRAM,
+                                      Network::Protocol::IP) == Network::Errno::SUCCESS;
+    INFO("host IPv6 socket: " << has_v6);
+    LOG_INFO(Network, "{}", end);
+
+    bool ended = false;
+    for (const auto& line : Common::Log::ReadRing(after)) {
+        if (line.text.find(end) != std::string::npos) {
+            ended = true;
+            break;
+        }
+        INFO(line.text);
+        CHECK(line.text.find("Unimplemented protocol") == std::string::npos);
+    }
+    REQUIRE(ended);
 }

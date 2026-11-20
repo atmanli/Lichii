@@ -21,14 +21,15 @@ add_library(frontend_common STATIC
     mod_manager.h mod_manager.cpp
     nx_archive.h nx_archive.cpp
     cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp
-    cloud_sync/save_archive.h cloud_sync/save_archive.cpp)
+    cloud_sync/save_archive.h cloud_sync/save_archive.cpp
+    cloud_sync/google_auth.h cloud_sync/google_auth.cpp)
 
 target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
     OpenSSL::SSL OpenSSL::Crypto minizip::minizip)
 
 # The build-time Drive sync OAuth client, in a generated header so changing it rebuilds one file.
 configure_file(cloud_sync/build_client.h.in frontend_common/cloud_sync/build_client.h @ONLY)
-target_include_directories(frontend_common PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(frontend_common PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
 if (ENABLE_UPDATE_CHECKER)
     target_sources(frontend_common PRIVATE

@@ -181,27 +181,41 @@ Id EmitCooperativeTensorMulAdd(EmitContext& ctx, const CooperativeHmmaTypes& typ
 } // Anonymous namespace
 
 namespace {
+struct HmmaFlow {
+    bool converged;      ///< Every HMMA outside any if and loop, after no early return
+    bool after_branches; ///< One of them after an if or a loop that has closed
+};
+
 /// Whether every HMMA runs where the whole warp does, as far as the structure shows: outside any
 /// if and any loop (whose breaks or repeat condition may differ between lanes), and after no
 /// return inside an if or a loop (lanes that left early). The staged exchange's subgroup barriers
 /// need that; hardware HMMA needs it too, but a shuffle from an inactive lane only gives an
-/// undefined value where a barrier can hang. With maximal reconvergence (EmitSPIRV asks for it
-/// where the device has it) the lanes also meet again after the ifs and loops before it.
-bool HmmaInConvergedFlow(const IR::Program& program, size_t total) {
+/// undefined value where a barrier can hang.
+///
+/// After an if or a loop the lanes are only sure to meet again with maximal reconvergence
+/// (EmitSPIRV asks for it where the device has it): without it, lanes that took different
+/// branches may reach the HMMA apart, and the subgroup barrier orders each group alone. Every if
+/// and loop is taken for one that may diverge (nothing here tells uniform conditions apart), so
+/// `after_branches` says whether any HMMA follows one.
+HmmaFlow HmmaInConvergedFlow(const IR::Program& program, size_t total) {
     u32 if_depth = 0;
     u32 loop_depth = 0;
     size_t seen = 0;
     bool returned_early = false;
+    bool branched = false;
+    bool after_branches = false;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::If:
             ++if_depth;
+            branched = true;
             break;
         case IR::AbstractSyntaxNode::Type::EndIf:
             if_depth -= if_depth != 0 ? 1 : 0;
             break;
         case IR::AbstractSyntaxNode::Type::Loop:
             ++loop_depth;
+            branched = true;
             break;
         case IR::AbstractSyntaxNode::Type::Repeat:
             loop_depth -= loop_depth != 0 ? 1 : 0;
@@ -217,8 +231,9 @@ bool HmmaInConvergedFlow(const IR::Program& program, size_t total) {
                     continue;
                 }
                 if (if_depth != 0 || loop_depth != 0 || returned_early) {
-                    return false;
+                    return {false, after_branches};
                 }
+                after_branches |= branched;
                 ++seen;
             }
             break;
@@ -227,7 +242,7 @@ bool HmmaInConvergedFlow(const IR::Program& program, size_t total) {
         }
     }
     // Every HMMA of the program has to have been seen through the structure.
-    return seen == total;
+    return {seen == total, after_branches};
 }
 
 /// The program's TensorMulAdds, looked at once and kept in the program.
@@ -247,18 +262,24 @@ const IR::Program::HmmaSummary& Summarize(const IR::Program& program) {
             .count = total,
             .any_k16 = any_k16,
             .converged = std::nullopt,
+            .after_branches = false,
         };
     }
     return *program.hmma_summary;
 }
 
-bool HmmaConverged(const IR::Program& program) {
+/// Whether the whole warp reaches every HMMA together: from converged flow (HmmaInConvergedFlow),
+/// and either with maximal reconvergence or before any if and loop.
+bool HmmaConverged(const Profile& profile, const IR::Program& program) {
     const IR::Program::HmmaSummary& summary = Summarize(program);
     if (!summary.converged) {
-        program.hmma_summary->converged =
-            summary.count != 0 && HmmaInConvergedFlow(program, summary.count);
+        const HmmaFlow flow = summary.count != 0 ? HmmaInConvergedFlow(program, summary.count)
+                                                 : HmmaFlow{false, false};
+        program.hmma_summary->converged = flow.converged;
+        program.hmma_summary->after_branches = flow.after_branches;
     }
-    return *program.hmma_summary->converged;
+    return *program.hmma_summary->converged &&
+           (profile.support_maximal_reconvergence || !program.hmma_summary->after_branches);
 }
 
 /// In 64 bits: a product of the three sizes can pass 32 bits.
@@ -328,7 +349,7 @@ std::optional<u32> ReserveSoftwareHmmaScratch(const Profile& profile, IR::Progra
         WorkgroupInvocations(program) < GUEST_WARP_LANES ||
         WorkgroupInvocations(program) > SoftwareHmmaMaxInvocations ||
         profile.max_subgroup_size != GUEST_WARP_LANES || Summarize(program).count == 0 ||
-        !HmmaConverged(program)) {
+        !HmmaConverged(profile, program)) {
         return std::nullopt;
     }
     return ReserveHmmaScratch(profile, program, SoftwareHmmaWordsPerWarp);

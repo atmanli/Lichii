@@ -40,6 +40,9 @@ struct Program {
         /// All run where the whole warp does (HmmaInConvergedFlow), looked at only for the staged
         /// exchange, which needs it
         std::optional<bool> converged;
+        /// One of them comes after an if or a loop (closed), where lanes meet again only with
+        /// maximal reconvergence. Known with `converged`.
+        bool after_branches{};
     };
     mutable std::optional<HmmaSummary> hmma_summary;
     /// PrepareHmma set the HMMA requirements in info: emitting checks them instead

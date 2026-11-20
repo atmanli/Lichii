@@ -118,6 +118,10 @@ std::optional<SyncState> LoadSyncState() {
     }
     SyncState state{.saves = ReadVersions(root, "saves"),
                     .profiles = ReadVersions(root, "profiles")};
+    if (const auto last_sync = root.find("last_sync");
+        last_sync != root.end() && last_sync->is_number_integer()) {
+        state.last_sync = last_sync->get<s64>();
+    }
     if (const auto links = root.find("links"); links != root.end() && links->is_object()) {
         for (const auto& [local, remote] : links->items()) {
             if (remote.is_string()) {
@@ -138,7 +142,8 @@ bool SaveSyncState(const SyncState& state) {
         std::ofstream file{temporary, std::ios::binary | std::ios::trunc};
         file << nlohmann::json{{"saves", VersionsJson(state.saves)},
                                {"profiles", VersionsJson(state.profiles)},
-                               {"links", state.links}}
+                               {"links", state.links},
+                               {"last_sync", state.last_sync}}
                     .dump(1, '\t');
         // Closed here, as a failed flush shows only then.
         file.close();

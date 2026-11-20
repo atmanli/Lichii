@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -421,6 +422,12 @@ SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<cons
     if (sync_all && callbacks.progress) {
         callbacks.progress(steps, steps);
     }
+    if (result.errors.empty()) {
+        state.last_sync = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+        void(SaveSyncState(state));
+    }
     return result;
 }
 
@@ -468,6 +475,12 @@ void EndGuest() {
 bool SyncRunning() {
     std::scoped_lock lock{jobs_mutex};
     return !jobs.empty();
+}
+
+std::optional<s64> LastSyncTime() {
+    // The state is replaced in one rename, so reading it while a sync writes is safe.
+    const auto state = LoadSyncState();
+    return state && state->last_sync > 0 ? std::optional{state->last_sync} : std::nullopt;
 }
 
 SyncResult PullTitle(Service::Account::ProfileManager& profiles, const Title& title,

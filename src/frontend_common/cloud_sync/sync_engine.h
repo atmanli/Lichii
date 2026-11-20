@@ -87,6 +87,10 @@ void EndGuest();
 // A sync runs, and may read or change the profiles: frontends leave them alone meanwhile.
 bool SyncRunning();
 
+// Unix time the last sync finished without errors, nullopt before the first or when the state
+// can't be read. Reads the state without waiting for a running sync.
+std::optional<s64> LastSyncTime();
+
 struct SyncResult {
     std::size_t pushed{};
     std::size_t pulled{};

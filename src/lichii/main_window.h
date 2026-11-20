@@ -60,6 +60,7 @@ class LoadingScreen;
 class OverlayDialog;
 class BugReportDialog;
 class CloudSyncController;
+class QToolButton;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
@@ -515,6 +516,7 @@ private:
     void UpdateAAText();
     void UpdatePostShaderText();
     void UpdateFrameGenButton();
+    void UpdateCloudSyncButton();
 
     void UpdateVolumeUI();
     void UpdateStatusBar();
@@ -630,6 +632,9 @@ private:
     QPushButton* aa_status_button = nullptr;
     QPushButton* post_shader_status_button = nullptr;
     QPushButton* frame_gen_status_button = nullptr;
+    QToolButton* cloud_sync_button = nullptr;
+    // Keeps the cloud sync tooltip's "7m ago" current.
+    QTimer cloud_sync_button_timer;
 
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;

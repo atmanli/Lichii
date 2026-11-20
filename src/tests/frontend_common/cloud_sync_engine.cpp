@@ -323,6 +323,28 @@ TEST_CASE("CloudSync: a sync without Drive fails fast and changes nothing", "[cl
 
     REQUIRE(drive.Count() == 0);
     REQUIRE(machine.ReadSave(device) == "kept");
+    REQUIRE_FALSE(LastSyncTime());
+}
+
+TEST_CASE("CloudSync: a sync without errors records when it finished", "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    machine.WriteSave({TitleId, std::nullopt}, "device");
+    Resolver resolver;
+    REQUIRE_FALSE(LastSyncTime());
+
+    const auto before = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    REQUIRE(PushTitle(*machine.profiles, Game, resolver.Callbacks(), {}).errors.empty());
+    const auto synced = LastSyncTime();
+    REQUIRE(synced);
+    REQUIRE(*synced >= before);
+
+    // A failed sync leaves it alone.
+    Drive::SetDriveBaseForTests("http://127.0.0.1:1");
+    REQUIRE_FALSE(PullTitle(*machine.profiles, Game, resolver.Callbacks(), {}).errors.empty());
+    REQUIRE(LastSyncTime() == synced);
 }
 
 TEST_CASE("CloudSync: a save Drive changed since the decision is decided again", "[cloud_sync]") {

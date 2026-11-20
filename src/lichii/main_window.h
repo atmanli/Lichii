@@ -64,6 +64,7 @@ class QPushButton;
 class QProgressDialog;
 class NupProgressDialog;
 class ShaderWarmDialog;
+class WhatsNewDialog;
 class NxTools;
 class QSlider;
 class QHBoxLayout;
@@ -383,6 +384,7 @@ private slots:
     void OnGameListConvertToNup(const std::string& game_path);
     void OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path);
     void OnGameListDeleteShaderWarm(u64 program_id);
+    void OnGameListPrecompileShaders(u64 program_id, const std::string& game_path, bool on);
     void PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path);
     void OnGameListExtractNup(const std::string& game_path);
     void OnGameListEditNupMetadata(const std::string& game_path);
@@ -422,6 +424,7 @@ private slots:
     void OnInstallFirmware();
     void OnInstallFirmwareFromZIP();
     void OnInstallDecryptionKeys();
+    void MaybeShowStartupWhatsNew();
     void OnWhatsNew();
     void OnAbout();
     void OnEdenDependencies();
@@ -677,6 +680,8 @@ private:
     std::shared_ptr<std::atomic_bool> nup_cancel;
     bool nup_running{};
     QPointer<ShaderWarmDialog> shader_warm_dialog;
+    QPointer<WhatsNewDialog> whats_new_dialog;
+    bool startup_whats_new_pending{};
     NxTools* nx_tools = nullptr;
     bool nx_metadata_write_in_progress = false;
     std::string nup_source_path;

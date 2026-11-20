@@ -126,6 +126,7 @@ add_executable(tests
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
     video_core/descriptor_limits.cpp
+    video_core/device_buffer_pool.cpp
     video_core/device_memory_asid.cpp
     video_core/unbacked_fallback.cpp
     video_core/eviction_age.cpp

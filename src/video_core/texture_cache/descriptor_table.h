@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -44,9 +43,13 @@ public:
             (std::min)(bound_ids.size(), size_t{current_limit} + 1));
     }
 
+    [[nodiscard]] bool ContainsIndex(u32 index) const noexcept {
+        return index <= current_limit && index < bound_ids.size();
+    }
+
     template <class MemoryManager>
     [[nodiscard]] std::pair<T, bool> Read(const MemoryManager& gpu_memory, u32 index) noexcept {
-        DEBUG_ASSERT(index <= current_limit);
+        DEBUG_ASSERT(ContainsIndex(index));
         if (invalidated) {
             ClearReadDescriptors();
             invalidated = false;
@@ -56,7 +59,7 @@ public:
         // This runs for every texture and sampler of every draw. An entry within one page is
         // contiguous in host memory, so a single page lookup replaces the generic block read.
         const bool one_page =
-            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
+            (gpu_addr & Core::Memory::LICHII_PAGEMASK) + sizeof(T) <= Core::Memory::LICHII_PAGESIZE;
         if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
             std::memcpy(std::addressof(result.first), host, sizeof(T));
         } else {

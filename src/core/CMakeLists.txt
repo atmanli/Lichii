@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_library(core STATIC
@@ -21,6 +20,7 @@ add_library(core STATIC
     game_settings.h
     core_timing.cpp
     core_timing.h
+    host_wait_margin.h
     cpu_manager.cpp
     cpu_manager.h
     launch_params.cpp
@@ -35,6 +35,8 @@ add_library(core STATIC
     crypto/key_manager.h
     crypto/ncz_decompressor.cpp
     crypto/ncz_decompressor.h
+    crypto/ncz_cache.cpp
+    crypto/ncz_cache.h
     crypto/partition_data_manager.cpp
     crypto/partition_data_manager.h
     crypto/xts_encryption_layer.cpp
@@ -46,10 +48,14 @@ add_library(core STATIC
     debugger/gdbstub.h
     debugger/gdbstub_arch.cpp
     debugger/gdbstub_arch.h
+    debugger/nx2_bug_bundle.cpp
+    debugger/nx2_bug_bundle.h
     debugger/nx2_debug_server.cpp
     debugger/nx2_debug_server.h
     debugger/nx2_debug_tools.cpp
     debugger/nx2_debug_tools.h
+    debugger/nx2_zip.cpp
+    debugger/nx2_zip.h
     device_memory.cpp
     device_memory.h
     device_memory_manager.h
@@ -354,6 +360,8 @@ add_library(core STATIC
     hle/kernel/kernel.h
     hle/kernel/memory_types.h
     hle/kernel/message_buffer.h
+    hle/kernel/nx2_thread_stats.cpp
+    hle/kernel/nx2_thread_stats.h
     hle/kernel/physical_core.cpp
     hle/kernel/physical_core.h
     hle/kernel/slab_helpers.h
@@ -405,6 +413,8 @@ add_library(core STATIC
     hle/service/acc/async_context.cpp
     hle/service/acc/async_context.h
     hle/service/acc/errors.h
+    hle/service/acc/nextendo_id_token.cpp
+    hle/service/acc/nextendo_id_token.h
     hle/service/acc/profile_manager.cpp
     hle/service/acc/profile_manager.h
     hle/service/am/am.cpp
@@ -559,6 +569,8 @@ add_library(core STATIC
     hle/service/audio/hardware_opus_decoder.h
     hle/service/bcat/backend/backend.cpp
     hle/service/bcat/backend/backend.h
+    hle/service/bcat/backend/nextendo.cpp
+    hle/service/bcat/backend/nextendo.h
     hle/service/bcat/bcat.cpp
     hle/service/bcat/bcat.h
     hle/service/bcat/bcat_result.h
@@ -658,6 +670,7 @@ add_library(core STATIC
     hle/service/filesystem/fsp/fs_i_save_data_info_reader.h
     hle/service/filesystem/fsp/fs_i_storage.cpp
     hle/service/filesystem/fsp/fs_i_storage.h
+    hle/service/filesystem/fsp/fs_read_throttle.h
     hle/service/filesystem/fsp/fs_read_trace.cpp
     hle/service/filesystem/fsp/fs_read_trace.h
     hle/service/filesystem/fsp/fsp_ldr.cpp
@@ -665,6 +678,8 @@ add_library(core STATIC
     hle/service/filesystem/fsp/fsp_pr.cpp
     hle/service/filesystem/fsp/fsp_pr.h
     hle/service/filesystem/fsp/fsp_srv.cpp
+    hle/service/filesystem/fsp/fsp_system_archive.cpp
+    hle/service/filesystem/fsp/fsp_system_archive.h
     hle/service/filesystem/fsp/fsp_srv.h
     hle/service/filesystem/fsp/fsp_types.h
     hle/service/filesystem/fsp/save_data_transfer_prohibiter.cpp
@@ -735,8 +750,12 @@ add_library(core STATIC
     hle/service/kernel_helpers.h
     hle/service/lbl/lbl.cpp
     hle/service/lbl/lbl.h
+    hle/service/ldn/direct_lan.cpp
+    hle/service/ldn/direct_lan.h
     hle/service/ldn/lan_discovery.cpp
     hle/service/ldn/lan_discovery.h
+    hle/service/ldn/lan_protocol.cpp
+    hle/service/ldn/lan_protocol.h
     hle/service/ldn/ldn.cpp
     hle/service/ldn/ldn.h
     hle/service/ldn/ldn_results.h
@@ -1060,6 +1079,8 @@ add_library(core STATIC
     hle/service/nx2_streamplay.h
     hle/service/nx2_stub_interface.h
     hle/service/nx2_gsv.h
+    hle/service/nx2_fence_action.h
+    hle/service/nx2_frame_interval.h
     hle/service/nx2_movie_clock.h
     hle/service/nx2_video_input_queue.h
     hle/service/nx2_image_layout.h
@@ -1067,6 +1088,7 @@ add_library(core STATIC
     hle/service/nx2_video_ready.h
     hle/service/services.cpp
     hle/service/services.h
+    hle/service/system_data_view.h
     hle/service/set/factory_settings_server.cpp
     hle/service/set/factory_settings_server.h
     hle/service/set/firmware_debug_settings_server.cpp
@@ -1095,6 +1117,10 @@ add_library(core STATIC
     hle/service/sockets/bsd.h
     hle/service/sockets/nsd.cpp
     hle/service/sockets/nsd.h
+    hle/service/sockets/nextendo_redirect.cpp
+    hle/service/sockets/nextendo_redirect.h
+    hle/service/sockets/numeric_name_info.cpp
+    hle/service/sockets/numeric_name_info.h
     hle/service/sockets/sfdnsres.cpp
     hle/service/sockets/sfdnsres.h
     hle/service/sockets/sockets.cpp
@@ -1155,6 +1181,8 @@ add_library(core STATIC
     hle/service/wlan/wlan.h
     internal_network/emu_net_state.cpp
     internal_network/emu_net_state.h
+    internal_network/local_redirect.cpp
+    internal_network/local_redirect.h
     internal_network/network.cpp
     internal_network/network.h
     internal_network/network_interface.cpp
@@ -1221,6 +1249,10 @@ if (WIN32)
     endif()
 endif()
 
+if (APPLE)
+    target_link_libraries(core PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+endif()
+
 if (MSVC)
     target_compile_options(core PRIVATE
         /we4242 # 'identifier': conversion from 'type1' to 'type2', possible loss of data
@@ -1284,6 +1316,16 @@ if (HAS_NCE)
         arm/nce/patcher.h
         arm/nce/visitor_base.h)
     target_link_libraries(core PRIVATE merry::oaknut)
+endif()
+
+if (HAS_HYPERVISOR)
+    find_library(HYPERVISOR_FRAMEWORK Hypervisor REQUIRED)
+    target_sources(core PRIVATE
+        arm/hypervisor/arm_hypervisor.cpp
+        arm/hypervisor/arm_hypervisor.h
+        arm/hypervisor/hv_vm.cpp
+        arm/hypervisor/hv_vm.h)
+    target_link_libraries(core PRIVATE "${HYPERVISOR_FRAMEWORK}")
 endif()
 
 if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64 OR ARCHITECTURE_riscv64 OR ARCHITECTURE_loongarch64)

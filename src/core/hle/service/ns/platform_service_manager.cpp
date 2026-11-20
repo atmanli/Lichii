@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -22,6 +21,10 @@
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/system_archive/system_archive.h"
 #include "core/hle/kernel/k_shared_memory.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_transfer_memory.h"
+#include "core/hle/kernel/svc_results.h"
+#include "core/memory.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "common/alignment.h"
@@ -29,6 +32,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/ns/font_merge.h"
 #include "core/hle/service/ns/platform_service_manager.h"
+#include "core/hle/service/system_data_view.h"
 
 namespace Service::NS {
 
@@ -44,6 +48,53 @@ constexpr u32 EXPECTED_RESULT{0x7f9a0218}; // What we expect the decrypted bfttf
 constexpr u32 EXPECTED_MAGIC{0x36f81a1e};  // What we expect the encrypted bfttf first 4 bytes to be
 constexpr u64 SHARED_FONT_MEM_SIZE{0x1100000};
 constexpr FontRegion EMPTY_REGION{0, 0};
+
+static SystemDataAsset GetFontAsset(FontArchives archive) {
+    switch (archive) {
+    case FontArchives::Extension:
+        return SystemDataAsset::FontExtension;
+    case FontArchives::Standard:
+        return SystemDataAsset::FontStandard;
+    case FontArchives::Korean:
+        return SystemDataAsset::FontKorean;
+    case FontArchives::ChineseTraditional:
+        return SystemDataAsset::FontChineseTraditional;
+    case FontArchives::ChineseSimple:
+        return SystemDataAsset::FontChineseSimple;
+    }
+    UNREACHABLE();
+}
+
+// pl:u 2020 and the Nx font service's GetFontDataSet: u8 font types in, a 12-byte descriptor per
+// available font out, then a bool (any available) and the descriptor count.
+static void ReplyFontDataSet(HLERequestContext& ctx, std::span<const FontRegion> regions) {
+    struct Descriptor {
+        u32_le flags;
+        u32_le offset;
+        u32_le size;
+    };
+    static_assert(sizeof(Descriptor) == 12);
+    const auto types = ctx.CanReadBuffer() ? ctx.ReadBuffer() : std::span<const u8>{};
+    const auto capacity = ctx.CanWriteBuffer() ? ctx.GetWriteBufferNumElements<Descriptor>() : 0;
+    std::vector<Descriptor> descriptors;
+    for (const auto type : types) {
+        if (descriptors.size() == capacity) {
+            break;
+        }
+        if (type < regions.size() && regions[type].size != 0) {
+            descriptors.push_back({0, regions[type].offset, regions[type].size});
+        }
+    }
+    if (!descriptors.empty()) {
+        ctx.WriteBuffer(descriptors);
+    }
+    LOG_INFO(Service_NS, "Built-in font set: {} requested, {} available", types.size(),
+             descriptors.size());
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(descriptors.empty() ? 0 : 1);
+    rb.Push<u32>(static_cast<u32>(descriptors.size()));
+}
 
 /// The controller button icons of the Switch's extension font that Switch 2 titles look up in the
 /// standard font: the face buttons, the shoulder buttons, the sticks, the directions and the
@@ -89,6 +140,48 @@ void EncryptSharedFont(const std::vector<u32>& input, std::vector<u8>& output, s
     offset += transformed_font.size() * sizeof(u32);
 }
 
+class INx2FontService final : public ServiceFramework<INx2FontService> {
+public:
+    explicit INx2FontService(Core::System& system_, Kernel::KTransferMemory* memory_,
+                             std::vector<FontRegion> regions_)
+        : ServiceFramework{system_, "nx2:pl:font"}, memory{memory_}, regions{std::move(regions_)} {
+        memory->Open(kernel);
+        static const FunctionInfo functions[] = {
+            {0, &INx2FontService::GetFontData, "GetFontData"},
+            {1, &INx2FontService::GetFontDataSet, "GetFontDataSet"},
+        };
+        RegisterHandlers(functions);
+    }
+
+    ~INx2FontService() override {
+        memory->Close(kernel);
+    }
+
+private:
+    void GetFontData(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 type = rp.Pop<u32>() & 0xff;
+        const bool found = type < regions.size() && regions[type].size != 0;
+        const FontRegion region = found ? regions[type] : EMPTY_REGION;
+        LOG_INFO(Service_NS, "Switch 2 font type {}: found {}, offset {:#x}, size {:#x}",
+                 type, found, region.offset, region.size);
+        IPC::ResponseBuilder rb{ctx, 6};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(found ? 1 : 0);
+        rb.Push<u32>(0);
+        rb.Push<u32>(region.offset);
+        rb.Push<u32>(region.size);
+    }
+
+    void GetFontDataSet(HLERequestContext& ctx) {
+        ReplyFontDataSet(ctx, regions);
+    }
+
+    // The SDK closes its copy handle after OpenFont. Keep the transferred pages alive.
+    Kernel::KTransferMemory* memory;
+    std::vector<FontRegion> regions;
+};
+
 struct IPlatformServiceManager::Impl {
     const FontRegion& GetSharedFontRegion(std::size_t index) const {
         return index < shared_font_regions.size() ? shared_font_regions[index] : EMPTY_REGION;
@@ -110,7 +203,8 @@ struct IPlatformServiceManager::Impl {
     std::array<u8, SHARED_FONT_MEM_SIZE> shared_font;
 };
 
-IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const char* service_name_)
+IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const char* service_name_,
+                                                 const SystemDataView* isolated_system_data)
     : ServiceFramework{system_, service_name_}, impl{std::make_unique<Impl>()} {
     // clang-format off
     static const FunctionInfo functions[] = {
@@ -130,58 +224,79 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
         {106, nullptr, "GetFunctionBlackListVersion"},
         {1000, nullptr, "LoadNgWordDataForPlatformRegionChina"},
         {1001, nullptr, "GetNgWordDataSizeForPlatformRegionChina"},
+        {2100, &IPlatformServiceManager::RequestLoadNxFont, "RequestLoadNxFont"},
         {2000, &IPlatformServiceManager::GetBuiltInFontSharedMemory, "GetBuiltInFontSharedMemory (Switch 2)"},
         {2010, &IPlatformServiceManager::GetBuiltInFontData, "GetBuiltInFontData (Switch 2)"},
+        {2020, &IPlatformServiceManager::GetBuiltInFontDataSet, "GetBuiltInFontDataSet (Switch 2)"},
     };
     // clang-format on
     RegisterHandlers(functions);
 
-    auto& fsc = system.GetFileSystemController();
-
-    // Attempt to load shared font data from disk
-    const auto* nand = fsc.GetSystemNANDContents();
+    const auto* nand =
+        isolated_system_data ? nullptr : system.GetFileSystemController().GetSystemNANDContents();
     std::size_t offset = 0;
     // Each font type's region, empty when the font could not be loaded.
     std::array<FontRegion, SHARED_FONTS.size()> type_regions{};
-    // Rebuild shared fonts from data ncas or synthesize
     for (size_t font_index = 0; font_index < SHARED_FONTS.size(); ++font_index) {
         const auto& font = SHARED_FONTS[font_index];
-        FileSys::VirtualFile romfs;
-        const auto nca =
-            nand->GetEntry(static_cast<u64>(font.first), FileSys::ContentRecordType::Data);
-        if (nca) {
-            romfs = nca->GetRomFS();
-        }
+        std::shared_ptr<const FileSys::VfsFile> font_fp;
+        if (isolated_system_data) {
+            font_fp = isolated_system_data->OpenFile(GetFontAsset(font.first), font.second);
+        } else {
+            FileSys::VirtualFile romfs;
+            const auto nca =
+                nand->GetEntry(static_cast<u64>(font.first), FileSys::ContentRecordType::Data);
+            if (nca) {
+                romfs = nca->GetRomFS();
+            }
 
-        if (!romfs) {
-            romfs = FileSys::SystemArchive::SynthesizeSystemArchive(static_cast<u64>(font.first));
-        }
+            if (!romfs) {
+                romfs =
+                    FileSys::SystemArchive::SynthesizeSystemArchive(static_cast<u64>(font.first));
+            }
 
-        if (!romfs) {
-            LOG_ERROR(Service_NS, "Failed to find or synthesize {:016X}! Skipping", font.first);
-            continue;
-        }
+            if (!romfs) {
+                LOG_ERROR(Service_NS, "Failed to find or synthesize {:016X}! Skipping", font.first);
+                continue;
+            }
 
-        const auto extracted_romfs = FileSys::ExtractRomFS(romfs);
-        if (!extracted_romfs) {
-            LOG_ERROR(Service_NS, "Failed to extract RomFS for {:016X}! Skipping", font.first);
-            continue;
+            const auto extracted_romfs = FileSys::ExtractRomFS(romfs);
+            if (!extracted_romfs) {
+                LOG_ERROR(Service_NS, "Failed to extract RomFS for {:016X}! Skipping", font.first);
+                continue;
+            }
+            font_fp = extracted_romfs->GetFile(font.second);
         }
-        const auto font_fp = extracted_romfs->GetFile(font.second);
         if (!font_fp) {
-            LOG_ERROR(Service_NS, "{:016X} has no file \"{}\"! Skipping", font.first, font.second);
+            LOG_ERROR(Service_NS, "{} font file not found: \"{}\"",
+                      isolated_system_data ? "Isolated" : "System", font.second);
             continue;
         }
-        std::vector<u32> font_data_u32(font_fp->GetSize() / sizeof(u32));
-        font_fp->ReadBytes<u32>(font_data_u32.data(), font_fp->GetSize());
+        const auto size = font_fp->GetSize();
+        if (size <= 2 * sizeof(u32) || size % sizeof(u32) != 0 ||
+            size >= SHARED_FONT_MEM_SIZE - offset) {
+            LOG_ERROR(Service_NS, "Invalid font size for \"{}\": {}", font.second, size);
+            continue;
+        }
+        std::vector<u32> font_data_u32(size / sizeof(u32));
+        if (font_fp->ReadBytes<u32>(font_data_u32.data(), size) != size ||
+            Common::swap32(font_data_u32.front()) != EXPECTED_MAGIC) {
+            LOG_ERROR(Service_NS, "Invalid font data for \"{}\"", font.second);
+            continue;
+        }
         // We need to be BigEndian as u32s for the xor encryption
         std::transform(font_data_u32.begin(), font_data_u32.end(), font_data_u32.begin(),
                        Common::swap32);
         // Font offset and size do not account for the header
         const FontRegion region{u32(offset + 8), u32((font_data_u32.size() * sizeof(u32)) - 8)};
         DecryptSharedFont(font_data_u32, impl->shared_font, offset);
-        impl->shared_font_regions.push_back(region);
+        if (!isolated_system_data) {
+            impl->shared_font_regions.push_back(region);
+        }
         type_regions[font_index] = region;
+    }
+    if (isolated_system_data) {
+        impl->shared_font_regions.assign(type_regions.begin(), type_regions.end());
     }
 
     // Switch 2 titles look the controller button icons up in the standard font. The firmware's has
@@ -210,6 +325,48 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
         builtin_offset = Common::AlignUp(builtin_offset + size, 0x1000);
     }
     impl->builtin_font_memory_size = std::max<u32>(builtin_offset, 0x1000);
+}
+
+// The Nx font SDK supplies transfer memory and expects an interface whose offsets refer to it.
+void IPlatformServiceManager::RequestLoadNxFont(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const u32 flags = rp.Pop<u32>();
+    const u32 requested_size = rp.Pop<u32>();
+    auto transfer_object = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(0));
+    auto* const transfer = transfer_object.GetPointerUnsafe();
+    if (!transfer || !transfer->GetOwner()) {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(Kernel::ResultInvalidHandle);
+        return;
+    }
+    if (requested_size > transfer->GetSize() || requested_size < impl->builtin_font_memory_size) {
+        LOG_ERROR(Service_NS, "Font transfer memory too small: requested {:#x}, transfer {:#x}, fonts {:#x}",
+                  requested_size, transfer->GetSize(), impl->builtin_font_memory_size);
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(Kernel::ResultInvalidSize);
+        return;
+    }
+    LOG_INFO(Service_NS, "Loading Switch 2 Nx fonts into transfer memory: flags {:#x}, size {:#x}",
+             flags, requested_size);
+    auto& memory = transfer->GetOwner()->GetMemory();
+    const auto address = transfer->GetSourceAddress();
+    for (size_t i = 0; i < impl->builtin_font_regions.size(); ++i) {
+        const auto& region = impl->builtin_font_regions[i];
+        if (region.size == 0) {
+            continue;
+        }
+        const u8* source = impl->shared_font.data() + impl->builtin_font_sources[i];
+        if (i == static_cast<size_t>(SharedFontType::JapanUSEuropeStandard) &&
+            !impl->builtin_standard_font.empty()) {
+            source = impl->builtin_standard_font.data();
+        }
+        memory.WriteBlock(address + region.offset, source, region.size);
+    }
+    std::vector<FontRegion> regions{impl->builtin_font_regions.begin(),
+                                    impl->builtin_font_regions.end()};
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<INx2FontService>(ctx, system, transfer, std::move(regions));
 }
 
 // Switch 2: the shared memory GetBuiltInFontData offsets point into (copy handle, u32 size); the
@@ -249,6 +406,11 @@ void IPlatformServiceManager::GetBuiltInFontSharedMemory(HLERequestContext& ctx)
     rb.Push(ResultSuccess);
     rb.Push<u32>(impl->builtin_font_memory_size);
     rb.PushCopyObjects(ctx, *impl->builtin_font_memory);
+}
+
+// The SDK sends up to six font types.
+void IPlatformServiceManager::GetBuiltInFontDataSet(HLERequestContext& ctx) {
+    ReplyFontDataSet(ctx, impl->builtin_font_regions);
 }
 
 // nn::pl::GetBuiltInFontData(BuiltInFontDataOunce*, BuiltInFontTypeOunce, bool): returns a 16-byte
@@ -331,19 +493,23 @@ Result IPlatformServiceManager::GetSharedFontInOrderOfPriority(
     constexpr size_t MaxElementCount = 6;
 
     // TODO(ogniK): Have actual priority order
-    const auto max_size = (std::min)({MaxElementCount, out_font_codes.size(), out_font_offsets.size(),
-                                    out_font_sizes.size(), impl->shared_font_regions.size()});
+    const auto font_types = (std::min)(MaxElementCount, impl->shared_font_regions.size());
+    const auto max_size =
+        (std::min)({font_types, out_font_codes.size(), out_font_offsets.size(), out_font_sizes.size()});
 
-    for (size_t i = 0; i < max_size; i++) {
-        auto& region = impl->GetSharedFontRegion(i);
-
-        out_font_codes[i] = static_cast<u32>(i);
-        out_font_offsets[i] = region.offset;
-        out_font_sizes[i] = region.size;
+    size_t count = 0;
+    for (size_t i = 0; i < font_types && count < max_size; ++i) {
+        const auto& region = impl->GetSharedFontRegion(i);
+        if (region.size != 0) {
+            out_font_codes[count] = static_cast<u32>(i);
+            out_font_offsets[count] = region.offset;
+            out_font_sizes[count] = region.size;
+            ++count;
+        }
     }
 
     *out_fonts_are_loaded = true;
-    *out_font_count = static_cast<u32>(max_size);
+    *out_font_count = static_cast<u32>(count);
     R_SUCCEED();
 }
 

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -13,6 +12,8 @@
 #include "core/hle/service/set/settings_types.h"
 
 namespace Service {
+
+class SystemDataView;
 
 namespace FileSystem {
 class FileSystemController;
@@ -57,7 +58,8 @@ void EncryptSharedFont(const std::vector<u32>& input, std::vector<u8>& output, s
 
 class IPlatformServiceManager final : public ServiceFramework<IPlatformServiceManager> {
 public:
-    explicit IPlatformServiceManager(Core::System& system_, const char* service_name_);
+    explicit IPlatformServiceManager(Core::System& system_, const char* service_name_,
+                                     const SystemDataView* isolated_system_data = nullptr);
     ~IPlatformServiceManager() override;
 
 private:
@@ -73,8 +75,10 @@ private:
                                           Out<bool> out_fonts_are_loaded, Out<u32> out_font_count,
                                           Set::LanguageCode language_code);
 
+    void RequestLoadNxFont(HLERequestContext& ctx);
     void GetBuiltInFontSharedMemory(HLERequestContext& ctx);
     void GetBuiltInFontData(HLERequestContext& ctx);
+    void GetBuiltInFontDataSet(HLERequestContext& ctx);
 
     struct Impl;
     std::unique_ptr<Impl> impl;

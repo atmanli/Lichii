@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/file_sys/nca_metadata.h"
@@ -23,6 +22,18 @@ namespace Service::AM {
 namespace {
 
 Result CreateGuestApplication(SharedPointer<IApplicationAccessor>* out_application_accessor, Core::System& system, WindowSystem& window_system, u64 program_id) {
+    // A Switch 2 program needs the guest counter frequency and memory layout it boots with, and
+    // those were set for the HOME Menu before it started. It boots in a session of its own.
+    if (IsSwitch2Application(system, program_id)) {
+        if (system.LaunchInNewSession(program_id)) {
+            LOG_INFO(Service_AM, "Switch 2 title {:016X}: booting it in a new session", program_id);
+        } else {
+            LOG_ERROR(Service_AM, "Switch 2 title {:016X} cannot start from the HOME Menu here",
+                      program_id);
+        }
+        R_THROW(ResultUnknown);
+    }
+
     FileSys::VirtualFile nca_raw{};
 
     // Get the program NCA from storage.

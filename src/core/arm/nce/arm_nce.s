@@ -1,4 +1,3 @@
-/* SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project */
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "core/arm/nce/arm_nce_asm_definitions.h"
@@ -41,11 +40,15 @@ _ZN4Core6ArmNce27ReturnToRunCodeByTrampolineEPvPNS_12GuestContextEm:
     stp     q10, q11, [x5, #(HostContextVregs+0x20)]
     stp     q12, q13, [x5, #(HostContextVregs+0x40)]
     stp     q14, q15, [x5, #(HostContextVregs+0x60)]
+    mrs     x3, fpcr
+    mrs     x4, fpsr
+    stp     w3, w4, [x5, #(HostContextFpcr)]
 
     /* Load guest tpidr_el0 from argument. */
     msr     tpidr_el0, x0
 
     /* Tail call the trampoline to restore guest state. */
+    clrex
     br      x2
 
 
@@ -95,6 +98,7 @@ _ZN4Core6ArmNce50ReturnToRunCodeByExceptionLevelChangeSignalHandlerEiPvS1_:
     bl      _ZN4Core6ArmNce22UnlockThreadParametersEPv
 
     /* Returning from here will enter the guest. */
+    clrex
     ldp     x29, x30, [sp], #0x10
     ret
 
@@ -210,6 +214,53 @@ _ZN4Core6ArmNce29GuestAccessFaultSignalHandlerEiPvS1_:
 
     /* Call the handler. */
     bl       _ZN4Core6ArmNce22HandleGuestAccessFaultEPNS_12GuestContextEPvS3_
+
+    /* If the handler returned false, we want to preserve the host tpidr_el0. */
+    cbz     x0, 2f
+
+    /* Otherwise, restore guest tpidr_el0. */
+    msr     tpidr_el0, x19
+
+2:
+    ldr     x19, [sp, #0x10]
+    ldp     x29, x30, [sp], #0x20
+    ret
+
+
+/* static void Core::ArmNce::GuestIllegalInstructionSignalHandler(int sig, void* info, void* raw_context) */
+.section    .text._ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_, "ax", %progbits
+.global     _ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_
+.type       _ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_, %function
+_ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_:
+    /* Check to see if we have the correct TLS magic. */
+    mrs     x8, tpidr_el0
+    ldr     w9, [x8, #(TpidrEl0TlsMagic)]
+
+    LOAD_IMMEDIATE_32(w10, TlsMagic)
+
+    cmp     w9, w10
+    b.eq    1f
+
+    /* Incorrect TLS magic, so this is a host fault. */
+    /* Tail call the handler. */
+    b       _ZN4Core6ArmNce28HandleHostIllegalInstructionEiPvS1_
+
+1:
+    /* Correct TLS magic, so this is a guest fault. */
+    stp     x29, x30, [sp, #-0x20]!
+    str     x19, [sp, #0x10]
+    mov     x29, sp
+
+    /* Save the old tpidr_el0. */
+    mov     x19, x8
+
+    /* Restore host tpidr_el0. */
+    ldr     x0, [x8, #(TpidrEl0NativeContext)]
+    ldr     x3, [x0, #(GuestContextHostContext + HostContextTpidrEl0)]
+    msr     tpidr_el0, x3
+
+    /* Call the handler. */
+    bl       _ZN4Core6ArmNce29HandleGuestIllegalInstructionEPNS_12GuestContextEPvS3_
 
     /* If the handler returned false, we want to preserve the host tpidr_el0. */
     cbz     x0, 2f

@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <mutex>
+#include <optional>
+#include <utility>
 
 #include "core/arm/arm_interface.h"
 #include "core/arm/nce/guest_context.h"
@@ -63,6 +64,7 @@ private:
     static void BreakFromRunCodeSignalHandler(int sig, void* info, void* raw_context);
     static void GuestAlignmentFaultSignalHandler(int sig, void* info, void* raw_context);
     static void GuestAccessFaultSignalHandler(int sig, void* info, void* raw_context);
+    static void GuestIllegalInstructionSignalHandler(int sig, void* info, void* raw_context);
 
     static void LockThreadParameters(void* tpidr);
     static void UnlockThreadParameters(void* tpidr);
@@ -74,8 +76,10 @@ private:
     static bool HandleFailedGuestFault(GuestContext* ctx, void* info, void* raw_context);
     static bool HandleGuestAlignmentFault(GuestContext* ctx, void* info, void* raw_context);
     static bool HandleGuestAccessFault(GuestContext* ctx, void* info, void* raw_context);
+    static bool HandleGuestIllegalInstruction(GuestContext* ctx, void* info, void* raw_context);
     static void HandleHostAlignmentFault(int sig, void* info, void* raw_context);
     static void HandleHostAccessFault(int sig, void* info, void* raw_context);
+    static void HandleHostIllegalInstruction(int sig, void* info, void* raw_context);
 
 public:
     Core::System& m_system;
@@ -88,8 +92,21 @@ public:
     GuestContext m_guest_ctx{};
     Kernel::KThread* m_running_thread{};
 
-    // Stack for signal processing.
-    std::unique_ptr<u8[]> m_stack{};
+    bool m_signals_ready{};
+
+#ifndef __ANDROID__
+private:
+    enum class Access { Read, Write };
+    struct AccessFault {
+        u64 address;
+        u64 pc;
+        Access access;
+
+        bool operator==(const AccessFault&) const = default;
+    };
+    std::optional<AccessFault> m_access_fault;
+    std::optional<std::pair<AccessFault, u64>> m_last_access_retry;
+#endif
 };
 
 } // namespace Core

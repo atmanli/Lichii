@@ -7,7 +7,10 @@
 
 using Vulkan::DefaultKeptPipelines;
 using Vulkan::KeptPipelinesForMemory;
+using Vulkan::MaxUnusedPrebuiltPipelines;
 using Vulkan::PipelinesToEvict;
+using Vulkan::PrebuildLimit;
+using Vulkan::PrebuildStartsWithBootBuilds;
 
 TEST_CASE("Nothing is evicted at or under the kept limit", "[video_core][pipeline_eviction]") {
     std::vector<u64> last_uses(1900);
@@ -54,4 +57,25 @@ TEST_CASE("The kept limit is a quarter of the RAM", "[video_core][pipeline_evict
     REQUIRE(KeptPipelinesForMemory(8 * GiB) == 6990);
     REQUIRE(KeptPipelinesForMemory(16 * GiB) == 13981);
     REQUIRE(KeptPipelinesForMemory(32 * GiB) == 27962);
+}
+
+TEST_CASE("The prebuild holds what the kept limit leaves past the boot builds",
+          "[video_core][pipeline_eviction]") {
+    REQUIRE(PrebuildLimit(KeptPipelinesForMemory(u64{32} << 30), 5000) == 27962 - 5000);
+    REQUIRE(PrebuildLimit(DefaultKeptPipelines, DefaultKeptPipelines) == 0);
+    REQUIRE(PrebuildLimit(DefaultKeptPipelines, 9000) == 0);
+    REQUIRE(PrebuildLimit(DefaultKeptPipelines, 0) == DefaultKeptPipelines);
+    // Without a kept limit (Android), as many as eviction keeps unused
+    REQUIRE(PrebuildLimit(0, 1500) == MaxUnusedPrebuiltPipelines);
+}
+
+TEST_CASE("The prebuild waits for the load's driver cache saves where reads race builds",
+          "[video_core][pipeline_eviction]") {
+    REQUIRE(PrebuildStartsWithBootBuilds(false, false));
+    // After the precache, as its jobs would queue ahead of the precache's
+    REQUIRE_FALSE(PrebuildStartsWithBootBuilds(true, false));
+    // Intel's Windows driver: a prebuild build running into the cache while the end-of-load save
+    // reads it crashes the driver, so the save would have to be skipped
+    REQUIRE_FALSE(PrebuildStartsWithBootBuilds(false, true));
+    REQUIRE_FALSE(PrebuildStartsWithBootBuilds(true, true));
 }

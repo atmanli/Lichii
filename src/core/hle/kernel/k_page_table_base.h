@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -53,8 +52,8 @@ class KResourceLimit;
 class KSystemResource;
 
 class KPageTableBase {
-    YUZU_NON_COPYABLE(KPageTableBase);
-    YUZU_NON_MOVEABLE(KPageTableBase);
+    LICHII_NON_COPYABLE(KPageTableBase);
+    LICHII_NON_MOVEABLE(KPageTableBase);
 
 public:
     using TraversalEntry = Common::PageTable::TraversalEntry;
@@ -218,6 +217,9 @@ private:
     KMemoryBlockManager m_memory_block_manager{};
     u32 m_allocate_option{};
     u32 m_address_space_width{};
+#ifdef HAS_NCE
+    bool m_uses_native_execution{};
+#endif
     bool m_is_kernel{};
     bool m_enable_aslr{};
     bool m_enable_device_address_space_merge{};
@@ -366,6 +368,14 @@ protected:
     }
 
 private:
+#ifdef HAS_NCE
+    bool ContainsNativeMapping(KProcessAddress addr, size_t num_pages) const {
+        return !m_uses_native_execution ||
+               (addr >= m_code_region_start && addr < m_code_region_end &&
+                num_pages <= (m_code_region_end - addr) / PageSize);
+    }
+#endif
+
     KProcessAddress FindFreeArea(KProcessAddress region_start, size_t region_num_pages,
                                  size_t num_pages, size_t alignment, size_t offset,
                                  size_t guard_pages) const;
@@ -657,6 +667,11 @@ public:
     KProcessAddress GetAddressSpaceStart() const {
         return m_address_space_start;
     }
+#ifdef HAS_NCE
+    bool UsesNativeExecution() const {
+        return m_uses_native_execution;
+    }
+#endif
     KProcessAddress GetHeapRegionStart() const {
         return m_heap_region_start;
     }

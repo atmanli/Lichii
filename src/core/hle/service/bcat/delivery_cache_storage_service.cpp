@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <algorithm>
+#include <cstring>
 
 #include "core/hle/service/bcat/bcat_result.h"
 #include "core/hle/service/bcat/delivery_cache_directory_service.h"
@@ -24,6 +26,13 @@ IDeliveryCacheStorageService::IDeliveryCacheStorageService(Core::System& system_
     // clang-format on
 
     RegisterHandlers(functions);
+
+    for (const auto& subdir : root->GetSubdirectories()) {
+        DirectoryName name{};
+        std::memcpy(name.data(), subdir->GetName().data(),
+                    (std::min)(name.size() - 1, subdir->GetName().size()));
+        entries.push_back(name);
+    }
 }
 
 IDeliveryCacheStorageService::~IDeliveryCacheStorageService() = default;

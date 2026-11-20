@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/settings.h"
@@ -9,9 +8,7 @@
 
 namespace Service::Set {
 
-SystemSettings DefaultSystemSettings() {
-    SystemSettings settings{};
-
+void InitializeDefaultSystemSettings(SystemSettings& settings) {
     settings.version = 0x140000;
     settings.flags = 7;
 
@@ -70,8 +67,6 @@ SystemSettings DefaultSystemSettings() {
     if (key_code != language_to_layout.end()) {
         settings.keyboard_layout = key_code->second;
     }
-
-    return settings;
 }
 
 } // namespace Service::Set

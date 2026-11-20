@@ -3,6 +3,8 @@
 
 #include "qt_common/util/game.h"
 
+#include <fmt/format.h>
+
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "core/file_sys/savedata_factory.h"
@@ -14,6 +16,7 @@
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/shader_cache_v2/cache.h"
 
+#include <QBuffer>
 #include <QDesktopServices>
 #include <QStandardPaths>
 #include <QUrl>
@@ -137,7 +140,7 @@ bool CreateShortcutLink(const std::filesystem::path& shortcut_path, const std::s
 
 bool MakeShortcutIcoPath(const u64 program_id, const std::string_view game_file_name,
                          std::filesystem::path& out_icon_path) {
-    // Get path to Yuzu icons directory & icon extension
+    // Get path to Lichii icons directory & icon extension
     std::string ico_extension = "png";
 #if defined(_WIN32)
     out_icon_path = Common::FS::GetEdenPath(Common::FS::EdenPath::IconsDir);

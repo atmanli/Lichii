@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -30,6 +29,10 @@ public:
 
     DeviceMemory& operator=(const DeviceMemory&) = delete;
     DeviceMemory(const DeviceMemory&) = delete;
+
+#ifdef HAS_NCE
+    [[nodiscard]] u64 PrepareNativeExecution(bool has_39bit_address_space);
+#endif
 
     template <typename T>
     Common::PhysicalAddress GetPhysicalAddr(const T* ptr) const {

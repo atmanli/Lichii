@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <version>
@@ -91,6 +90,7 @@ Values values;
 
 namespace {
 std::atomic<u32> nvidia_dlss_runtime_options{};
+std::atomic<u32> applied_ocarina_render_scale{};
 }
 
 void RefreshNvidiaDlssRuntimeSettings() {
@@ -98,6 +98,29 @@ void RefreshNvidiaDlssRuntimeSettings() {
         static_cast<u32>(values.nvidia_dlss_quality.GetValue()) |
             (static_cast<u32>(values.nvidia_dlss_preset.GetValue()) << 8),
         std::memory_order_relaxed);
+}
+
+std::optional<NvidiaDlssQuality> OcarinaDlssRenderScale() {
+    const auto quality = values.nvidia_dlss_quality.GetValue();
+    if (!values.nvidia_dlss.GetValue() || !IsDockedMode() ||
+        (quality != NvidiaDlssQuality::Balanced && quality != NvidiaDlssQuality::Performance &&
+         quality != NvidiaDlssQuality::UltraPerformance)) {
+        return std::nullopt;
+    }
+    return quality;
+}
+
+void SetAppliedOcarinaRenderScale(std::optional<NvidiaDlssQuality> quality) {
+    applied_ocarina_render_scale.store(quality ? static_cast<u32>(*quality) + 1 : 0,
+                                       std::memory_order_relaxed);
+}
+
+std::optional<NvidiaDlssQuality> AppliedOcarinaRenderScale() {
+    const u32 value = applied_ocarina_render_scale.load(std::memory_order_relaxed);
+    if (value == 0) {
+        return std::nullopt;
+    }
+    return static_cast<NvidiaDlssQuality>(value - 1);
 }
 
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {
@@ -220,18 +243,8 @@ bool IsFastmemEnabled() {
 
 static bool is_nce_enabled = false;
 
-void SetNceEnabled(bool is_39bit) {
-    const bool is_nce_selected = values.cpu_backend.GetValue() == CpuBackend::Nce;
-    if (is_nce_selected && !IsFastmemEnabled()) {
-        LOG_WARNING(Common, "Fastmem is required to natively execute code in a performant manner, "
-                            "falling back to Dynarmic");
-    }
-    if (is_nce_selected && !is_39bit) {
-        LOG_WARNING(
-            Common,
-            "Program does not utilize 39-bit address space, unable to natively execute code");
-    }
-    is_nce_enabled = IsFastmemEnabled() && is_nce_selected && is_39bit;
+void SetNceEnabled(bool enabled) {
+    is_nce_enabled = enabled;
 }
 
 bool IsNceEnabled() {
@@ -256,6 +269,10 @@ void SetCurrentProgramIsSwitch2(bool is_switch2) {
 
 bool ReactiveFlushing() {
     return values.use_reactive_flushing.GetValue() || values.force_reactive_flushing;
+}
+
+bool SkipCpuInnerInvalidation() {
+    return values.skip_cpu_inner_invalidation.GetValue() && !values.keep_cpu_inner_invalidation;
 }
 
 bool CurrentProgramIsSwitch2() {

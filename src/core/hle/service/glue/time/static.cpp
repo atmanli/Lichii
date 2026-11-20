@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
@@ -31,7 +30,7 @@ StaticService::StaticService(Core::System& system_,
       m_setup_info{setup_info}, m_time_sm{time->m_time_sm},
       m_file_timestamp_worker{time->m_file_timestamp_worker},
       m_standard_steady_clock_resource{time->m_steady_clock_resource},
-      m_time_zone_binary{time->m_time_zone_binary} {
+      m_time_zone_binary{*time->m_time_zone_binary} {
     // clang-format off
         static const FunctionInfo functions[] = {
             {0,   D<&StaticService::GetStandardUserSystemClock>, "GetStandardUserSystemClock"},

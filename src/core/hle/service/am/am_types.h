@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -120,6 +119,12 @@ enum class AppletProgramId : u64 {
     MyPage = 0x0100000000001013ull,
     MaxProgramId = 0x0100000000001FFFull,
 };
+
+/// The Switch 1 system and library applets: the HOME Menu, overlayDisp and the LLE applets.
+constexpr bool IsAppletProgramId(u64 program_id) {
+    return program_id >= static_cast<u64>(AppletProgramId::QLaunch) &&
+           program_id <= static_cast<u64>(AppletProgramId::MaxProgramId);
+}
 
 // This is nn::am::AppletMessage
 enum class AppletMessage : u32 {

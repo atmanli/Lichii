@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -9,6 +8,9 @@
 #include <array>
 #include <cctype>
 
+#include <openssl/evp.h>
+
+#include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/bcat/bcat_result.h"
 #include "core/hle/service/bcat/bcat_types.h"
 
@@ -36,6 +38,18 @@ constexpr Result VerifyNameValidDir(DirectoryName name) {
 
 constexpr Result VerifyNameValidFile(FileName name) {
     return VerifyNameValidInternal(name, '.');
+}
+
+// The digest is only used to determine if a file is unique compared to others of the same name.
+// Since the algorithm isn't ever checked in game, MD5 is safe.
+inline BcatDigest DigestFile(const FileSys::VirtualFile& file) {
+    BcatDigest out{};
+    const auto bytes = file->ReadAllBytes();
+
+    u32 hash_len = 0;
+    EVP_Digest(bytes.data(), bytes.size(), out.data(), &hash_len, EVP_md5(), nullptr);
+
+    return out;
 }
 
 } // namespace Service::BCAT

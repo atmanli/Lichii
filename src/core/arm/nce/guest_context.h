@@ -1,4 +1,3 @@
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -20,6 +19,8 @@ struct HostContext {
     alignas(16) std::array<u128, 8> host_saved_vregs{};
     u64 host_sp{};
     void* host_tpidr_el0{};
+    u32 host_fpcr{};
+    u32 host_fpsr{};
 };
 
 struct GuestContext {
@@ -34,7 +35,6 @@ struct GuestContext {
     u64 tpidrro_el0{};
     u64 tpidr_el0{};
     std::atomic<u64> esr_el1{};
-    u32 nzcv{};
     u32 svc{};
     System* system{};
     ArmNce* parent{};
@@ -46,6 +46,8 @@ static_assert(offsetof(GuestContext, host_ctx) == GuestContextHostContext);
 static_assert(offsetof(HostContext, host_sp) == HostContextSpTpidrEl0);
 static_assert(offsetof(HostContext, host_tpidr_el0) - 8 == HostContextSpTpidrEl0);
 static_assert(offsetof(HostContext, host_tpidr_el0) == HostContextTpidrEl0);
+static_assert(offsetof(HostContext, host_fpcr) == HostContextFpcr);
+static_assert(offsetof(HostContext, host_fpsr) == HostContextFpcr + sizeof(u32));
 static_assert(offsetof(HostContext, host_saved_regs) == HostContextRegs);
 static_assert(offsetof(HostContext, host_saved_vregs) == HostContextVregs);
 

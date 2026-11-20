@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -41,6 +40,9 @@ struct SaveDataSize;
 } // namespace FileSys
 
 namespace Service {
+
+class SessionRequestHandler;
+class SystemDataView;
 
 namespace SM {
 class ServiceManager;
@@ -155,7 +157,12 @@ private:
     Core::System& system;
 };
 
-void LoopProcess(Core::System& system);
+std::shared_ptr<SessionRequestHandler> CreateFileSystemProxy(
+    Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data = {},
+    u64 isolated_process_id = 0);
+
+void LoopProcess(Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data,
+                 u64 isolated_process_id);
 
 // A class that wraps a VfsDirectory with methods that return ResultVal and Result instead of
 // pointers and booleans. This makes using a VfsDirectory with switch services much easier and

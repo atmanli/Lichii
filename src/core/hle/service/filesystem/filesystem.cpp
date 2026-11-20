@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <utility>
@@ -27,6 +26,7 @@
 #include "core/hle/service/filesystem/fsp/fsp_ldr.h"
 #include "core/hle/service/filesystem/fsp/fsp_pr.h"
 #include "core/hle/service/filesystem/fsp/fsp_srv.h"
+#include "core/hle/service/filesystem/fsp/fsp_system_archive.h"
 #include "core/hle/service/filesystem/romfs_controller.h"
 #include "core/hle/service/filesystem/save_data_controller.h"
 #include "core/hle/service/server_manager.h"
@@ -184,13 +184,12 @@ Result VfsDirectoryServiceWrapper::RenameFile(const std::string& src_path_,
     std::string src_path(Common::FS::SanitizePath(src_path_));
     std::string dest_path(Common::FS::SanitizePath(dest_path_));
     auto src = backing->GetFileRelative(src_path);
+    if (src == nullptr) {
+        return FileSys::ResultPathNotFound;
+    }
     auto dst = backing->GetFileRelative(dest_path);
     if (Common::FS::GetParentPath(src_path) == Common::FS::GetParentPath(dest_path)) {
         // Use more-optimized vfs implementation rename.
-        if (src == nullptr) {
-            return FileSys::ResultPathNotFound;
-        }
-
         if (dst && Common::FS::Exists(dst->GetFullPath())) {
             LOG_ERROR(Service_FS, "File at new_path={} already exists", dst->GetFullPath());
             return FileSys::ResultPathAlreadyExists;
@@ -799,14 +798,30 @@ void FileSystemController::Reset() {
     registrations.clear();
 }
 
-void LoopProcess(Core::System& system) {
+std::shared_ptr<SessionRequestHandler> CreateFileSystemProxy(
+    Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data,
+    u64 isolated_process_id) {
+    if (isolated_system_data || isolated_process_id != 0) {
+        return CreateReadOnlySystemArchiveFsp(system, std::move(isolated_system_data),
+                                              isolated_process_id);
+    }
+    return std::make_shared<FSP_SRV>(system);
+}
+
+void LoopProcess(Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data,
+                 u64 isolated_process_id) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
-    const auto FileSystemProxyFactory = [&] { return std::make_shared<FSP_SRV>(system); };
-
-    server_manager->RegisterNamedService("fsp-ldr", std::make_shared<FSP_LDR>(system), 61);
-    server_manager->RegisterNamedService("fsp-pr", std::make_shared<FSP_PR>(system), 61);
-    server_manager->RegisterNamedService("fsp-srv", std::move(FileSystemProxyFactory), 61);
+    if (!isolated_system_data && isolated_process_id == 0) {
+        server_manager->RegisterNamedService("fsp-ldr", std::make_shared<FSP_LDR>(system), 61);
+        server_manager->RegisterNamedService("fsp-pr", std::make_shared<FSP_PR>(system), 61);
+    }
+    server_manager->RegisterNamedService(
+        "fsp-srv",
+        [&system, data = std::move(isolated_system_data), isolated_process_id] {
+            return CreateFileSystemProxy(system, data, isolated_process_id);
+        },
+        61);
     ServerManager::RunServer(std::move(server_manager));
 }
 

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -61,6 +60,11 @@ struct NcaCompressionConfiguration {
 };
 static_assert(std::is_trivial_v<NcaCompressionConfiguration>);
 
+enum class NcaHeaderSignaturePolicy {
+    AllowUnverified,
+    RequireVerified,
+};
+
 constexpr inline s32 KeyAreaEncryptionKeyCount =
     NcaCryptoConfiguration::KeyAreaEncryptionKeyIndexCount *
     NcaCryptoConfiguration::KeyGenerationMax;
@@ -93,15 +97,17 @@ constexpr inline s32 GetKeyTypeValue(u8 key_index, u8 key_generation) {
 }
 
 class NcaReader {
-    YUZU_NON_COPYABLE(NcaReader);
-    YUZU_NON_MOVEABLE(NcaReader);
+    LICHII_NON_COPYABLE(NcaReader);
+    LICHII_NON_MOVEABLE(NcaReader);
 
 public:
     NcaReader();
     ~NcaReader();
 
     Result Initialize(VirtualFile base_storage, const NcaCryptoConfiguration& crypto_cfg,
-                      const NcaCompressionConfiguration& compression_cfg);
+                      const NcaCompressionConfiguration& compression_cfg,
+                      NcaHeaderSignaturePolicy signature_policy =
+                          NcaHeaderSignaturePolicy::AllowUnverified);
 
     VirtualFile GetSharedBodyStorage();
     u32 GetMagic() const;
@@ -154,13 +160,13 @@ private:
     bool m_is_software_aes_prioritized;
     bool m_is_available_sw_key;
     NcaHeader::EncryptionType m_header_encryption_type;
-    bool m_is_header_sign1_signature_valid;
+    bool m_is_header_sign1_signature_valid{};
     GetDecompressorFunction m_get_decompressor;
 };
 
 class NcaFsHeaderReader {
-    YUZU_NON_COPYABLE(NcaFsHeaderReader);
-    YUZU_NON_MOVEABLE(NcaFsHeaderReader);
+    LICHII_NON_COPYABLE(NcaFsHeaderReader);
+    LICHII_NON_MOVEABLE(NcaFsHeaderReader);
 
 public:
     NcaFsHeaderReader() : m_fs_index(-1) {
@@ -212,8 +218,8 @@ private:
 };
 
 class NcaFileSystemDriver {
-    YUZU_NON_COPYABLE(NcaFileSystemDriver);
-    YUZU_NON_MOVEABLE(NcaFileSystemDriver);
+    LICHII_NON_COPYABLE(NcaFileSystemDriver);
+    LICHII_NON_MOVEABLE(NcaFileSystemDriver);
 
 public:
     struct StorageContext {

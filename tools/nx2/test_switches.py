@@ -4,7 +4,10 @@
 
 import os
 import pathlib
+import plistlib
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -20,7 +23,7 @@ class SwitchDiscovery(unittest.TestCase):
         self.config = self.root / "config/lichii"
         self.config.mkdir(parents=True)
         source = self.root / "probe.cpp"
-        source.write_text('''#include "yuzu/nx2_switches.h"
+        source.write_text('''#include "lichii/nx2_switches.h"
 #include <iostream>
 namespace Common::FS {
 std::filesystem::path GetDataDirectory(const std::string&) {
@@ -53,7 +56,7 @@ int main(int argc, char** argv) {
         image = outer / "Lichii.AppImage"
         image.touch()
         forbidden = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LIBVULKAN_PATH", "QT_PLUGIN_PATH",
-                     "PATH", "HOME", "XDG_CONFIG_HOME", "YUZU_DO_STARTUP_CHECKS",
+                     "PATH", "HOME", "XDG_CONFIG_HOME", "LICHII_DO_STARTUP_CHECKS",
                      "EDEN_STREAMLINE_DIR")
         for folder in (self.bin, outer):
             sidecar = folder / "nx2_switches.txt"
@@ -87,7 +90,7 @@ int main(int argc, char** argv) {
             with self.subTest(base=base):
                 self.assertEqual(self.run_probe(self.bin / "lichii", XDG_CONFIG_HOME=base), "unset")
 
-    def test_elf_path_symlink_and_precedence(self):
+    def test_executable_path_symlink_and_precedence(self):
         (self.root / "nx2_switches.txt").write_text("EDEN_NX2_PRELOAD_ALL_PIPELINES=99\n")
         self.assertEqual(self.run_probe(self.bin / "lichii"), "unset")
         (self.bin / "nx2_switches.txt").write_text('EDEN_NX2_PRELOAD_ALL_PIPELINES="1"\n')
@@ -99,6 +102,7 @@ int main(int argc, char** argv) {
         self.assertEqual(self.run_probe(linkdir / "lichii"), "2")
         self.assertEqual(self.run_probe(linkdir / "lichii", EDEN_NX2_PRELOAD_ALL_PIPELINES="3"), "3")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "AppImage requires Linux")
     def test_appimage_external_overrides_internal(self):
         (self.bin / "nx2_switches.txt").write_text("EDEN_NX2_PRELOAD_ALL_PIPELINES=1\n")
         outer = self.root / "app"
@@ -116,6 +120,33 @@ int main(int argc, char** argv) {
         (self.config / "nx2_switches.txt").write_text("EDEN_NX2_PRELOAD_ALL_PIPELINES=3\n")
         self.assertEqual(self.run_probe(self.bin / "lichii", APPIMAGE=str(image)), "3")
         self.assertEqual(self.run_probe(self.bin / "lichii", APPIMAGE=str(image), EDEN_NX2_PRELOAD_ALL_PIPELINES="4"), "4")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS bundle signing requires macOS")
+    def test_signed_macos_resources_and_precedence(self):
+        app = self.root / "Switch Probe.app"
+        contents = app / "Contents"
+        macos = contents / "MacOS"
+        resources = contents / "Resources"
+        macos.mkdir(parents=True)
+        resources.mkdir()
+        executable = macos / "lichii"
+        shutil.copy2(self.bin / "lichii", executable)
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "lichii",
+            "CFBundleIdentifier": "io.github.zortos293.lichii.switch-probe",
+            "CFBundlePackageType": "APPL",
+        }))
+        (resources / "nx2_switches.txt").write_text("EDEN_NX2_PRELOAD_ALL_PIPELINES=1\n")
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+
+        link = self.root / "lichii"
+        link.symlink_to(executable)
+        self.assertEqual(self.run_probe(executable), "1")
+        self.assertEqual(self.run_probe("lichii", PATH=str(self.root)), "1")
+        (self.config / "nx2_switches.txt").write_text("EDEN_NX2_PRELOAD_ALL_PIPELINES=2\n")
+        self.assertEqual(self.run_probe(link), "2")
+        self.assertEqual(self.run_probe(link, EDEN_NX2_PRELOAD_ALL_PIPELINES="3"), "3")
 
 
 if __name__ == "__main__":

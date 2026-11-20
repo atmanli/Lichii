@@ -4,7 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 Torzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shared_translation.h"
@@ -150,8 +149,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "On: HDR whenever the display driver offers an HDR format.\n"
               "The game is told the display is HDR only while Lichii really presents HDR. SDR "
               "games and menus are shown at the reference white.\n"
-              "While HDR is active, anti-aliasing, post-processing, FSR/SGSR upscaling and frame "
-              "generation are off and the window is scaled bilinearly.\n"
+              "While HDR is active, anti-aliasing, post-processing and FSR/SGSR upscaling are off "
+              "and the window is scaled bilinearly. Frame generation keeps working.\n"
               "Screenshots are tone mapped to SDR."));
     INSERT(Settings, hdr_swapchain, tr("HDR format:"),
            tr("HDR10: 10-bit PQ, what HDR displays take.\n"
@@ -199,19 +198,28 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Replaces Ocarina of Time's native upscaler using scene depth and camera motion. "
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
+#if defined(__linux__) && !defined(__ANDROID__)
+    INSERT(Settings, amd_fsr4, tr("Use FSR 4 (fsr4-vk community Vulkan port) in place of FSR 3.1"),
+           tr("Uses fsr4-vk, a community Vulkan port of AMD's ML-based FSR 4.1.1 that Lichii's "
+              "x86-64 Linux packages include, where FSR replaces a game's upscaler (Ocarina of Time with "
+              "the setting above). It is not AMD's official FSR 4 and is not affiliated with or "
+              "endorsed by AMD. Radeon RX 6000 or newer, or an RDNA 3 Ryzen GPU, on Mesa's RADV "
+              "driver; RDNA 4 runs the FP8 network, older GPUs the INT8 one.\nIf FSR 4 can't run, "
+              "FSR 3.1 is used and the log says why. Takes effect when a game starts."));
+#else
     INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of FSR 3.1"),
            tr("Uses AMD's ML-based FSR 4 where FSR replaces a game's upscaler (Ocarina of Time "
               "with the setting above). Radeon RX 6000 or newer, or a Ryzen AI processor, with a "
               "current AMD driver.\nNeeds AMD's FidelityFX runtime, which Lichii downloads from "
               "AMD when you ask. The files are AMD's, under AMD's licence. Without them, or if FSR 4 "
               "can't run, FSR 3.1 is used. Takes effect when a game starts."));
+#endif
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
               "the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the "
-              "download button below.\nFire Emblem: Fortune's Weave also needs "
-              "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
-              "remains active.\nIn The Legend of Zelda: Ocarina of Time it replaces the game's "
+              "download button below.\nIn Fire Emblem: Fortune's Weave it replaces the game's "
+              "DLSS while \"Use the game's own DLSS\" is off.\nIn The Legend of Zelda: Ocarina of Time it replaces the game's "
               "upscaler at 1x resolution scale.\nThe window adapting filter (the FSR 1, Bilinear "
               "and similar button in the status bar) is separate and runs after DLSS. While DLSS "
               "runs, the status bar shows DLSS, its mode and its preset. If DLSS fails, it stays "
@@ -222,10 +230,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "game's render/output sizes. Native (DLAA) "
               "applies anti-aliasing at the game's render resolution, then scales to its output; "
               "Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K.\n"
-              "Explicit modes only apply when the game's render size is within NVIDIA's "
-              "supported range; otherwise Automatic is used and the fallback is logged. "
-              "This does not change the game's render resolution. Apply/OK updates it while "
-              "playing."));
+              "In The Legend of Zelda: Ocarina of Time (docked, with the Max Resolution add-on), "
+              "Balanced, Performance and Ultra Performance lower the game's render resolution "
+              "from 2560x1440 to 2276x1280, 1920x1080 and 1280x720 before DLSS reconstructs 4K. "
+              "That resolution changes when the game starts.\n"
+              "In other games, explicit modes only apply when the game's render size is within "
+              "NVIDIA's supported range; otherwise Automatic is used and the fallback is logged. "
+              "There they don't change the game's render resolution. Apply/OK updates the mode "
+              "while playing."));
     INSERT(
         Settings, nvidia_dlss_preset, tr("NVIDIA DLSS model preset:"),
         tr("Applies only when a game uses its own DLSS.\nM (DLSS 4.5) is Lichii's default for "
@@ -303,8 +315,18 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, bg_blue, QString(), QString());
 
     INSERT(Settings, frame_gen, tr("Enable Frame Generation"),
-           tr("Paused while HDR output is active."));
-    INSERT(Settings, frame_gen_type, tr("Frame Generation Type"), QString());
+           tr("Generates intermediate frames for smoother motion. Requires Vulkan.\n"
+              "Optical Flow Interpolation is built in. LSFG requires Lossless.dll in the "
+              "user directory's lossless folder."));
+    INSERT(Settings, frame_gen_type, tr("Frame Generation Type"),
+           tr("Optical Flow Interpolation is built in and runs on any GPU.\nNVIDIA DLSS Frame "
+              "Generation (Windows only) needs a GeForce RTX 40 series or newer GPU (3x and 4x need "
+              "an RTX 50 series), Hardware-accelerated GPU scheduling on in Windows' graphics "
+              "settings, \"Use NVIDIA DLSS\" on and NVIDIA's files from the NVIDIA DLSS panel. "
+              "It takes the game's depth and motion vectors from the DLSS evaluation, so it runs "
+              "in The Legend of Zelda: Ocarina of Time only, docked, with DLSS as its upscaler. "
+              "Other games, and scRGB HDR output, use Optical Flow Interpolation instead.\nVSync "
+              "is off while it runs. Choosing it takes effect when a game starts."));
     INSERT(Settings, frame_gen_multiplier, tr("Frame Generation Multiplier"), QString());
     INSERT(Settings, frame_gen_target_rate, tr("Target Frame Rate"), QString());
     INSERT(Settings, frame_gen_flow_scale_auto, tr("Auto Flow Scale"), QString());
@@ -341,8 +363,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "falls back to Full when that cannot be proven.\nFull marks the whole binding (up to "
               "8 MiB), the original behaviour: it can delay the game's own writes to nearby memory "
               "(flickering effects) and copy far more data back from the GPU."));
-    INSERT(Settings, use_asynchronous_shaders, tr("Enable asynchronous shader compilation"),
-           tr("May reduce shader stutter."));
+    INSERT(Settings, use_asynchronous_shaders,
+           tr("Don't wait for shaders that are still compiling"),
+           tr("On (default): a draw or compute pass whose shader is still compiling is skipped "
+              "for a few frames, so a new shader costs a brief pop-in instead of a freeze.\nOff "
+              "(accurate): the game waits for every shader, so nothing is ever missing, but each "
+              "new shader can freeze the game for up to a few seconds."));
     INSERT(Settings, gpu_clock, tr("GPU Clocks"),
            tr("Makes the game believe GPU work finishes faster than it does, so it stops lowering "
               "resolution and render distance to fit the Switch's clocks."));
@@ -375,29 +401,30 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "files internally."));
     INSERT(Settings, precache_shaders, tr("Precache shaders before game start:"),
            tr("Builds shaders on the loading screen, on every CPU thread, so they don't stutter "
-              "the first time the game uses them: the compute shaders found in the game files, "
-              "and the shaders saved by earlier play sessions that the normal shader loading "
-              "leaves for later. The first launch reads the game files and takes a few minutes; "
-              "later launches only build what is new, until the GPU driver changes. The loading "
-              "screen has a Skip button.\nAsk asks at launch while the game has never been "
-              "precached."));
+              "the first time the game uses them: the compute shaders found in the game files. "
+              "The first launch reads the game files and takes a few minutes; later launches "
+              "only build what is new, until the GPU driver changes. The loading screen has a "
+              "Skip button.\nAsk asks at launch while the game has never been precached."));
     INSERT(Settings, build_all_cached_shaders, tr("Build all cached shaders before game start"),
            tr("Builds every shader saved by earlier play sessions on the loading screen and keeps "
               "them built, so places you visited long ago don't stutter. Without it, only the "
               "shaders of recent sessions are built there and the rest in the background or when "
               "the game first needs them.\nLoading takes longer and uses more memory, about 0.3 "
               "MB per shader, up to a quarter of the RAM. Takes effect when a game starts."));
-    INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
-           tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
-              "does when its graphics pipeline is still building.\n"
+    INSERT(Settings, native_async_draws, tr("Switch 2 draws and compute with unbuilt shaders:"),
+           tr("Only applies when \"Don't wait for shaders that are still compiling\" is on. Decides "
+              "what Switch 2 work does when its pipeline is still building. Only work that redraws "
+              "what an earlier frame drew can be skipped: draws that are depth-tested into a "
+              "target drawn before, and compute passes whose outputs the GPU wrote before. Other "
+              "work always waits, so nothing drawn or computed once goes missing.\n"
               "Wait stalls the GPU until the pipeline is ready (no missing effects, but long "
-              "stalls on new content). Skip drops the draw, which can leave an effect missing for "
-              "a few frames. Bounded waits up to the time below per frame, then skips. The "
-              "EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip."));
+              "stalls on new content). Skip drops that work, which can leave an effect missing "
+              "for a few frames. Bounded (default) waits up to the time below per frame, then "
+              "skips. The EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip."));
     INSERT(Settings, native_pipeline_wait_ms, tr("Pipeline wait per frame (ms):"),
-           tr("Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in "
-              "total for pipelines that are still building. Once spent, the remaining unbuilt "
-              "draws of that frame are skipped."));
+           tr("Used by the Bounded mode: the most time per frame that Switch 2 draws and compute "
+              "passes may wait in total for pipelines that are still building. Once spent, the "
+              "remaining unbuilt work of that frame that can be skipped is skipped."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -412,10 +439,27 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, mkw_30fps, tr("Mario Kart World: 30 FPS mode"),
            tr("Forces the game to use its native 30 FPS mode at normal game speed. "
               "Takes effect after restarting the game."));
+    INSERT(Settings, mkw_60fps, tr("Mario Kart World: 60 FPS mode"),
+           tr("Forces the game's 60 FPS mode everywhere, not only in cutscenes. The game "
+              "advances one 60 FPS step per frame, so it never runs fast. Takes effect after "
+              "restarting the game and takes precedence over the 30 FPS mode."));
+    INSERT(Settings, mkw_60fps_fallback, tr("Mario Kart World: drop to 30 FPS when slow"),
+           tr("Only applies with the 60 FPS mode. When your PC can't hold 60 FPS, the game "
+              "switches to its 30 FPS mode and keeps normal speed, then tries 60 again every few "
+              "seconds. Turn it off to stay at 60 FPS, where slow frames play in slow motion. "
+              "Takes effect after restarting the game."));
     INSERT(Settings, mkw_dynamic_fps, tr("Mario Kart World: dynamic FPS (experimental)"),
            tr("Lets the game adjust between 30 and 60 FPS using whole-frame timing to maintain "
               "normal game speed. Takes effect after restarting the game and takes precedence over "
               "the 30 FPS mode."));
+    INSERT(Settings, hyrule_dynamic_fps,
+           tr("Hyrule Warriors: Age of Imprisonment: dynamic FPS (experimental)"),
+           tr("Drops to 30 FPS with the game's split-screen time step while the game runs below "
+              "about 50 FPS, so heavy slowdowns don't slow down the game, and tries 60 FPS again "
+              "every few seconds."));
+    INSERT(Settings, hyrule_30fps, tr("Hyrule Warriors: Age of Imprisonment: 30 FPS mode"),
+           tr("Always runs at 30 FPS with the game's split-screen time step, at normal game speed. "
+              "Takes precedence over dynamic FPS."));
     INSERT(Settings, barrier_feedback_loops, tr("Barrier feedback loops"),
            tr("Improves rendering of transparency effects in specific games."));
     INSERT(Settings, enable_buffer_history, tr("Enable buffer history"),
@@ -431,6 +475,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
 
     INSERT(Settings, vertex_input_dynamic_state, tr("Vertex Input Dynamic State"),
            tr("Enables vertex input dynamic state feature for better quality and performance."));
+
+    INSERT(Settings, mesh_shaders, tr("Mesh Shaders"),
+           tr("How Switch 2 games' mesh shader geometry is drawn.\n"
+              "Native uses the GPU's mesh shaders. Compute Fallback emulates them with compute "
+              "shaders: it can be slower in scenes with a lot of foliage, and it can't draw every "
+              "kind of mesh program.\n"
+              "Automatic uses the compute fallback on AMD RDNA2 GPUs (RX 6000 series), where "
+              "native mesh shaders hang the GPU, and native mesh shaders everywhere else."));
 
     INSERT(
         Settings, sample_shading, tr("Sample Shading"),
@@ -616,8 +668,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
          }});
     translations->insert({Settings::EnumMetadata<Settings::CpuBackend>::Index(),
                           {
-                              PAIR(CpuBackend, Dynarmic, tr("Dynarmic")),
-                              PAIR(CpuBackend, Nce, tr("NCE")),
+                              PAIR(CpuBackend, Dynarmic, tr("Dynarmic (JIT)")),
+#ifdef HAS_NCE
+                              PAIR(CpuBackend, Nce, tr("Native (NCE)")),
+#endif
+#ifdef HAS_HYPERVISOR
+                              PAIR(CpuBackend, Hypervisor, tr("Hypervisor (requires multicore)")),
+#endif
                           }});
     translations->insert({Settings::EnumMetadata<Settings::FullscreenMode>::Index(),
                           {
@@ -651,6 +708,7 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(FrameGenType, Lsfg, tr("Lossless Scaling (LSFG)")),
                               PAIR(FrameGenType, Fsr3, tr("Optical Flow Interpolation (built-in)")),
+                              PAIR(FrameGenType, NvidiaDlssG, tr("NVIDIA DLSS Frame Generation")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::ScalingFilter>::Index(),
                           {
@@ -880,6 +938,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(ExtendedDynamicState, EDS1, tr("ExtendedDynamicState 1")),
                               PAIR(ExtendedDynamicState, EDS2, tr("ExtendedDynamicState 2")),
                               PAIR(ExtendedDynamicState, EDS3, tr("ExtendedDynamicState 3")),
+                          }});
+
+    translations->insert({Settings::EnumMetadata<Settings::MeshShaderMode>::Index(),
+                          {
+                              PAIR(MeshShaderMode, Automatic, tr("Automatic")),
+                              PAIR(MeshShaderMode, Native, tr("Native")),
+                              PAIR(MeshShaderMode, Compute, tr("Compute Fallback")),
                           }});
 
     translations->insert({Settings::EnumMetadata<Settings::GameListMode>::Index(),

@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
+
+#include <memory>
 
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
@@ -17,14 +18,18 @@ class System;
 namespace Service::Set {
 using KeyCodeMap = std::array<u8, 0x1000>;
 
+class ISystemSettingsServer;
+
 LanguageCode GetLanguageCodeFromIndex(std::size_t idx);
 
 class ISettingsServer final : public ServiceFramework<ISettingsServer> {
 public:
-    explicit ISettingsServer(Core::System& system_);
+    explicit ISettingsServer(Core::System& system_,
+                             std::shared_ptr<ISystemSettingsServer> scratch_profile = {});
     ~ISettingsServer() override;
 
 private:
+    LanguageCode GetEffectiveLanguageCode() const;
     Result GetLanguageCode(Out<LanguageCode> out_language_code);
 
     Result GetAvailableLanguageCodes(Out<s32> out_count,
@@ -51,6 +56,8 @@ private:
         OutLargeData<std::array<u8, 0x80>, BufferAttr_HipcMapAlias> out_device_name);
 
     Result GetKeyCodeMapByPort(OutLargeData<KeyCodeMap, BufferAttr_HipcMapAlias> out_key_code_map, u32 port);
+
+    const std::shared_ptr<ISystemSettingsServer> scratch_profile;
 };
 
 } // namespace Service::Set

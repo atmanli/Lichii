@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -29,7 +28,9 @@ class System;
 
 class Reporter {
 public:
-    explicit Reporter(System& system_);
+    enum class FSAccessLogPolicy { Disk, Disabled };
+
+    Reporter(System& system_, FSAccessLogPolicy fs_access_log_policy_);
     ~Reporter();
 
     // Used by fatal services
@@ -82,6 +83,7 @@ private:
     bool IsReportingEnabled() const;
 
     System& system;
+    const FSAccessLogPolicy fs_access_log_policy;
 };
 
 } // namespace Core

@@ -450,6 +450,7 @@ public:
 
 #define FN_MAX_LIMIT_LIST \
     FN_MAX_LIMIT_ELEM(ComputeSharedMemorySize) \
+    FN_MAX_LIMIT_ELEM(ComputeWorkGroupInvocations) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSampledImages) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorStorageBuffers) \
     FN_MAX_LIMIT_ELEM(PerStageResources) \
@@ -895,11 +896,32 @@ FN_MAX_LIMIT_LIST
     /// device has, or an Apple GPU through MoltenVK, which runs compute in 32-wide SIMD groups
     /// though MoltenVK reports a minimum subgroup size of 4 and no required size. Measured on an M6
     /// (threadExecutionWidth 32, threads_per_simdgroup 32 and simdgroup_index_in_threadgroup
-    /// tid / 32 for threadgroups of 32 to 1024) and assumed for other Apple GPUs.
+    /// tid / 32 for threadgroups of 32 to 1024) and assumed for other Apple GPUs. That assumption
+    /// is probed at startup (ProbeComputeSubgroupsAreGuestWarps), and only the shader profile keeps
+    /// the verdict: this still returns the assumption.
     bool AreComputeSubgroupsGuestWarps() const {
         return CanRequireComputeGuestWarpSize() ||
                (GetMinSubgroupSize() == GuestWarpSize && GetMaxSubgroupSize() == GuestWarpSize) ||
-               (IsMoltenVK() && GetVendorID() == 0x106B && GetMaxSubgroupSize() == GuestWarpSize);
+               AssumesAppleComputeSubgroupsAreGuestWarps();
+    }
+
+    /// The largest compute workgroup in each dimension.
+    std::array<u32, 3> GetMaxComputeWorkGroupSize() const {
+        const auto& size = properties.properties.limits.maxComputeWorkGroupSize;
+        return {size[0], size[1], size[2]};
+    }
+
+    /// An Apple GPU through MoltenVK (PCI vendor ID 0x106B, not Intel or AMD GPUs in a Mac).
+    bool IsAppleGpu() const {
+        return IsMoltenVK() && GetVendorID() == 0x106B;
+    }
+
+    /// AreComputeSubgroupsGuestWarps holds only by the Apple GPU assumption, which nothing in
+    /// Vulkan guarantees: ProbeComputeSubgroupsAreGuestWarps checks it on the device.
+    bool AssumesAppleComputeSubgroupsAreGuestWarps() const {
+        return IsAppleGpu() && GetMaxSubgroupSize() == GuestWarpSize &&
+               !CanRequireComputeGuestWarpSize() &&
+               !(GetMinSubgroupSize() == GuestWarpSize && GetMaxSubgroupSize() == GuestWarpSize);
     }
 
     /// Returns true if shaders can ask for maximal reconvergence (VK_KHR_shader_maximal_reconvergence).

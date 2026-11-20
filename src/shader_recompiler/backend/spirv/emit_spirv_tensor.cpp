@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -11,6 +13,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "shader_recompiler/frontend/ir/program.h"
 
 namespace Shader::Backend::SPIRV {
@@ -329,6 +332,22 @@ std::optional<u32> ReserveSoftwareHmmaScratch(const Profile& profile, IR::Progra
         WorkgroupInvocations(program) > SoftwareHmmaMaxInvocations ||
         profile.max_subgroup_size != GUEST_WARP_LANES || Summarize(program).count == 0 ||
         !HmmaConverged(program)) {
+        return std::nullopt;
+    }
+    const auto& [x, y, z] = program.workgroup_size;
+    if (profile.compute_subgroup_layout_probed &&
+        !IsSubgroupProbeShape(x, y, z, profile.max_compute_workgroup_size,
+                              profile.max_compute_workgroup_invocations)) {
+        // The layout was probed for other workgroups only. Once a shape, to see whether any game
+        // uses one.
+        static std::mutex mutex;
+        static std::set<std::array<u32, 3>> logged;
+        std::scoped_lock lock{mutex};
+        if (logged.insert({x, y, z}).second) {
+            LOG_INFO(Shader, "Software HMMA keeps its shuffles in a {}x{}x{} workgroup: the "
+                             "subgroup probe did not run that shape",
+                     x, y, z);
+        }
         return std::nullopt;
     }
     return ReserveHmmaScratch(profile, program, SoftwareHmmaWordsPerWarp);
@@ -682,6 +701,67 @@ std::vector<u32> EmitCooperativeHmmaTest(u32 spirv_version) {
     std::vector<u32> code{module.Assemble()};
     PatchCooperativeHmma(code, types);
     return code;
+}
+
+std::vector<u32> EmitSubgroupLayoutProbe(u32 spirv_version, u32 x, u32 y, u32 z) {
+    if (spirv_version < 0x00010300U) {
+        throw LogicError("The subgroup layout probe needs SPIR-V 1.3");
+    }
+    Sirit::Module module{spirv_version};
+    module.AddCapability(spv::Capability::Shader);
+    module.AddCapability(spv::Capability::GroupNonUniform);
+    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
+
+    const Id void_type{module.TypeVoid()};
+    const Id u32_type{module.TypeUInt(32)};
+    const Id words_type{module.TypeRuntimeArray(u32_type)};
+    module.Decorate(words_type, spv::Decoration::ArrayStride, 4U);
+    const Id block_type{module.TypeStruct(words_type)};
+    module.Decorate(block_type, spv::Decoration::Block);
+    module.MemberDecorate(block_type, 0U, spv::Decoration::Offset, 0U);
+    const Id buffer{module.AddGlobalVariable(
+        module.TypePointer(spv::StorageClass::StorageBuffer, block_type),
+        spv::StorageClass::StorageBuffer)};
+    module.Decorate(buffer, spv::Decoration::DescriptorSet, 0U);
+    module.Decorate(buffer, spv::Decoration::Binding, 0U);
+    const Id input_pointer{module.TypePointer(spv::StorageClass::Input, u32_type)};
+    const auto input{[&](spv::BuiltIn builtin) {
+        const Id variable{module.AddGlobalVariable(input_pointer, spv::StorageClass::Input)};
+        module.Decorate(variable, spv::Decoration::BuiltIn, builtin);
+        return variable;
+    }};
+    const Id index_variable{input(spv::BuiltIn::LocalInvocationIndex)};
+    const Id size_variable{input(spv::BuiltIn::SubgroupSize)};
+    const Id id_variable{input(spv::BuiltIn::SubgroupId)};
+    const Id lane_variable{input(spv::BuiltIn::SubgroupLocalInvocationId)};
+    const auto constant{[&](u32 value) { return module.Constant(u32_type, value); }};
+
+    const Id main{module.OpFunction(void_type, spv::FunctionControlMask::MaskNone,
+                                    module.TypeFunction(void_type))};
+    module.AddLabel();
+    const auto shifted{[&](Id variable, u32 shift) {
+        return module.OpShiftLeftLogical(u32_type, module.OpLoad(u32_type, variable),
+                                         constant(shift));
+    }};
+    Id word{module.OpBitwiseOr(u32_type, constant(SUBGROUP_PROBE_VALID),
+                               module.OpLoad(u32_type, size_variable))};
+    word = module.OpBitwiseOr(u32_type, word, shifted(id_variable, 8));
+    word = module.OpBitwiseOr(u32_type, word, shifted(lane_variable, 16));
+    const Id pointer{module.OpAccessChain(
+        module.TypePointer(spv::StorageClass::StorageBuffer, u32_type), buffer, constant(0),
+        module.OpLoad(u32_type, index_variable))};
+    module.OpStore(pointer, word);
+    module.OpReturn();
+    module.OpFunctionEnd();
+
+    // Since SPIR-V 1.4 the interface lists every global the entry point uses.
+    std::vector<Id> interfaces{index_variable, size_variable, id_variable, lane_variable};
+    if (spirv_version >= 0x00010400U) {
+        interfaces.push_back(buffer);
+    }
+    module.AddEntryPoint(spv::ExecutionModel::GLCompute, main, "main", interfaces);
+    module.AddExecutionMode(main, spv::ExecutionMode::LocalSize, x, y, z);
+    return module.Assemble();
 }
 
 } // namespace Shader::Backend::SPIRV

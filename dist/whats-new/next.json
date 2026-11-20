@@ -1,0 +1,30 @@
+{
+  "summary": "A third GPU thread, HOME shortcuts and three game updates.",
+  "changes": [
+    {
+      "icon": "cpu",
+      "title": "A third GPU thread",
+      "body": "Eligible Switch 2 Vulkan draws use a third recording thread."
+    },
+    {
+      "icon": "clock",
+      "title": "Ocarina of Time above 60 FPS",
+      "body": "FPS Unlock fixes Epona's fence jump, the day/night clock and the Deku Tree webs."
+    },
+    {
+      "icon": "apps",
+      "title": "Switch 2 games in HOME",
+      "body": "Play games from your folders in HOME without installing them."
+    },
+    {
+      "icon": "layers",
+      "title": "Xenoblade Chronicles: Definitive Edition",
+      "body": "Fixes title-screen textures and a docked/handheld crash."
+    },
+    {
+      "icon": "bug",
+      "title": "Yoshi and the Mysterious Book",
+      "body": "Invalid Vulkan texture-buffer views no longer crash the game."
+    }
+  ]
+}

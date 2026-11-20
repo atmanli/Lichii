@@ -17,11 +17,13 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
+#include "core/file_sys/vfs/vfs_layered.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -85,19 +87,77 @@ constexpr std::array StaticModules = {"rtld",    "main",    "subsdk0", "subsdk1"
                                       "subsdk8", "subsdk9", "sdk"};
 constexpr size_t MainModuleIndex = 1;
 
-FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
+FileSys::VirtualDir FindLooseSubdirectory(const FileSys::VirtualDir& parent,
+                                          std::string_view name) {
     if (parent == nullptr) {
         return nullptr;
     }
-    if (const auto dir = parent->GetSubdirectory("romfs")) {
+    if (const auto dir = parent->GetSubdirectory(name)) {
         return dir;
     }
     for (const auto& dir : parent->GetSubdirectories()) {
-        const auto name = dir->GetName();
-        if (name.size() == 5 && std::equal(name.begin(), name.end(), "romfs", [](char a, char b) {
-                return std::tolower(static_cast<unsigned char>(a)) == b;
-            })) {
+        if (Common::ToLower(dir->GetName()) == name) {
             return dir;
+        }
+    }
+    return nullptr;
+}
+
+FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
+    return FindLooseSubdirectory(parent, "romfs");
+}
+
+std::optional<u64> LooseUpdateVersion(const FileSys::VirtualDir& directory) {
+    const auto name = directory->GetName();
+    u64 version{};
+    const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), version);
+    if (error != std::errc{} || end != name.data() + name.size()) {
+        return std::nullopt;
+    }
+    return version;
+}
+
+bool IsLooseEditionExeFS(const FileSys::VirtualDir& exefs,
+                         const FileSys::VirtualDir& base_package) {
+    FileSys::ProgramMetadata metadata;
+    if (!exefs || !FileSys::IsDirectoryExeFS(exefs) ||
+        metadata.Load(exefs->GetFile("main.npdm")) != ResultStatus::Success ||
+        !metadata.IsSwitch2()) {
+        return false;
+    }
+    const u64 id = metadata.GetTitleID();
+    if ((id >> 56) != 0x04 || id != FileSys::GetBaseTitleIDWithProgramIndex(id, 1)) {
+        return false;
+    }
+    if (const auto base_exefs = FindLooseSubdirectory(base_package, "exefs")) {
+        const auto npdm = base_exefs->GetFile("main.npdm");
+        FileSys::ProgramMetadata base_metadata;
+        if (npdm && base_metadata.Load(npdm) == ResultStatus::Success) {
+            return FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(id)) ==
+                   FileSys::GetSwitch1ApplicationID(
+                       FileSys::GetBaseTitleID(base_metadata.GetTitleID()));
+        }
+    }
+    return true;
+}
+
+FileSys::VirtualDir FindEditionVersion(const FileSys::VirtualDir& package) {
+    auto parent = package->GetParentDirectory();
+    if (!parent) {
+        return nullptr;
+    }
+    const auto name = Common::ToLower(package->GetName());
+    if (Common::ToLower(parent->GetName()) == "program" && (name == "1" || name == "program1")) {
+        parent = parent->GetParentDirectory();
+    } else if (name != "program1") {
+        return nullptr;
+    }
+    if (parent && LooseUpdateVersion(parent)) {
+        if (const auto storage = parent->GetParentDirectory()) {
+            const auto storage_name = Common::ToLower(storage->GetName());
+            if (storage_name == "updates" || storage_name == "upgrade") {
+                return parent;
+            }
         }
     }
     return nullptr;
@@ -115,22 +175,27 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
         }
     }
 
-    const auto build_from = [](const FileSys::VirtualDir& romfs_dir) -> FileSys::VirtualFile {
-        if (romfs_dir == nullptr) {
+    const auto build_from = [](std::vector<FileSys::VirtualDir> dirs) -> FileSys::VirtualFile {
+        if (dirs.empty()) {
             return nullptr;
         }
         // Building it walks every file and keeps an object for each (title 1: 206k files, ~150
         // MiB), so loaders of the same directory share one build while any of them holds it.
         static std::mutex cache_mutex;
-        static std::map<std::string, std::weak_ptr<FileSys::VfsFile>> cache;
+        static std::map<std::vector<std::string>, std::weak_ptr<FileSys::VfsFile>> cache;
+        std::vector<std::string> paths;
+        for (const auto& dir : dirs) {
+            paths.push_back(dir->GetFullPath());
+        }
         std::scoped_lock lk{cache_mutex};
-        auto& cached = cache[romfs_dir->GetFullPath()];
+        auto& cached = cache[std::move(paths)];
         if (auto built = cached.lock()) {
             return built;
         }
         LOG_INFO(Loader, "Using RomFS directory next to the ExeFS");
         const auto started = std::chrono::steady_clock::now();
-        auto built = FileSys::CreateRomFS(romfs_dir);
+        auto built = FileSys::CreateRomFS(
+            FileSys::LayeredVfsDirectory::MakeLayeredDirectory(std::move(dirs)));
         LOG_INFO(Loader, "Loose RomFS image ready: elapsed_ms={}",
                  std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - started)
@@ -140,8 +205,22 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
     };
 
     if (const auto parent = exefs_dir->GetParentDirectory()) {
+        if (const auto version = FindEditionVersion(parent)) {
+            const auto storage = version->GetParentDirectory();
+            const auto game = storage->GetParentDirectory();
+            const auto base = FindLooseSubdirectory(game, "base");
+            if (IsLooseEditionExeFS(exefs_dir, base)) {
+                std::vector<FileSys::VirtualDir> tiers;
+                for (const auto& package : {parent, version, base}) {
+                    if (auto romfs = FindLooseRomFSDirectory(package)) {
+                        tiers.push_back(std::move(romfs));
+                    }
+                }
+                return build_from(std::move(tiers));
+            }
+        }
         if (const auto romfs_dir = FindLooseRomFSDirectory(parent)) {
-            return build_from(romfs_dir);
+            return build_from({romfs_dir});
         }
         // Some base dumps carry only the executable and leave every file in an update, so the
         // base has no romfs at all (Pokemon Pokopia: base/romfs does not exist, the 6.9 GB of
@@ -153,18 +232,12 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
                 FileSys::VirtualDir newest{};
                 u64 newest_version{0};
                 for (const auto& candidate : updates->GetSubdirectories()) {
-                    const std::string name = candidate->GetName();
-                    u64 version{0};
-                    const auto parsed =
-                        std::from_chars(name.data(), name.data() + name.size(), version);
                     // from_chars stops at the first non digit and still reports success, so a
                     // directory called "655360_old" or "999999.bak" would be accepted with its
                     // leading digits. Require the whole name to be the number.
-                    if (parsed.ec != std::errc{} || parsed.ptr != name.data() + name.size()) {
-                        continue;
-                    }
-                    if (version >= newest_version) {
-                        newest_version = version;
+                    if (const auto version = LooseUpdateVersion(candidate);
+                        version && *version >= newest_version) {
+                        newest_version = *version;
                         newest = candidate;
                     }
                 }
@@ -196,7 +269,7 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
                     }
                     LOG_INFO(Loader, "Base RomFS is absent, using the update RomFS (version {})",
                              newest_version);
-                    return build_from(romfs_dir);
+                    return build_from({romfs_dir});
                 }
             }
         }
@@ -284,6 +357,52 @@ std::vector<FileSys::VirtualDir> FindSidecarDirs(const FileSys::VirtualDir& exef
 }
 
 } // namespace
+
+FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
+    if (!directory) {
+        return nullptr;
+    }
+    if (auto main = directory->GetFile("main")) {
+        return main;
+    }
+
+    FileSys::VirtualFile newest_edition;
+    u64 newest_version{};
+    const auto base = FindLooseSubdirectory(directory, "base");
+    for (const auto storage_name : {"updates", "upgrade"}) {
+        const auto storage = FindLooseSubdirectory(directory, storage_name);
+        if (!storage) {
+            continue;
+        }
+        for (const auto& version : storage->GetSubdirectories()) {
+            const auto number = LooseUpdateVersion(version);
+            if (!number || (newest_edition && *number <= newest_version)) {
+                continue;
+            }
+            const auto programs = FindLooseSubdirectory(version, "program");
+            for (const auto& package :
+                 {FindLooseSubdirectory(version, "program1"), FindLooseSubdirectory(programs, "1"),
+                  FindLooseSubdirectory(programs, "program1")}) {
+                const auto exefs = FindLooseSubdirectory(package, "exefs");
+                if (IsLooseEditionExeFS(exefs, base)) {
+                    newest_edition = exefs->GetFile("main");
+                    newest_version = *number;
+                    break;
+                }
+            }
+        }
+    }
+    if (newest_edition) {
+        return newest_edition;
+    }
+    for (const auto& package : {directory, base}) {
+        if (const auto exefs = FindLooseSubdirectory(package, "exefs");
+            exefs && FileSys::IsDirectoryExeFS(exefs)) {
+            return exefs->GetFile("main");
+        }
+    }
+    return nullptr;
+}
 
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
     : AppLoader(std::move(file_))

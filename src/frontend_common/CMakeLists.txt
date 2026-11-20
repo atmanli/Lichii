@@ -22,7 +22,8 @@ add_library(frontend_common STATIC
     nx_archive.h nx_archive.cpp
     cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp
     cloud_sync/save_archive.h cloud_sync/save_archive.cpp
-    cloud_sync/google_auth.h cloud_sync/google_auth.cpp)
+    cloud_sync/google_auth.h cloud_sync/google_auth.cpp
+    cloud_sync/drive_client.h cloud_sync/drive_client.cpp)
 
 target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
     OpenSSL::SSL OpenSSL::Crypto minizip::minizip)

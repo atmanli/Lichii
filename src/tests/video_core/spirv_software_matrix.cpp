@@ -1178,14 +1178,41 @@ TEST_CASE("Software HMMA keeps its shuffles where a warp may run it diverged",
                                        {{}, Node::Type::Return}};
         REQUIRE_FALSE(reserves(fixture));
     }
-    SECTION("After an if that closed") {
-        TensorProgram fixture{1, 16};
-        SlowShuffles(fixture);
-        fixture.program.syntax_list = {{{}, Node::Type::If},
-                                       {{}, Node::Type::EndIf},
-                                       {{.block = &fixture.block}, Node::Type::Block},
-                                       {{}, Node::Type::Return}};
-        REQUIRE(reserves(fixture));
+    SECTION("After an if that closed, where lanes meet again only with maximal reconvergence") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{}, Node::Type::If},
+                                           {{}, Node::Type::EndIf},
+                                           {{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture) == reconvergence);
+        }
+    }
+    SECTION("After a loop that closed, likewise") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{}, Node::Type::Loop},
+                                           {{}, Node::Type::Repeat},
+                                           {{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture) == reconvergence);
+        }
+    }
+    SECTION("Before any if, with or without maximal reconvergence") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::If},
+                                           {{}, Node::Type::EndIf},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture));
+        }
     }
 }
 

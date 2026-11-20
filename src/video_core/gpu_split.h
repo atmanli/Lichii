@@ -21,6 +21,7 @@
 #include "common/common_types.h"
 #include "common/container/unordered_map.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_render_follower.h"
 
 namespace Core {
 class System;
@@ -43,7 +44,8 @@ enum class DrainSite : u32 {
     Acquire,        ///< A semaphore acquire reads the value the back may release
     SemaphoreFlush, ///< The acquired semaphore is in the buffer cache
     FenceRelease,   ///< The puller's acquires release the pending fences
-    ListWriters,    ///< GPU-written command lists: the dispatches and copies sent before them
+    ListWriters,    ///< Command lists on pages no GPU work wrote: the writers the last sync orders
+    ListCopies,     ///< GPU-written command lists: the dispatches and copies sent before them
     ListSync,       ///< Command lists on draw-written pages: the work before the last host sync
     ListFlush,      ///< Command lists on GPU-written pages: drain and flush the pages
     MacroDmaRead,   ///< The front's macros read memory (MME DMA) the caches may still write
@@ -57,6 +59,17 @@ enum class DrainSite : u32 {
     BackRegister,   ///< A register a macro the back ran may have written (Maxwell3D)
     BackCode,       ///< The macro code changes under the macros the back has yet to run
     SafeRead,       ///< Safe command list reads: images and reports on the list's pages
+    Count,
+};
+
+/// Why the front can't tell what an equal or mask acquire's word holds once the back ran what was
+/// sent (GpuSplit::SettledWordAt), counted with the acquires.
+enum class AcquireUnsettled : u32 {
+    Elsewhere, ///< Acquires read it from the syncpoint shim or the mirror shadow
+    Unknown,   ///< The last release noted there has an unknown value or a lower bound
+    Writes,    ///< The back has yet to run another write sent there, or one after the note
+    Unnoted,   ///< A release the front did not note may land yet
+    Fenced,    ///< The last release noted there lands once its fence ran, and has not yet
     Count,
 };
 
@@ -90,6 +103,8 @@ struct AcquireStats {
     std::atomic<u64> latched{};   ///< Polls resumed by a release the back ran (no drain)
     std::atomic<u64> drained{};   ///< Acquires and polls that drained the split
     std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire
+    /// Of drain_operation: those whose word queued work may still change, by why
+    std::array<std::atomic<u64>, static_cast<size_t>(AcquireUnsettled::Count)> unsettled{};
     std::atomic<u64> drain_settings{};  ///< ...the split or the accuracy settings ask for it
     std::atomic<u64> drain_word{};      ///< ...the word is unmapped or on a GPU-written page
     std::atomic<u64> drain_queued{};    ///< ...a queued release to it is unknown or doesn't meet it
@@ -127,6 +142,11 @@ struct AcquireStats {
     /// The front's waits for its back (Drain, WaitFor, a full ring) and their time, by site
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drains{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drain_ns{};
+    /// Of the list waits: those after a sync met by a queued release (NoteSync), and their time
+    /// before and after the back ran that release
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_waits{};
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_before_ns{};
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_after_ns{};
 };
 inline AcquireStats g_acquire_stats;
 /// Whether g_acquire_stats counts, as of the split's last start.
@@ -142,9 +162,9 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",           "fetch drain",   "acquire",    "semaphore flush", "fence release",
-    "list writers",    "list sync",     "list flush", "macro dma read",  "macro dma writes",
-    "macro dma flush", "gp sync fence", "map",        "front start",     "front verify",
-    "ring full",       "back register", "back code",     "safe read",
+    "list writers",    "list copy writers", "list sync", "list flush", "macro dma read",
+    "macro dma writes", "macro dma flush", "gp sync fence", "map",     "front start",
+    "front verify",    "ring full",     "back register", "back code", "safe read",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -187,10 +207,13 @@ public:
     [[nodiscard]] static bool OnGpuThread() {
         return on_gpu_thread;
     }
-    /// Whether the calling thread owns the Vulkan scheduler: the back while it runs, else the
-    /// GPU thread. Other threads (CPU cores, services) must not record or submit work.
+    /// The GPU back owns the scheduler while the split runs, except while a draw packet is
+    /// lent to GPURender. Without the split the GPU thread owns it.
     [[nodiscard]] static bool OwnsScheduler() {
-        return Get().BackRunning() ? on_back_thread : on_gpu_thread;
+        if (on_render_thread) {
+            return true;
+        }
+        return Get().BackRunning() ? on_back_thread && !instance.RenderPending() : on_gpu_thread;
     }
     /// Draw state belongs to the split back thread, or the sole GPU scheduler owner.
     [[nodiscard]] static bool CanReuseDrawState() {
@@ -216,6 +239,15 @@ public:
     /// Vulkan). Called by the front between commands.
     void MaybeStart(Core::System& system);
     void Stop();
+
+    void SetRenderFollowerSupported(bool supported) {
+        render_follower_supported = supported;
+    }
+    [[nodiscard]] bool CanPostRender() const {
+        return on_back_thread && render_terminal_draw;
+    }
+    void PostRender(Nx2RenderFollower::Work work);
+    void WaitRender();
 
     /// What the sender of an entry tells about the guest memory the back writes running it, for
     /// the front's reads of guest memory (WaitForWrites, MemoryWritesTarget).
@@ -419,9 +451,12 @@ public:
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain, or note it when a release still queued meets them): the
     /// guest's GPU work before it is complete before the commands after it are fetched.
-    void NoteSync() {
+    /// `queued_release`: the position the back runs the queued release that met an acquire by,
+    /// for the list waits' split (AcquireStats::site_queued_waits); 0 for any other sync.
+    void NoteSync(u64 queued_release = 0) {
         last_sync_position = write_position;
         synced_writer_position = last_writer_position;
+        queued_sync_release = queued_release;
     }
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
@@ -457,6 +492,20 @@ public:
     /// yet.
     [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
         u64 device_address) const;
+    struct SettledWord {
+        u32 value;
+        std::optional<u64> release; ///< The position the back runs the noted release by
+    };
+    /// What an acquire of the word at `address` (`device_address`) finds once the back ran
+    /// everything sent so far, where the front knows that exactly, as FrontQmdView::WordAt values
+    /// a reduction's base: the last release noted there, with a known payload, landing as the back
+    /// runs it, and only noted releases to other words sent after it; or memory, once the back ran
+    /// every write sent there, shader stores included, and each landed. None, with `why`, where
+    /// queued work may still change it or acquires read it elsewhere. Every release the front did
+    /// not note must have landed for either. Sends the state writes gathered so far first.
+    [[nodiscard]] std::optional<SettledWord> SettledWordAt(const Tegra::MemoryManager& memory,
+                                                           GPUVAddr address, u64 device_address,
+                                                           AcquireUnsettled& why);
     /// A release just sent writes `size` bytes from `device_address` that the front does not
     /// value (a report's timestamp, a mirrored release): noted word by word as unknown, so that
     /// nothing takes memory there for what the back finds until they landed.
@@ -719,7 +768,8 @@ private:
 
     /// One step of a front wait for the back to consume `target`.
     void Backoff(u32 spins, u64 target);
-    /// After the back stored `consumed`: wakes a front sleeping in Backoff.
+    void SleepForBack(u64 target, bool wait_for_idle = false);
+    /// After the back published consumption or finished its idle hook.
     void NotifyFront() {
         if (front_waiting.load(std::memory_order_seq_cst)) {
             front_wake.fetch_add(1, std::memory_order_seq_cst);
@@ -728,6 +778,11 @@ private:
     }
 
     void BackLoop(std::stop_token stop_token);
+    void RenderLoop();
+    [[nodiscard]] bool RenderPending() const {
+        return render_follower && render_follower->Pending();
+    }
+    [[nodiscard]] bool CanOverlapRender(u64 entry) const;
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
@@ -746,6 +801,7 @@ private:
     u64 last_writer_position{};
     u64 last_sync_position{};
     u64 synced_writer_position{};
+    u64 queued_sync_release{}; ///< NoteSync: the queued release that met the last acquire
     u64 last_entry_start{}; ///< Where the last entry sent starts
     struct SemaphoreWrite {
         u64 position; ///< write_position once it was sent
@@ -828,6 +884,13 @@ private:
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
     static inline thread_local bool on_gpu_thread{};
+    static inline thread_local bool on_render_thread{};
+    bool render_follower_supported{};
+    bool render_terminal_draw{};
+    std::optional<Nx2RenderFollower> render_follower;
+    std::jthread render_thread;
+    u64 render_overlap_entries{};
+    u64 render_joins{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};

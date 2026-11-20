@@ -1,0 +1,117 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <system_error>
+
+#include <fmt/format.h>
+#include <nlohmann/json.hpp>
+
+#include "common/fs/path_util.h"
+#include "common/logging.h"
+#include "frontend_common/cloud_sync/sync_state.h"
+
+namespace FrontendCommon::CloudSync {
+
+namespace {
+
+std::filesystem::path StatePath() {
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir) / "cloud_sync" / "state.json";
+}
+
+std::string StringField(const nlohmann::json& object, const char* key) {
+    const auto it = object.find(key);
+    return it != object.end() && it->is_string() ? it->get<std::string>() : std::string{};
+}
+
+std::map<std::string, SyncedVersion> ReadVersions(const nlohmann::json& root, const char* key) {
+    std::map<std::string, SyncedVersion> versions;
+    const auto object = root.find(key);
+    if (object == root.end() || !object->is_object()) {
+        return versions;
+    }
+    for (const auto& [name, value] : object->items()) {
+        if (value.is_object()) {
+            versions.emplace(name, SyncedVersion{StringField(value, "fileId"),
+                                                 StringField(value, "contentHash"),
+                                                 StringField(value, "modifiedTime")});
+        }
+    }
+    return versions;
+}
+
+nlohmann::json VersionsJson(const std::map<std::string, SyncedVersion>& versions) {
+    nlohmann::json json = nlohmann::json::object();
+    for (const auto& [name, version] : versions) {
+        json[name] = {{"fileId", version.file_id},
+                      {"contentHash", version.content_hash},
+                      {"modifiedTime", version.modified_time}};
+    }
+    return json;
+}
+
+} // Anonymous namespace
+
+std::string SaveKey(u64 title_id, const std::string& drive_user) {
+    return fmt::format("{:016X}/{}", title_id, drive_user);
+}
+
+std::timed_mutex& SyncStateMutex() {
+    static std::timed_mutex mutex;
+    return mutex;
+}
+
+std::unique_lock<std::timed_mutex> LockSyncState(std::stop_token stop) {
+    std::unique_lock lock{SyncStateMutex(), std::defer_lock};
+    while (!stop.stop_requested() && !lock.try_lock_for(std::chrono::milliseconds{50})) {
+    }
+    return lock;
+}
+
+std::optional<SyncState> LoadSyncState() {
+    const auto path = StatePath();
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) && !ec) {
+        return SyncState{};
+    }
+    std::ifstream file{path, std::ios::binary};
+    const auto root = file.is_open() ? nlohmann::json::parse(std::istreambuf_iterator<char>{file},
+                                                             {}, nullptr, false)
+                                     : nlohmann::json{};
+    if (!root.is_object()) {
+        LOG_ERROR(Frontend, "The cloud sync state {} is unreadable",
+                  Common::FS::PathToUTF8String(path));
+        return std::nullopt;
+    }
+    return SyncState{.saves = ReadVersions(root, "saves")};
+}
+
+bool SaveSyncState(const SyncState& state) {
+    const auto path = StatePath();
+    auto temporary = path;
+    temporary += ".tmp";
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    {
+        std::ofstream file{temporary, std::ios::binary | std::ios::trunc};
+        file << nlohmann::json{{"saves", VersionsJson(state.saves)}}.dump(1, '\t');
+        // Closed here, as a failed flush shows only then.
+        file.close();
+        if (file.fail()) {
+            LOG_ERROR(Frontend, "Could not write the cloud sync state");
+            std::filesystem::remove(temporary, ec);
+            return false;
+        }
+    }
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        LOG_ERROR(Frontend, "Could not replace the cloud sync state: {}", ec.message());
+        return false;
+    }
+    return true;
+}
+
+} // namespace FrontendCommon::CloudSync

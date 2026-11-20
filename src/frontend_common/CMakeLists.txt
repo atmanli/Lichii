@@ -23,7 +23,10 @@ add_library(frontend_common STATIC
     cloud_sync/zip_archive.h cloud_sync/zip_archive.cpp
     cloud_sync/save_archive.h cloud_sync/save_archive.cpp
     cloud_sync/google_auth.h cloud_sync/google_auth.cpp
-    cloud_sync/drive_client.h cloud_sync/drive_client.cpp)
+    cloud_sync/drive_client.h cloud_sync/drive_client.cpp
+    cloud_sync/sync_state.h cloud_sync/sync_state.cpp
+    cloud_sync/sync_layout.h cloud_sync/sync_layout.cpp
+    cloud_sync/sync_engine.h cloud_sync/sync_engine.cpp)
 
 target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
     OpenSSL::SSL OpenSSL::Crypto minizip::minizip)

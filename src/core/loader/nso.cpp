@@ -193,6 +193,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         return std::nullopt;
     }
     Kernel::CodeSet codeset;
+    // The image grows in place below, the argument block, .bss and a patch section appended, up
+    // to the extent checked above: reserved now, as growing a vector past its capacity doubles
+    // it, and an image near the largest pool asked for twice that.
+    codeset.memory.reserve(static_cast<size_t>(image_extent));
     codeset.memory.resize(module_start + segments_end);
     // Each segment is read inside this loop, from extents the header checks found inside the
     // file: a raw one straight into the image, a compressed one's stored bytes into one buffer,
@@ -250,9 +254,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             if (!read(stored)) {
                 return std::nullopt;
             }
-            // An image whose segments are all empty has no storage, so an empty segment's target
-            // can be null, and lz4 does arithmetic on its destination even when it writes nothing:
-            // give it a byte it never writes. The empty segment's rule is lz4's, as before.
+            // An image with nothing in it (every segment empty, no arguments, no .bss) has no
+            // storage, so an empty segment's target is null there, and lz4 does arithmetic on its
+            // destination even when it writes nothing: give it a byte it never writes. The empty
+            // segment's rule is lz4's, as before.
             u8 nowhere;
             const int r = Common::Compression::DecompressDataLZ4(
                 target.empty() ? &nowhere : target.data(), target.size(), stored.data(),

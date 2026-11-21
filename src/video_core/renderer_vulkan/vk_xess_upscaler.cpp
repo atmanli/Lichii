@@ -96,22 +96,6 @@ xess_quality_settings_t ToXeSSRatioQuality(VkExtent2D input, VkExtent2D output) 
     return closest->quality;
 }
 
-xess_quality_settings_t ToXeSSQuality(Settings::XessQuality quality) {
-    switch (quality) {
-    case Settings::XessQuality::Quality:
-        return XESS_QUALITY_SETTING_QUALITY;
-    case Settings::XessQuality::Balanced:
-        return XESS_QUALITY_SETTING_BALANCED;
-    case Settings::XessQuality::Performance:
-        return XESS_QUALITY_SETTING_PERFORMANCE;
-    case Settings::XessQuality::UltraPerformance:
-        return XESS_QUALITY_SETTING_ULTRA_PERFORMANCE;
-    case Settings::XessQuality::UltraQuality:
-    default:
-        return XESS_QUALITY_SETTING_ULTRA_QUALITY;
-    }
-}
-
 VkExtent2D ScaleExtentAtQualityRatio(VkExtent2D input, double scale) {
     if (input.width == 0 || input.height == 0 || !std::isfinite(scale) || scale < 1.0) {
         return {};

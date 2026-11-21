@@ -553,8 +553,6 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
         device.IsHostQueryResetSupported());
-    oot_performance_scale =
-        Settings::AppliedOcarinaRenderScale() == Settings::NvidiaDlssQuality::Performance;
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -3896,22 +3894,22 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
         const f64 ratio_height = independent_output.height > 0
             ? static_cast<f64>(independent_output.height) / static_cast<f64>(extent.height)
             : 1.0;
-        const f64 ratio = std::max(ratio_width, ratio_height);
+        const f64 resolved_ratio = std::max(ratio_width, ratio_height);
         const f64 max_ratio = oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess
             ? 3.0 : 4.0;
-        if (ratio > max_ratio && oot_backend ==
+        if (resolved_ratio > max_ratio && oot_backend ==
             (VideoCommon::OcarinaUpscaleBackend::Xess)) {
             independent_output = {static_cast<u32>(std::llround(extent.width * max_ratio)),
                                   static_cast<u32>(std::llround(extent.height * max_ratio))};
             LOG_WARNING(Render_Vulkan,
                         "Ocarina XeSS upscale ratio {:.2f} exceeded 3.0; clamped output to {}x{}",
-                        ratio, independent_output.width, independent_output.height);
-        } else if (ratio > max_ratio) {
+                        resolved_ratio, independent_output.width, independent_output.height);
+        } else if (resolved_ratio > max_ratio) {
             independent_output = {static_cast<u32>(std::llround(extent.width * max_ratio)),
                                   static_cast<u32>(std::llround(extent.height * max_ratio))};
             LOG_WARNING(Render_Vulkan,
                         "Ocarina FSR upscale ratio {:.2f} exceeded 4.0; clamped output to {}x{}",
-                        ratio, independent_output.width, independent_output.height);
+                        resolved_ratio, independent_output.width, independent_output.height);
         }
         const VkExtent2D output_extent =
             native_resolution ? extent
@@ -3937,7 +3935,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
             oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess ? "XeSS"
             : oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ? "FSR 3.1"
                                                                      : "Off";
-        const f32 ratio = static_cast<f32>(output_extent.width) /
+        const f32 log_ratio = static_cast<f32>(output_extent.width) /
                           static_cast<f32>(std::max(extent.width, 1U));
         static u64 logged_contract_frame{};
         if (logged_contract_frame != render_trace_frame) {
@@ -3946,12 +3944,12 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
                      "Ocarina upscale: upscaler={} input={}x{} output={}x{} window={}x{} "
                      "ratio={:.2f}",
                      upscaler_name, extent.width, extent.height, output_extent.width,
-                     output_extent.height, window_extent.width, window_extent.height, ratio);
+                     output_extent.height, window_extent.width, window_extent.height, log_ratio);
         }
         oot_dlss_frame = render_trace_frame;
         // AMD's jitter phase count for FSR: 8 * (output / render width)^2, so 18 for 1440p -> 4K
         // and 8 for native AA.
-        oot_jitter_phases = std::max(1U, static_cast<u32>(8.0f * ratio * ratio));
+        oot_jitter_phases = std::max(1U, static_cast<u32>(8.0f * log_ratio * log_ratio));
         oot_fallback_reason = nullptr;
         return true;
     } catch (const vk::Exception& error) {

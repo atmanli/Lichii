@@ -3871,18 +3871,51 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
         const VkExtent2D target_extent{target.size.width, target.size.height};
         const auto& screen = emu_window.GetFramebufferLayout().screen;
         const VkExtent2D window_extent{screen.GetWidth(), screen.GetHeight()};
+        const bool new_output_setting =
+            Settings::values.ocarina_upscale_output.GetValue() !=
+            Settings::OcarinaUpscaleOutput::Legacy;
         const bool window_sized_output =
             upscale_4k &&
             (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ||
              oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess) &&
-            window_extent.width != 0 && window_extent.height != 0;
+            (window_extent.width != 0 && window_extent.height != 0);
         // The offset this frame's scene was drawn with (none when no scene draw was offset).
         std::array<f32, 2> jitter{};
         if (oot_jitter_frame == render_trace_frame) {
             jitter = oot_jitter_offset;
         }
+        const auto resolved_output =
+            Settings::OcarinaUpscaleOutputResolution(window_extent.width, window_extent.height);
+        VkExtent2D independent_output{resolved_output.width, resolved_output.height};
+        if (independent_output.width < extent.width || independent_output.height < extent.height) {
+            independent_output = extent;
+        }
+        const f64 ratio_width = independent_output.width > 0
+            ? static_cast<f64>(independent_output.width) / static_cast<f64>(extent.width)
+            : 1.0;
+        const f64 ratio_height = independent_output.height > 0
+            ? static_cast<f64>(independent_output.height) / static_cast<f64>(extent.height)
+            : 1.0;
+        const f64 ratio = std::max(ratio_width, ratio_height);
+        const f64 max_ratio = oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess
+            ? 3.0 : 4.0;
+        if (ratio > max_ratio && oot_backend ==
+            (VideoCommon::OcarinaUpscaleBackend::Xess)) {
+            independent_output = {static_cast<u32>(std::llround(extent.width * max_ratio)),
+                                  static_cast<u32>(std::llround(extent.height * max_ratio))};
+            LOG_WARNING(Render_Vulkan,
+                        "Ocarina XeSS upscale ratio {:.2f} exceeded 3.0; clamped output to {}x{}",
+                        ratio, independent_output.width, independent_output.height);
+        } else if (ratio > max_ratio) {
+            independent_output = {static_cast<u32>(std::llround(extent.width * max_ratio)),
+                                  static_cast<u32>(std::llround(extent.height * max_ratio))};
+            LOG_WARNING(Render_Vulkan,
+                        "Ocarina FSR upscale ratio {:.2f} exceeded 4.0; clamped output to {}x{}",
+                        ratio, independent_output.width, independent_output.height);
+        }
         const VkExtent2D output_extent =
             native_resolution ? extent
+            : new_output_setting ? independent_output
             : window_sized_output ? window_extent
             : upscale_4k ? VkExtent2D{3840, 2160}
                          : target_extent;
@@ -3900,10 +3933,24 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, u64 na
             oot_4k_guest_present = VK_NULL_HANDLE;
             oot_temporal_output_extent = output_extent;
         }
+        const char* upscaler_name =
+            oot_backend == VideoCommon::OcarinaUpscaleBackend::Xess ? "XeSS"
+            : oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr ? "FSR 3.1"
+                                                                     : "Off";
+        const f32 ratio = static_cast<f32>(output_extent.width) /
+                          static_cast<f32>(std::max(extent.width, 1U));
+        static u64 logged_contract_frame{};
+        if (logged_contract_frame != render_trace_frame) {
+            logged_contract_frame = render_trace_frame;
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina upscale: upscaler={} input={}x{} output={}x{} window={}x{} "
+                     "ratio={:.2f}",
+                     upscaler_name, extent.width, extent.height, output_extent.width,
+                     output_extent.height, window_extent.width, window_extent.height, ratio);
+        }
         oot_dlss_frame = render_trace_frame;
         // AMD's jitter phase count for FSR: 8 * (output / render width)^2, so 18 for 1440p -> 4K
         // and 8 for native AA.
-        const f32 ratio = static_cast<f32>(output_extent.width) / static_cast<f32>(extent.width);
         oot_jitter_phases = std::max(1U, static_cast<u32>(8.0f * ratio * ratio));
         oot_fallback_reason = nullptr;
         return true;

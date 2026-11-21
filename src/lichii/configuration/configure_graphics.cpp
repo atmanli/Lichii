@@ -29,6 +29,7 @@
 #include "common/common_types.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "core/frontend/framebuffer_layout.h"
 #include "core/core.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/util/vk.h"
@@ -225,6 +226,8 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QComboBox* frame_gen_type_combobox = nullptr;
     QCheckBox* nvidia_dlss_checkbox = nullptr;
     QCheckBox* ocarina_xess_checkbox = nullptr;
+    std::vector<QWidget*> ocarina_custom_input_widgets;
+    std::vector<QWidget*> ocarina_custom_output_widgets;
 #ifdef EGLANTINE_STREAMLINE
     NvidiaDlssPanel* nvidia_dlss_panel = nullptr;
 #endif
@@ -391,6 +394,23 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             group_layout->addWidget(nvidia_dlss_panel);
             hold_graphics.emplace(setting->Id(), group);
 #endif
+        } else if (setting->Id() == Settings::values.ocarina_render_input.Id()) {
+            ocarina_render_input_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_upscale_output.Id()) {
+            ocarina_upscale_output_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_upscaler.Id()) {
+            ocarina_upscaler_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_custom_input_width.Id() ||
+                   setting->Id() == Settings::values.ocarina_custom_input_height.Id()) {
+            ocarina_custom_input_widgets.push_back(widget);
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_custom_output_width.Id() ||
+                   setting->Id() == Settings::values.ocarina_custom_output_height.Id()) {
+            ocarina_custom_output_widgets.push_back(widget);
+            hold_graphics.emplace(setting->Id(), widget);
         } else if (setting->Id() == Settings::values.ocarina_xess.Id()) {
             ocarina_xess_checkbox = widget->checkbox;
             ocarina_xess_group = new QWidget(this);
@@ -427,6 +447,71 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
     }
+
+    ocarina_ratio_widget = new QLabel(this);
+    ocarina_preset_widget = new QLabel(this);
+    graphics_layout.addWidget(ocarina_ratio_widget);
+    graphics_layout.addWidget(ocarina_preset_widget);
+
+    const auto update_ocarina_details = [this, hold_graphics, ocarina_custom_input_widgets,
+                                         ocarina_custom_output_widgets]() mutable {
+        const auto input = Settings::OcarinaRenderInputResolution();
+        const auto window = Layout::DefaultFrameLayout(
+            std::max(ui->graphics_widget->width(), 1),
+            std::max(ui->graphics_widget->height(), 1)).screen;
+        const auto output = Settings::OcarinaUpscaleOutputResolution(
+            window.GetWidth(), window.GetHeight());
+        const double ratio = static_cast<double>(output.width) /
+                          static_cast<double>(std::max(input.width, 1U));
+        const char* preset = "AA";
+        if (ratio > 1.0) {
+            if (ratio < 1.4) preset = "Ultra Quality+";
+            else if (ratio < 1.6) preset = "Ultra Quality";
+            else if (ratio < 1.85) preset = "Quality";
+            else if (ratio < 2.15) preset = "Balanced";
+            else if (ratio < 2.65) preset = "Performance";
+            else preset = "Ultra Performance";
+        }
+        qobject_cast<QLabel*>(ocarina_ratio_widget)->setText(
+            tr("Ocarina scale ratio: %1").arg(ratio, 0, 'f', 2));
+        qobject_cast<QLabel*>(ocarina_preset_widget)->setText(
+            tr("Matching XeSS preset: %1").arg(preset));
+        const bool custom_input = ocarina_render_input_combobox != nullptr &&
+            ocarina_render_input_combobox->currentData().toUInt() ==
+                static_cast<u32>(Settings::OcarinaRenderInput::Custom);
+        const bool custom_output = ocarina_upscale_output_combobox != nullptr &&
+            ocarina_upscale_output_combobox->currentData().toUInt() ==
+                static_cast<u32>(Settings::OcarinaUpscaleOutput::Custom);
+        for (QWidget* widget : ocarina_custom_input_widgets) widget->setVisible(custom_input);
+        for (QWidget* widget : ocarina_custom_output_widgets) widget->setVisible(custom_output);
+        if (ocarina_upscaler_combobox != nullptr) {
+            const bool explicit_xess = ocarina_upscaler_combobox->currentData().toUInt() ==
+                                       static_cast<u32>(Settings::OcarinaUpscaler::Xess);
+            const bool legacy_xess = ocarina_upscaler_combobox->currentData().toUInt() ==
+                                         static_cast<u32>(Settings::OcarinaUpscaler::Legacy) &&
+                                     ocarina_xess_checkbox != nullptr &&
+                                     ocarina_xess_checkbox->isChecked();
+            const bool xess = explicit_xess || legacy_xess;
+            ocarina_preset_widget->setVisible(xess);
+            if (const auto it = hold_graphics.find(Settings::values.xess_quality.Id());
+                it != hold_graphics.end()) {
+                it->second->setVisible(xess);
+            }
+        }
+    };
+    if (ocarina_render_input_combobox != nullptr) {
+        connect(ocarina_render_input_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+    }
+    if (ocarina_upscale_output_combobox != nullptr) {
+        connect(ocarina_upscale_output_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+    }
+    if (ocarina_upscaler_combobox != nullptr) {
+        connect(ocarina_upscaler_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+    }
+    update_ocarina_details();
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {

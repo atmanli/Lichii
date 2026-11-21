@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -1513,7 +1515,9 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             }
         }
         if (patch.ocarina_render_scale &&
-            (!max_resolution_applied ||
+            (Settings::values.ocarina_render_input.GetValue() !=
+                 Settings::OcarinaRenderInput::Legacy ||
+             !max_resolution_applied ||
              Settings::values.ocarina_render_scale.GetValue() != *patch.ocarina_render_scale ||
              std::find(disabled.cbegin(), disabled.cend(), MAX_RESOLUTION_NAME) !=
                  disabled.cend())) {
@@ -1689,6 +1693,49 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
         if (!patch.group.empty()) {
             applied_groups.push_back(patch.group);
+        }
+    }
+
+    if (title_id == 0x0400486024DEC000ULL && name == "main" && max_resolution_applied &&
+        Settings::values.ocarina_render_input.GetValue() !=
+            Settings::OcarinaRenderInput::Legacy) {
+        const auto input = Settings::OcarinaRenderInputResolution();
+        const f32 scale = std::clamp(static_cast<f32>(input.width) / 2560.0f, 0.25f, 1.0f);
+        const u32 scale_bits = std::bit_cast<u32>(scale);
+        const u32 top16 = scale_bits >> 16;
+        const u32 instruction = 0x52800009U | (top16 << 5) | (1U << 21);
+        std::array<u8, 4> bytes{
+            static_cast<u8>(instruction & 0xffU),
+            static_cast<u8>((instruction >> 8U) & 0xffU),
+            static_cast<u8>((instruction >> 16U) & 0xffU),
+            static_cast<u8>((instruction >> 24U) & 0xffU),
+        };
+        constexpr size_t offset = 0x806420;
+        const size_t module_offset = sizeof(Loader::NSOHeader) + offset;
+        if (module_offset <= out.size() - 4 &&
+            std::equal(RENDER_SCALE_ONE.begin(), RENDER_SCALE_ONE.end(),
+                       out.begin() + module_offset)) {
+            std::memcpy(out.data() + module_offset, bytes.data(), bytes.size());
+            if (scale >= 0.99f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale100);
+            } else if (std::abs(scale - 0.625f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale625);
+            } else if (std::abs(scale - 0.375f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale375);
+            } else if (std::abs(scale - 0.75f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale75);
+            } else if (std::abs(scale - 0.5f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale50);
+            } else {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::ScaleCustom);
+            }
+            LOG_INFO(Loader,
+                     "    - Applying independent Ocarina render input {}x{} (scale {:.3f})",
+                     input.width, input.height, scale);
+        } else {
+            LOG_WARNING(Loader,
+                        "    - Could not apply independent Ocarina render input: scale instruction "
+                        "site changed or was already patched");
         }
     }
 

@@ -9,6 +9,7 @@
 #include <exception>
 #include <stdexcept>
 #endif
+#include <algorithm>
 #include <atomic>
 #include <compare>
 #include <cstddef>
@@ -47,6 +48,9 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OcarinaRenderScale, false);
+SWITCHABLE(OcarinaRenderInput, false);
+SWITCHABLE(OcarinaUpscaleOutput, false);
+SWITCHABLE(OcarinaUpscaler, false);
 SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
 SWITCHABLE(NvidiaDlssPreset, false);
@@ -123,6 +127,56 @@ std::optional<OcarinaRenderScale> AppliedOcarinaRenderScale() {
         return std::nullopt;
     }
     return static_cast<OcarinaRenderScale>(value - 1);
+}
+
+OcarinaResolution OcarinaRenderInputResolution() {
+    switch (values.ocarina_render_input.GetValue()) {
+    case OcarinaRenderInput::P540:
+        return {960, 540};
+    case OcarinaRenderInput::P720:
+        return {1280, 720};
+    case OcarinaRenderInput::P900:
+        return {1600, 900};
+    case OcarinaRenderInput::P1080:
+        return {1920, 1080};
+    case OcarinaRenderInput::P1440:
+        return {2560, 1440};
+    case OcarinaRenderInput::Custom:
+        return {std::clamp(values.ocarina_custom_input_width.GetValue(), 640U, 3840U),
+                std::clamp(values.ocarina_custom_input_height.GetValue(), 360U, 2160U)};
+    case OcarinaRenderInput::Legacy:
+    default:
+        switch (AppliedOcarinaRenderScale().value_or(OcarinaRenderScale::Scale100)) {
+        case OcarinaRenderScale::Scale87:
+            return {2276, 1280};
+        case OcarinaRenderScale::Scale75:
+            return {1920, 1080};
+        case OcarinaRenderScale::Scale50:
+            return {1280, 720};
+        case OcarinaRenderScale::Scale100:
+        case OcarinaRenderScale::Automatic:
+        default:
+            return {2560, 1440};
+        }
+    }
+}
+
+OcarinaResolution OcarinaUpscaleOutputResolution(u32 window_width, u32 window_height) {
+    switch (values.ocarina_upscale_output.GetValue()) {
+    case OcarinaUpscaleOutput::P1080:
+        return {1920, 1080};
+    case OcarinaUpscaleOutput::P1440:
+        return {2560, 1440};
+    case OcarinaUpscaleOutput::P2160:
+        return {3840, 2160};
+    case OcarinaUpscaleOutput::Custom:
+        return {std::clamp(values.ocarina_custom_output_width.GetValue(), 960U, 7680U),
+                std::clamp(values.ocarina_custom_output_height.GetValue(), 540U, 4320U)};
+    case OcarinaUpscaleOutput::MatchWindow:
+    case OcarinaUpscaleOutput::Legacy:
+    default:
+        return {window_width, window_height};
+    }
 }
 
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {

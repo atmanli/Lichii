@@ -1220,6 +1220,24 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     return true;
 }
 VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device) {
+    switch (Settings::values.ocarina_upscaler.GetValue()) {
+    case Settings::OcarinaUpscaler::Off:
+        return VideoCommon::OcarinaUpscaleBackend::Native;
+    case Settings::OcarinaUpscaler::Xess:
+        if (XessUpscaler::IsSupported(device)) {
+            return VideoCommon::OcarinaUpscaleBackend::Xess;
+        }
+        return Fsr3Upscaler::IsSupported(device)
+                   ? VideoCommon::OcarinaUpscaleBackend::Fsr
+                   : VideoCommon::OcarinaUpscaleBackend::Native;
+    case Settings::OcarinaUpscaler::Fsr:
+        return Fsr3Upscaler::IsSupported(device)
+                   ? VideoCommon::OcarinaUpscaleBackend::Fsr
+                   : VideoCommon::OcarinaUpscaleBackend::Native;
+    case Settings::OcarinaUpscaler::Legacy:
+    default:
+        break;
+    }
     const char* value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
     bool dlss_available = false;
 #ifdef EGLANTINE_STREAMLINE

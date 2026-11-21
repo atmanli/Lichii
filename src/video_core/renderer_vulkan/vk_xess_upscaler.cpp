@@ -64,6 +64,38 @@ void LogXeSS(const char* message, xess_logging_level_t level) {
     }
 }
 
+xess_quality_settings_t ToXeSSRatioQuality(VkExtent2D input, VkExtent2D output) {
+    if (input.width == 0 || input.height == 0 || output.width == 0 || output.height == 0 ||
+        (input.width == output.width && input.height == output.height)) {
+        return XESS_QUALITY_SETTING_AA;
+    }
+    const double ratio_width = static_cast<double>(output.width) / input.width;
+    const double ratio_height = static_cast<double>(output.height) / input.height;
+    const double ratio = (ratio_width + ratio_height) * 0.5;
+    struct Preset {
+        double ratio;
+        xess_quality_settings_t quality;
+    };
+    constexpr std::array presets{
+        Preset{1.30, XESS_QUALITY_SETTING_ULTRA_QUALITY},
+        Preset{1.50, XESS_QUALITY_SETTING_ULTRA_QUALITY},
+        Preset{1.70, XESS_QUALITY_SETTING_QUALITY},
+        Preset{2.00, XESS_QUALITY_SETTING_BALANCED},
+        Preset{2.30, XESS_QUALITY_SETTING_PERFORMANCE},
+        Preset{3.00, XESS_QUALITY_SETTING_ULTRA_PERFORMANCE},
+    };
+    const Preset* closest = &presets[0];
+    double closest_difference = std::abs(ratio - closest->ratio);
+    for (const auto& preset : presets) {
+        const double difference = std::abs(ratio - preset.ratio);
+        if (difference < closest_difference) {
+            closest = &preset;
+            closest_difference = difference;
+        }
+    }
+    return closest->quality;
+}
+
 xess_quality_settings_t ToXeSSQuality(Settings::XessQuality quality) {
     switch (quality) {
     case Settings::XessQuality::Quality:
@@ -266,8 +298,8 @@ struct XessUpscaler::Impl {
             return;
         }
         api->set_logging_callback(context, XESS_LOGGING_LEVEL_WARNING, LogXeSS);
-        const xess_quality_settings_t sdk_quality = aa ? XESS_QUALITY_SETTING_AA
-                                                       : ToXeSSQuality(quality);
+        const xess_quality_settings_t sdk_quality =
+            aa ? XESS_QUALITY_SETTING_AA : ToXeSSRatioQuality(input_size, output_extent);
         VkExtent2D xess_extent = output_extent;
         if (aa) {
             xess_extent = input_size;
@@ -380,7 +412,7 @@ struct XessUpscaler::Impl {
              "XeSS-SR initialized for Ocarina input {}x{}, XeSS output {}x{}, window {}x{} "
              "quality={}", input_size.width, input_size.height, xess_extent.width,
              xess_extent.height, output_extent.width, output_extent.height,
-             aa ? static_cast<u32>(XESS_QUALITY_SETTING_AA) : static_cast<u32>(quality));
+             static_cast<u32>(sdk_quality));
     }
 
     void Execute(const Inputs& inputs) {
@@ -632,11 +664,13 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
     }
     const bool input_larger = inputs.render_size.width > inputs.output_size.width ||
                               inputs.render_size.height > inputs.output_size.height;
+    const bool use_aa = inputs.render_size.width == inputs.output_size.width &&
+                        inputs.render_size.height == inputs.output_size.height;
     const bool aspect_matches =
         static_cast<u64>(inputs.render_size.width) * inputs.output_size.height ==
         static_cast<u64>(inputs.render_size.height) * inputs.output_size.width;
     const bool use_intermediate = input_larger || !aspect_matches;
-    state.UpdateFallbackConfiguration(inputs.render_size, inputs.output_size, input_larger,
+    state.UpdateFallbackConfiguration(inputs.render_size, inputs.output_size, use_aa,
                                      use_intermediate);
     if (state.output_size.width != inputs.output_size.width ||
         state.output_size.height != inputs.output_size.height) {
@@ -650,13 +684,13 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
     }
     bool ready = state.ready.load(std::memory_order_acquire);
     if (ready && !state.ConfigurationMatches(inputs.render_size, inputs.output_size,
-                                             input_larger, use_intermediate)) {
+                                             use_aa, use_intermediate)) {
         state.DestroyContext();
         ready = false;
     }
     if (ready && !state.SupportsInput(inputs.render_size)) {
         state.history_reset_pending.store(true, std::memory_order_release);
-        state.LogFallback(inputs.render_size, inputs.output_size, input_larger, use_intermediate,
+        state.LogFallback(inputs.render_size, inputs.output_size, use_aa, use_intermediate,
                           state.xess_output_size, state.optimal_input, state.minimum_input,
                           state.maximum_input,
                           state.InputMatchesAspect(inputs.render_size)
@@ -676,9 +710,9 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
         }
         if (!state.initialization_scheduled.exchange(true, std::memory_order_acq_rel)) {
             state.scheduler.Record([&state, input_size = inputs.render_size,
-                                    output_size = inputs.output_size, input_larger,
+                                    output_size = inputs.output_size, use_aa,
                                     use_intermediate](vk::CommandBuffer) {
-                state.Initialize(input_size, output_size, input_larger, use_intermediate);
+                state.Initialize(input_size, output_size, use_aa, use_intermediate);
             });
         }
         return false;

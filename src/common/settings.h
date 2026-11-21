@@ -443,6 +443,24 @@ struct Values {
     SwitchableSetting<bool> ocarina_xess{linkage, false, "ocarina_xess", Category::Renderer};
     SwitchableSetting<OcarinaRenderScale> ocarina_render_scale{
         linkage, OcarinaRenderScale::Automatic, "ocarina_render_scale", Category::Renderer};
+    SwitchableSetting<OcarinaRenderInput> ocarina_render_input{
+        linkage, OcarinaRenderInput::Legacy, "ocarina_render_input", Category::Renderer};
+    SwitchableSetting<OcarinaUpscaleOutput> ocarina_upscale_output{
+        linkage, OcarinaUpscaleOutput::Legacy, "ocarina_upscale_output", Category::Renderer};
+    SwitchableSetting<OcarinaUpscaler> ocarina_upscaler{
+        linkage, OcarinaUpscaler::Legacy, "ocarina_upscaler", Category::Renderer};
+    SwitchableSetting<u32, true> ocarina_custom_input_width{
+        linkage, 1280, 640, 3840, "ocarina_custom_input_width", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_input_height{
+        linkage, 720, 360, 2160, "ocarina_custom_input_height", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_output_width{
+        linkage, 1920, 960, 7680, "ocarina_custom_output_width", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_output_height{
+        linkage, 1080, 540, 4320, "ocarina_custom_output_height", Category::Renderer,
+        Specialization::Countable};
     SwitchableSetting<XessQuality> xess_quality{linkage,
                                                 XessQuality::UltraQuality,
                                                 "xess_quality",
@@ -1171,6 +1189,14 @@ std::optional<NvidiaDlssQuality> OcarinaDlssRenderScale();
 /// The render-scale patch the running game's main module got (none: unpatched).
 void SetAppliedOcarinaRenderScale(std::optional<OcarinaRenderScale> scale);
 std::optional<OcarinaRenderScale> AppliedOcarinaRenderScale();
+
+struct OcarinaResolution {
+    u32 width;
+    u32 height;
+};
+
+OcarinaResolution OcarinaRenderInputResolution();
+OcarinaResolution OcarinaUpscaleOutputResolution(u32 window_width, u32 window_height);
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

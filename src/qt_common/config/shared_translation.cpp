@@ -207,10 +207,25 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
                       "when supported, otherwise the native game path remains active. NVIDIA DLSS takes "
                       "precedence when enabled and available. Takes effect when a game starts."));
         INSERT(Settings, ocarina_render_scale, tr("Ocarina render scale:"),
-               tr("Scale Ocarina of Time's internal render resolution. Automatic preserves the existing "
-                  "NVIDIA DLSS quality behavior; explicit scales work with any Vulkan GPU and in docked "
-                  "or handheld mode. Requires the Max Resolution (built-in) patch. Takes effect when a "
-                  "game starts."));
+               tr("Legacy scale Ocarina of Time's internal render resolution. Keep this setting for "
+                  "backward compatibility; the independent Render Input setting supersedes it. "
+                  "Requires the Max Resolution (built-in) patch."));
+        INSERT(Settings, ocarina_render_input, tr("Ocarina render input:"),
+               tr("Render resolution supplied to XeSS-SR or FSR 3.1. Legacy keeps the existing "
+                  "Ocarina render scale patches. Custom uses the width and height below."));
+        INSERT(Settings, ocarina_upscale_output, tr("Ocarina upscale output:"),
+               tr("Resolution produced by XeSS-SR or FSR 3.1 before final window presentation."));
+        INSERT(Settings, ocarina_upscaler, tr("Ocarina upscaler:"),
+               tr("Select XeSS-SR, FSR 3.1, or Off. Legacy preserves the existing XeSS/FSR setting "
+                  "precedence. Unsupported backends fall back gracefully."));
+        INSERT(Settings, ocarina_custom_input_width, tr("Custom render input width:"),
+               tr("Horizontal render resolution for the Custom render input preset."));
+        INSERT(Settings, ocarina_custom_input_height, tr("Custom render input height:"),
+               tr("Vertical render resolution for the Custom render input preset."));
+        INSERT(Settings, ocarina_custom_output_width, tr("Custom upscale output width:"),
+               tr("Horizontal upscale resolution for the Custom upscale output preset."));
+        INSERT(Settings, ocarina_custom_output_height, tr("Custom upscale output height:"),
+               tr("Vertical upscale resolution for the Custom upscale output preset."));
         INSERT(Settings, xess_quality, tr("Intel XeSS quality:"),
                 tr("Quality preset used by XeSS-SR in Ocarina of Time."));
 #if defined(__linux__) && !defined(__ANDROID__)

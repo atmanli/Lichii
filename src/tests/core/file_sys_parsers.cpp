@@ -909,6 +909,16 @@ TEST_CASE("IPSwitch hex value of one digit is an empty record", "[core][file_sys
     CHECK(out[8] == 0xCD);
 }
 
+TEST_CASE("IPSwitch empty string replacement leaves the bytes alone", "[core][file_sys]") {
+    // Found by fuzz_ips: applying a record with no bytes called memcpy with its null data()
+    // (undefined behaviour, reported by UBSan only). The test documents what applying it does.
+    const IPSwitchCompiler compiler{MakeText("@enabled\n00000008 ''\n0000000C CD\n")};
+    const auto out = ApplyIPSwitch(compiler, 0x10);
+    REQUIRE(out.size() == 0x10);
+    CHECK(std::all_of(out.begin(), out.begin() + 0xC, [](u8 byte) { return byte == 0; }));
+    CHECK(out[0xC] == 0xCD);
+}
+
 
 // A 0x480-byte NPDM with its ACID at 0x100 and its ACI0 at `aci_offset`.
 VirtualFile MakeNpdm(u32 aci_offset) {

@@ -347,6 +347,11 @@ VirtualFile IPSwitchCompiler::Apply(const VirtualFile& in) const {
     for (const auto& patch : patches) {
         if (patch.enabled) {
             for (const auto& record : patch.records) {
+                // An empty record (a value of one digit, or '') writes nothing; its data() is
+                // null, which memcpy must not be given even for no bytes.
+                if (record.second.data.empty()) {
+                    continue;
+                }
                 if (record.first < in_data.size()) {
                     auto replace_size = record.second.data.size();
                     if (record.first + replace_size > in_data.size())

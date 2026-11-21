@@ -376,19 +376,34 @@ if (ENABLE_QT_TRANSLATION)
     # Qt's own strings (the macOS application menu, standard dialogs) live in qtbase_*.qm,
     # not in Lichii's catalog. Bundle one for every UI language this build ships, using the
     # exact locale or its base language (ja_JP -> qtbase_ja.qm, pt_BR -> qtbase_pt_BR.qm).
-    find_path(LICHII_QT_TRANSLATIONS_DIR
-        NAMES qtbase_zh_CN.qm
-        HINTS
-            "${QT6_INSTALL_TRANSLATIONS}"
-            "${Qt6_DIR}/../../../translations"
-            "${Qt6_DIR}/../../../share/qt6/translations"
-            "${QT6_INSTALL_PREFIX}/translations"
-            "${QT6_INSTALL_PREFIX}/share/qt6/translations"
-            "${QT6_INSTALL_PREFIX}/share/qt/translations"
-            "${QT_HOST_PATH}/translations"
-            "${CMAKE_PREFIX_PATH}"
-        PATH_SUFFIXES translations share/qt6/translations share/qt/translations
-    )
+    # find_path needs a concrete file name. Use the catalogs this build requests so a Qt
+    # installation that ships only some languages can still be discovered.
+    set(LICHII_QT_CATALOG_NAMES)
+    foreach (TS ${LANGUAGES_TS})
+        get_filename_component(LANG ${TS} NAME_WE)
+        list(APPEND LICHII_QT_CATALOG_NAMES "qtbase_${LANG}.qm")
+        string(REGEX REPLACE "_.*$" "" BASE_LANG ${LANG})
+        if (NOT BASE_LANG STREQUAL LANG)
+            list(APPEND LICHII_QT_CATALOG_NAMES "qtbase_${BASE_LANG}.qm")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES LICHII_QT_CATALOG_NAMES)
+
+    if (LICHII_QT_CATALOG_NAMES)
+        find_path(LICHII_QT_TRANSLATIONS_DIR
+            NAMES ${LICHII_QT_CATALOG_NAMES}
+            HINTS
+                "${QT6_INSTALL_TRANSLATIONS}"
+                "${Qt6_DIR}/../../../translations"
+                "${Qt6_DIR}/../../../share/qt6/translations"
+                "${QT6_INSTALL_PREFIX}/translations"
+                "${QT6_INSTALL_PREFIX}/share/qt6/translations"
+                "${QT6_INSTALL_PREFIX}/share/qt/translations"
+                "${QT_HOST_PATH}/translations"
+                "${CMAKE_PREFIX_PATH}"
+            PATH_SUFFIXES translations share/qt6/translations share/qt/translations
+        )
+    endif()
     set(QT_TRANSLATION_LANGUAGES)
     set(QT_TRANSLATION_MISSING)
     if (LICHII_QT_TRANSLATIONS_DIR)

@@ -188,13 +188,20 @@ KIP::KIP(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
     u64 offset = sizeof(KIPHeader);
     for (std::size_t i = 0; i < decompressed_sections.size(); ++i) {
         auto& section = decompressed_sections[i];
+        const bool compressed = (header.flags & (1U << i)) != 0;
+        // A section stored raw is its bytes as they are: more of them than its size is known
+        // from the header, without reading them.
+        if (!compressed &&
+            header.sections[i].compressed_size > header.sections[i].decompressed_size) {
+            reject(Loader::ResultStatus::ErrorBadKIPHeader);
+            return;
+        }
         section = file->ReadBytes(header.sections[i].compressed_size, offset);
         offset += header.sections[i].compressed_size;
         if (section.size() != header.sections[i].compressed_size) {
             reject(Loader::ResultStatus::ErrorBadKIPHeader);
             return;
         }
-        const bool compressed = (header.flags & (1U << i)) != 0;
         // A compressed section with no stored bytes has nothing to decompress: all zero.
         if (compressed && !section.empty() && !DecompressBLZ(section)) {
             reject(Loader::ResultStatus::ErrorBLZDecompressionFailed);

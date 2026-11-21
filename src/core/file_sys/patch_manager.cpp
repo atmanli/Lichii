@@ -2317,8 +2317,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id || patch.dlss_quality || patch.ocarina_render_scale) {
-        if (patch.title_id != title_id || patch.dlss_quality || !patch.requires_patch.empty()) {
+        if (patch.title_id != title_id || patch.dlss_quality || patch.ocarina_render_scale ||
+            !patch.requires_patch.empty()) {
             continue;
         }
         const auto is_disabled = [&](std::string_view name) {

@@ -6798,9 +6798,24 @@ void MainWindow::UpdateUITheme() {
 }
 
 void MainWindow::LoadTranslation() {
-    bool loaded;
-
     const std::string language = UISettings::values.language.GetValue();
+
+    // Qt's own strings, including the macOS application menu, come from qtbase_*.qm rather than
+    // from Lichii's catalog. Match the same language as the frontend and keep English when the
+    // build has no qtbase catalog for it.
+    qApp->removeTranslator(&qt_translator);
+    const QLocale qt_locale =
+        language.empty() ? QLocale{} : QLocale(QString::fromStdString(language));
+    const bool qt_loaded = qt_translator.load(qt_locale, QStringLiteral("qtbase_"), {},
+                                              QStringLiteral(":/qt-translations/"));
+    if (qt_loaded) {
+        qApp->installTranslator(&qt_translator);
+    } else if (!language.empty() && language != "en") {
+        LOG_WARNING(Frontend, "No Qt base translation for \"{}\"; Qt's own strings stay English",
+                    language);
+    }
+
+    bool loaded;
     if (language.empty()) {
         // If the selected language is empty, use system locale
         loaded = translator.load(QLocale(), {}, {}, QStringLiteral(":/languages/"));

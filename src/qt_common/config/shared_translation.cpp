@@ -647,6 +647,29 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
           PAIR(OcarinaRenderScale, Scale87, tr("87%")),
           PAIR(OcarinaRenderScale, Scale75, tr("75%")),
           PAIR(OcarinaRenderScale, Scale50, tr("50%"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaRenderInput>::Index(),
+               {PAIR(OcarinaRenderInput, Legacy, tr("Legacy (existing render scale)")),
+                PAIR(OcarinaRenderInput, P540, tr("960 x 540 (540p)")),
+                PAIR(OcarinaRenderInput, P720, tr("1280 x 720 (720p)")),
+                PAIR(OcarinaRenderInput, P900, tr("1600 x 900 (900p)")),
+                PAIR(OcarinaRenderInput, P1080, tr("1920 x 1080 (1080p)")),
+                PAIR(OcarinaRenderInput, P1440, tr("2560 x 1440 (1440p)")),
+                PAIR(OcarinaRenderInput, Custom, tr("Custom"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaUpscaleOutput>::Index(),
+               {PAIR(OcarinaUpscaleOutput, Legacy, tr("Legacy (window size)")),
+                PAIR(OcarinaUpscaleOutput, P1080, tr("1920 x 1080 (1080p)")),
+                PAIR(OcarinaUpscaleOutput, P1440, tr("2560 x 1440 (1440p)")),
+                PAIR(OcarinaUpscaleOutput, P2160, tr("3840 x 2160 (2160p)")),
+                PAIR(OcarinaUpscaleOutput, MatchWindow, tr("Match window")),
+                PAIR(OcarinaUpscaleOutput, Custom, tr("Custom"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaUpscaler>::Index(),
+               {PAIR(OcarinaUpscaler, Legacy, tr("Legacy (existing XeSS/FSR settings)")),
+                PAIR(OcarinaUpscaler, Xess, tr("Intel XeSS-SR")),
+                PAIR(OcarinaUpscaler, Fsr, tr("AMD FSR 3.1")),
+                PAIR(OcarinaUpscaler, Off, tr("Off (native resolution)"))}});
     translations->insert(
         {Settings::EnumMetadata<Settings::NvidiaDlssPreset>::Index(),
          {PAIR(NvidiaDlssPreset, M, tr("M (DLSS 4.5, default)")),

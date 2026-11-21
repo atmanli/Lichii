@@ -670,7 +670,14 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
     }
     const u64 serial = ++artwork_serial;
     artwork_newest.insert(program_id, serial);
-    artwork_queue.append({program_id, search_title, forced, serial});
+    ArtworkLookup retry;
+    retry.program_id = program_id;
+    retry.title = search_title;
+    retry.forced = forced;
+    retry.serial = serial;
+    retry.language_index = static_cast<int>(Settings::values.language_index.GetValue());
+    retry.language_tag = FileSys::GetConfiguredLanguageTag();
+    artwork_queue.append(std::move(retry));
     StartArtworkLookups();
 }
 

@@ -287,7 +287,7 @@ void GpuSplit::WaitForSpace(size_t words) {
         if (spins < 4096) {
             Pause();
         } else {
-            SleepForBack(target);
+            std::this_thread::yield();
         }
     }
 }
@@ -335,7 +335,7 @@ void GpuSplit::Drain(DrainSite site) {
             if (spins < 16384) {
                 Pause();
             } else {
-                SleepForBack(write_position, true);
+                std::this_thread::yield();
             }
             continue;
         }
@@ -729,7 +729,7 @@ void GpuSplit::Backoff(u32 spins, u64 target) {
         Pause();
         return;
     }
-    SleepForBack(target);
+    std::this_thread::yield();
 }
 
 void GpuSplit::SleepForBack(u64 target, bool wait_for_idle) {

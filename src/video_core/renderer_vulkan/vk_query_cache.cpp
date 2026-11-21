@@ -3,8 +3,10 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <memory>
@@ -209,7 +211,7 @@ public:
     ~SamplesStreamer() = default;
 
     void StartCounter() override {
-        if (has_started) {
+        if (has_started || abandoned_until_reset) {
             return;
         }
 
@@ -238,18 +240,9 @@ public:
     }
 
     void ResetCounter() override {
-        if (has_started) {
-            PauseCounter();
-        }
-        AbandonCurrentQuery();
-        std::function<void()> func([this] {
-            amend_value = 0;
-            accumulation_value = 0;
-        });
-        rasterizer->SyncOperation(std::move(func));
-        accumulation_since_last_sync = false;
-        first_accumulation_checkpoint = (std::min)(first_accumulation_checkpoint, num_slots_used);
-        last_accumulation_checkpoint = (std::max)(last_accumulation_checkpoint, num_slots_used);
+        consecutive_bound_drops = 0;
+        abandoned_until_reset = false;
+        ResetCounterInternal();
     }
 
     // Called at each submission. The running query carries the count across it: a guest's
@@ -262,17 +255,22 @@ public:
         // windows in Hyrule Field, Kakariko Village, and the Shooting Gallery reach up to 346
         // slots across two banks. Past 4 banks (1,024 slots), drop the count as a reset would.
         static constexpr size_t MaxRunningQuerySlots = 4 * SamplesQueryBank::BANK_SIZE;
+        static constexpr u32 MaxConsecutiveBoundDrops = 4;
         if (current_query && current_query->size_slots > MaxRunningQuerySlots) {
             // It drops a real count. Logged on the 1st, 2nd, 4th, 8th... drop, so a window this
             // long during gameplay doesn't go unnoticed and a title screen doesn't flood the log.
             ++bank_bound_resets;
+            ++consecutive_bound_drops;
             if ((bank_bound_resets & (bank_bound_resets - 1)) == 0) {
                 LOG_WARNING(Render_Vulkan,
                             "Samples query ran {} slots with no reset or report, dropped its "
                             "count (drop {})",
                             current_query->size_slots, bank_bound_resets);
             }
-            ResetCounter();
+            ResetCounterInternal();
+            if (consecutive_bound_drops >= MaxConsecutiveBoundDrops) {
+                abandoned_until_reset = true;
+            }
         }
     }
 
@@ -437,6 +435,8 @@ public:
 
     size_t WriteCounter(DAddr address, bool has_timestamp, u32 value,
                         [[maybe_unused]] std::optional<u32> subreport) override {
+        consecutive_bound_drops = 0;
+        abandoned_until_reset = false;
         PauseCounter();
         auto index = BuildQuery();
         auto* new_query = GetQuery(index);
@@ -646,6 +646,21 @@ private:
         current_query_id = 0;
     }
 
+    void ResetCounterInternal() {
+        if (has_started) {
+            PauseCounter();
+        }
+        AbandonCurrentQuery();
+        std::function<void()> func([this] {
+            amend_value = 0;
+            accumulation_value = 0;
+        });
+        rasterizer->SyncOperation(std::move(func));
+        accumulation_since_last_sync = false;
+        first_accumulation_checkpoint = (std::min)(first_accumulation_checkpoint, num_slots_used);
+        last_accumulation_checkpoint = (std::max)(last_accumulation_checkpoint, num_slots_used);
+    }
+
     void ReplicateCurrentQueryIfNeeded() {
         if (pending_sync.empty()) {
             return;
@@ -742,6 +757,8 @@ private:
     bool accumulation_since_last_sync{};
     VideoCommon::HostQueryBase* current_query;
     bool has_started{};
+    bool abandoned_until_reset{};
+    u32 consecutive_bound_drops{};
     u64 bank_bound_resets{}; ///< Counts CloseCounter dropped once a query outgrew the bank bound.
     std::mutex flush_guard;
     std::optional<QueriesPrefixScanPass> queries_prefix_scan_pass;

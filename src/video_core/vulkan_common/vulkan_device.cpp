@@ -38,6 +38,7 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/shader_cache_v2/cache.h"
+#include "video_core/vram_target.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
@@ -2467,6 +2468,9 @@ u64 Device::GetDeviceMemoryBudget() const {
         // gives it (4 GiB, 6 GiB with aggressive VRAM use).
         result = (std::min)(result, device_access_memory);
     }
+    if (vram_target != 0) {
+        result = (std::min)(result, vram_target);
+    }
     return result;
 }
 
@@ -2547,6 +2551,17 @@ void Device::CollectPhysicalMemoryInfo() {
         device_access_memory += heap_size;
     }
     main_heap_size = limit(mem_properties.memoryHeaps[main_heap].size);
+    const Settings::VramUsageMode vram_mode = Settings::values.vram_usage_mode.GetValue();
+    const u64 device_budget = device_access_memory;
+    vram_target = VideoCommon::VramTarget(vram_mode, device_budget);
+    if (vram_target != 0) {
+        LOG_INFO(Render_Vulkan, "VRAM usage mode {}: target {} MiB (device budget {} MiB)",
+                 Settings::CanonicalizeEnum(vram_mode), vram_target >> 20, device_budget >> 20);
+        device_access_memory = (std::min)(device_access_memory, vram_target);
+    } else {
+        LOG_INFO(Render_Vulkan, "VRAM usage mode {}: no target (device budget {} MiB)",
+                 Settings::CanonicalizeEnum(vram_mode), device_budget >> 20);
+    }
     if ((mem_properties.memoryHeaps[main_heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
         const u64 main_heap_budget = limit(budget.heapBudget[main_heap]);
         device_buffer_pool_block_size = SelectDeviceBufferPoolBlockSize(

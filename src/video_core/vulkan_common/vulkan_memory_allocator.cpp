@@ -221,7 +221,10 @@ MemoryAllocator::~MemoryAllocator() = default;
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
     vk::Image image;
-    vk::Check(AllocateImage(ci, dedicated, false, image));
+    const VkResult result = AllocateImage(ci, dedicated, false, image);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
+    }
     return image;
 }
 
@@ -268,8 +271,9 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         }
     }
     const bool huge = IsTooLargeToBack(texels, bytes);
-    VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
-                           : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+    VkResult result =
+        huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
+             : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.
@@ -282,9 +286,12 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
                         ci.arrayLayers, static_cast<u32>(ci.format));
         }
         pressure_events.fetch_add(1, std::memory_order_relaxed);
-        VmaAllocationCreateInfo relaxed = alloc_ci;
-        relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        const auto commit_room = Common::GetSystemCommitRoom();
+        if (!commit_room || *commit_room > (u64{512} << 20)) {
+            VmaAllocationCreateInfo relaxed = alloc_ci;
+            relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        }
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         pressure_events.fetch_add(1, std::memory_order_relaxed);
@@ -444,6 +451,47 @@ void MemoryAllocator::FreeSparseMemory(VmaAllocation allocation) const {
     }
 }
 
+bool MemoryAllocator::CreateImageInSeparatePool(const VkImageCreateInfo& ci,
+                                                const VmaAllocationCreateInfo& alloc_ci,
+                                                VkImage& handle, VmaAllocation& allocation,
+                                                VmaAllocationInfo& alloc_info) const {
+    // Render targets and storage images up to half a block: in a pool of their own (see
+    // Device::SeparatePool). Larger ones, and any that fails here, take the default path.
+    constexpr VkImageUsageFlags target_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                               VK_IMAGE_USAGE_STORAGE_BIT;
+    if ((ci.usage & target_usage) == 0) {
+        return false;
+    }
+    const auto& dld = device.GetDispatchLoader();
+    const VkDevice logical = *device.GetLogical();
+    VkImage image{};
+    if (dld.vkCreateImage(logical, &ci, nullptr, &image) != VK_SUCCESS) {
+        return false;
+    }
+    const VkMemoryRequirements requirements = device.GetLogical().GetImageMemoryRequirements(image);
+    u32 memory_type{};
+    if (requirements.size <= Device::SeparatePoolBlockSize / 2 &&
+        vmaFindMemoryTypeIndexForImageInfo(allocator, &ci, &alloc_ci, &memory_type) == VK_SUCCESS) {
+        if (const VmaPool pool =
+                device.GetSeparatePool(Device::SeparatePool::RenderTargets, memory_type)) {
+            VmaAllocationCreateInfo pool_ci = alloc_ci;
+            pool_ci.pool = pool;
+            if (vmaAllocateMemoryForImage(allocator, image, &pool_ci, &allocation, &alloc_info) ==
+                VK_SUCCESS) {
+                if (vmaBindImageMemory(allocator, allocation, image) == VK_SUCCESS) {
+                    handle = image;
+                    return true;
+                }
+                vmaFreeMemory(allocator, allocation);
+                allocation = VK_NULL_HANDLE;
+            }
+        }
+    }
+    dld.vkDestroyImage(logical, image, nullptr);
+    return false;
+}
+
 bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci,
                                                  const VmaAllocationCreateInfo& alloc_ci,
                                                  VkBuffer& handle, VmaAllocation& allocation,
@@ -485,7 +533,10 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci,
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
     vk::Buffer buffer;
-    vk::Check(AllocateBuffer(ci, usage, 0, buffer));
+    const VkResult result = AllocateBuffer(ci, usage, 0, buffer);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
+    }
     return buffer;
 }
 
@@ -590,7 +641,10 @@ VkResult MemoryAllocator::AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
                                          VkDeviceSize min_alignment) const {
     vk::Buffer buffer;
-    vk::Check(AllocateBuffer(ci, usage, min_alignment, buffer));
+    const VkResult result = AllocateBuffer(ci, usage, min_alignment, buffer);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
+    }
     return buffer;
 }
 
@@ -769,6 +823,31 @@ void LogMemoryTrace(const Device& device) {
                        s.allocationCount, s.allocationBytes >> 20, s.blockBytes >> 20);
     }
     LOG_INFO(Render_Vulkan, "Memory trace: types {}", types);
+    // The separate pools, which the type totals above include.
+    static constexpr std::array pool_names{"sparse pages", "device buffers", "render targets"};
+    static_assert(pool_names.size() == static_cast<size_t>(Device::SeparatePool::Count));
+    std::string pools;
+    for (u32 kind = 0; kind < pool_names.size(); ++kind) {
+        for (u32 type = 0; type < properties->memoryTypeCount; ++type) {
+            const VmaPool pool =
+                device.GetSeparatePool(static_cast<Device::SeparatePool>(kind), type, false);
+            if (pool == VK_NULL_HANDLE) {
+                continue;
+            }
+            VmaDetailedStatistics d{};
+            vmaCalculatePoolStatistics(allocator, pool, &d);
+            fmt::format_to(std::back_inserter(pools),
+                           "{}{} (type {}): {} allocs {}/{} MiB in {} blocks, {} free ranges "
+                           "(largest {} MiB)",
+                           pools.empty() ? "" : "; ", pool_names[kind], type,
+                           d.statistics.allocationCount, d.statistics.allocationBytes >> 20,
+                           d.statistics.blockBytes >> 20, d.statistics.blockCount,
+                           d.unusedRangeCount, d.unusedRangeSizeMax >> 20);
+        }
+    }
+    if (!pools.empty()) {
+        LOG_INFO(Render_Vulkan, "Memory trace: pools {}", pools);
+    }
 }
 
 void LogMemoryStatistics(const Device& device) {

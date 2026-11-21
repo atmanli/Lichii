@@ -510,13 +510,14 @@ jobs:
         if: github.ref == 'refs/heads/nx2' && !cancelled()
         continue-on-error: true
         shell: bash
+        # The platform is spelled out rather than passed as PLATFORM: Windows variable names ignore
+        # case, and the MSVC environment's Platform=x64 replaced it.
         env:
           GH_TOKEN: ${{ github.token }}
-          PLATFORM: ${{ matrix.platform }}
         run: |
-          tools/ci/prune-caches.sh "^objects-$PLATFORM(-[0-9a-f]{64})?-v[0-9]+-" '${{ steps.compiler-cache.outputs.cache-primary-key }}'
-          tools/ci/prune-caches.sh "^cpm-$PLATFORM-v[0-9]+-" '${{ steps.cpm-cache.outputs.cache-primary-key }}'
-          tools/ci/prune-caches.sh "^apt-$PLATFORM-v[0-9]+-" '${{ steps.apt-cache.outputs.cache-primary-key }}'
+          tools/ci/prune-caches.sh '^objects-${{ matrix.platform }}(-[0-9a-f]{64})?-v[0-9]+-' '${{ steps.compiler-cache.outputs.cache-primary-key }}'
+          tools/ci/prune-caches.sh '^cpm-${{ matrix.platform }}-v[0-9]+-' '${{ steps.cpm-cache.outputs.cache-primary-key }}'
+          tools/ci/prune-caches.sh '^apt-${{ matrix.platform }}-v[0-9]+-' '${{ steps.apt-cache.outputs.cache-primary-key }}'
 
       # fsr4-vk, the community Vulkan port of FSR 4 that the x86-64 Linux packages ship
       # (tools/fsr4-vk/build.sh pins its commit and AMD's DLL it is built from). The build's inputs

@@ -272,10 +272,12 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
                 auto const end = line.cend();
                 if (start <= line.cend() && end <= line.cend()) {
                     // Actually IPS wants ordering from {lsb, ..., msb} -- so LE and BE are inverted, fun!
-                    auto const hs = Common::HexStringToVector({start, end}, is_little_endian);
-                    // An odd-length value of one digit converts to no bytes, and copying from an
-                    // empty vector passes memcpy a null pointer; the empty record is kept.
-                    r.data.assign(hs.begin(), hs.end());
+                    // A value with an odd number of digits loses one (which one depends on the
+                    // byte order), and a single digit converts to no bytes at all.
+                    if ((end - start) % 2 != 0) {
+                        LOG_WARNING(Loader, "value @ {:#08X} has an odd number of hex digits", offset);
+                    }
+                    r.data = Common::HexStringToVector({start, end}, is_little_endian);
                     LOG_INFO(Loader, "[H] value @ {:#08X}", offset);
                     patches.back().records.insert_or_assign(u32(offset), std::move(r));
                 } else {
@@ -347,16 +349,16 @@ VirtualFile IPSwitchCompiler::Apply(const VirtualFile& in) const {
     for (const auto& patch : patches) {
         if (patch.enabled) {
             for (const auto& record : patch.records) {
-                // An empty record (a value of one digit, or '') writes nothing; its data() is
-                // null, which memcpy must not be given even for no bytes.
-                if (record.second.data.empty()) {
-                    continue;
-                }
                 if (record.first < in_data.size()) {
                     auto replace_size = record.second.data.size();
                     if (record.first + replace_size > in_data.size())
                         replace_size = in_data.size() - record.first;
-                    std::memcpy(in_data.data() + record.first, record.second.data.data(), replace_size);
+                    // An empty record (a value of one digit, or '') writes nothing; its data() is
+                    // null, which memcpy must not be given even for no bytes.
+                    if (replace_size != 0) {
+                        std::memcpy(in_data.data() + record.first, record.second.data.data(),
+                                    replace_size);
+                    }
                 } else {
                     LOG_WARNING(Loader, "record offs={:x},size={:x}", record.first, record.second.data.size());
                 }

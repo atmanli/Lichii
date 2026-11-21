@@ -1619,6 +1619,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
         if (patch.name == MAX_RESOLUTION_NAME) {
             max_resolution_applied = true;
+        }
         for (const auto& hook : patch.hooks) {
             const auto& text = header.segments[0];
             const u64 text_end = u64{text.location} + text.size;

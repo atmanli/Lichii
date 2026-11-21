@@ -33,6 +33,7 @@
 #include <thread>
 #include <JlCompress.h>
 #include <QPainter>
+#include <QPointF>
 #include <QtMath>
 
 #if !defined(WIN32) && !defined(__APPLE__)
@@ -339,7 +340,9 @@ QPixmap CreateCirclePixmapFromColor(const QColor& color) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(color);
     painter.setBrush(color);
-    painter.drawEllipse({circle_pixmap.width() / 2.0, circle_pixmap.height() / 2.0}, 14.0, 14.0);
+    // QPainter works in the 16×16 logical space of this 32×32 @2x bitmap, so keep the
+    // original 16 px circle geometry instead of doubling it.
+    painter.drawEllipse(QPointF(8.0, 8.0), 7.0, 7.0);
     return circle_pixmap;
 }
 

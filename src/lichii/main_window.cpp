@@ -1516,10 +1516,7 @@ void MainWindow::InitializeWidgets() {
 
     // Setup Refresh Button
     refresh_button = new QPushButton();
-    const QIcon refresh_icon = WidgetIcon("refresh");
-    refresh_button->setIcon(refresh_icon.isNull()
-                                ? QIcon::fromTheme(QStringLiteral("view-refresh"))
-                                : refresh_icon);
+    UpdateRefreshButtonIcon();
     refresh_button->setIconSize(QSize(16, 16));
     refresh_button->setObjectName(QStringLiteral("RefreshButton"));
     refresh_button->setFocusPolicy(Qt::NoFocus);
@@ -6733,6 +6730,16 @@ void MainWindow::UpdateMenuIcons() {
     }
 }
 
+void MainWindow::UpdateRefreshButtonIcon() {
+    if (refresh_button == nullptr) {
+        return;
+    }
+    const QIcon refresh_icon = WidgetIcon("refresh");
+    refresh_button->setIcon(refresh_icon.isNull()
+                                ? QIcon::fromTheme(QStringLiteral("view-refresh"))
+                                : refresh_icon);
+}
+
 void MainWindow::UpdateUITheme() {
     const QString default_theme = QString::fromUtf8(UISettings::themes[size_t(UISettings::default_theme)].second);
     QString current_theme = QString::fromStdString(UISettings::values.theme);
@@ -6790,6 +6797,7 @@ void MainWindow::UpdateUITheme() {
     }
 
     UpdateMenuIcons();
+    UpdateRefreshButtonIcon();
 
 #ifdef _WIN32
     RemoveTitlebarFilter();

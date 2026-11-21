@@ -1251,9 +1251,9 @@ GameListPlaceholder::GameListPlaceholder(MainWindow* parent) : QWidget{parent} {
     layout->setAlignment(Qt::AlignCenter);
     QPixmap placeholder =
         QIcon::fromTheme(QStringLiteral("plus_folder"))
-            .pixmap(QSize(128, 128), image->devicePixelRatioF());
+            .pixmap(QSize(200, 200), image->devicePixelRatioF());
     if (placeholder.isNull()) {
-        placeholder = GetDefaultIcon(128);
+        placeholder = GetDefaultIcon(200);
     }
     image->setPixmap(placeholder);
 

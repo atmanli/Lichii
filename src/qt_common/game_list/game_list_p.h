@@ -54,6 +54,7 @@ static bool IsLichiiTheme() {
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
+    // `size` stays the logical tile size; only the backing bitmap is rendered at 2×.
     const int side = static_cast<int>(qRound(size * GameIconDpr));
     if (size == 0 || !IsLichiiTheme()) {
         QPixmap icon(side, side);
@@ -71,6 +72,7 @@ static QPixmap GetDefaultIcon(u32 size) {
     painter.setBrush(QColor(0x23, 0x24, 0x2a));
     painter.drawRoundedRect(QRectF(0, 0, side, side), side * 0.18, side * 0.18);
     const int glyph = side * 3 / 8;
+    // This 256 px file is only a high-resolution source glyph; it is scaled to the tile below.
     QImage glyph_image(QStringLiteral(":/lichii/icons/menu_gamepad_256.png"));
     if (glyph_image.isNull()) {
         glyph_image = QImage(QStringLiteral(":/lichii/icons/menu_gamepad@2x.png"));

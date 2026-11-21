@@ -117,6 +117,19 @@ TEST_CASE("NRO layout takes empty segments", "[core][loader]") {
     CHECK(layout->segments[2].size == 0x1000);
 }
 
+TEST_CASE("NRO layout places an empty segment inside the image", "[core][loader]") {
+    // The header's offset of an empty segment is not checked: wherever it points, the segment is
+    // placed where the one before it ends.
+    const auto bytes = MakeNro({0, 0x1000}, {0xFFFFF000, 0}, {0x1000, 0x2000}, 0x3000, 0, 0x3000);
+    const auto layout = Loader::ValidateNroLayout(bytes);
+    REQUIRE(layout);
+    CHECK(layout->segments[1].offset == 0x1000);
+    CHECK(layout->segments[1].size == 0);
+    for (const auto& segment : layout->segments) {
+        CHECK(segment.offset + segment.size <= layout->image_size);
+    }
+}
+
 TEST_CASE("NRO layout bounds the image at what a u32 describes", "[core][loader]") {
     // At the limit, and one page over.
     const auto at_limit = Loader::ValidateNroLayout(MakeNro(0xFFFFF000 - 0x3000));

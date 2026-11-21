@@ -193,7 +193,10 @@ std::optional<NroLayout> ValidateNroLayout(std::span<const u8> data, std::string
         const u64 offset = header.segments[i].offset;
         const u64 size = header.segments[i].size;
         if (size == 0) {
-            layout.segments[i] = {offset, 0};
+            // Its offset comes from the header and is never checked, so place it where the
+            // previous segment ends, inside the image: nothing is copied into an empty segment or
+            // protected, but its address still reaches the code set.
+            layout.segments[i] = {previous_end, 0};
             continue;
         }
         if (i == 0 && offset != 0) {

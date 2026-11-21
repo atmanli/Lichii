@@ -444,11 +444,14 @@ struct Values {
     SwitchableSetting<OcarinaRenderScale> ocarina_render_scale{
         linkage, OcarinaRenderScale::Automatic, "ocarina_render_scale", Category::Renderer};
     SwitchableSetting<OcarinaRenderInput> ocarina_render_input{
-        linkage, OcarinaRenderInput::Legacy, "ocarina_render_input", Category::Renderer};
+        linkage, OcarinaRenderInput::Legacy, "ocarina_render_input", Category::Renderer,
+        Specialization::Default, true, true};
     SwitchableSetting<OcarinaUpscaleOutput> ocarina_upscale_output{
-        linkage, OcarinaUpscaleOutput::Legacy, "ocarina_upscale_output", Category::Renderer};
+        linkage, OcarinaUpscaleOutput::Legacy, "ocarina_upscale_output", Category::Renderer,
+        Specialization::Default, true, true};
     SwitchableSetting<OcarinaUpscaler> ocarina_upscaler{
-        linkage, OcarinaUpscaler::Legacy, "ocarina_upscaler", Category::Renderer};
+        linkage, OcarinaUpscaler::Legacy, "ocarina_upscaler", Category::Renderer,
+        Specialization::Default, true, true};
     SwitchableSetting<u32, true> ocarina_custom_input_width{
         linkage, 1280, 640, 3840, "ocarina_custom_input_width", Category::Renderer,
         Specialization::Countable};

@@ -212,12 +212,15 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
                   "Requires the Max Resolution (built-in) patch."));
         INSERT(Settings, ocarina_render_input, tr("Ocarina render input:"),
                tr("Render resolution supplied to XeSS-SR or FSR 3.1. Legacy keeps the existing "
-                  "Ocarina render scale patches. Custom uses the width and height below."));
+                  "Ocarina render scale patches. Custom uses the width and height below. Takes "
+                  "effect when a game starts."));
         INSERT(Settings, ocarina_upscale_output, tr("Ocarina upscale output:"),
-               tr("Resolution produced by XeSS-SR or FSR 3.1 before final window presentation."));
+               tr("Resolution produced by XeSS-SR or FSR 3.1 before final window presentation. "
+                  "Can be changed while a game is running."));
         INSERT(Settings, ocarina_upscaler, tr("Ocarina upscaler:"),
                tr("Select XeSS-SR, FSR 3.1, or Off. Legacy preserves the existing XeSS/FSR setting "
-                  "precedence. Unsupported backends fall back gracefully."));
+                  "precedence. Unsupported backends fall back gracefully. Takes effect when a game "
+                  "starts."));
         INSERT(Settings, ocarina_custom_input_width, tr("Custom render input width:"),
                tr("Horizontal render resolution for the Custom render input preset."));
         INSERT(Settings, ocarina_custom_input_height, tr("Custom render input height:"),

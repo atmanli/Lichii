@@ -353,6 +353,10 @@ private:
     /// (used_pipelines) are built at boot; the rest are built when first needed, and not stored
     /// again. Each built pipeline holds driver memory (title 1: 6.5k cached, a quarter used).
     std::unordered_set<u64> disk_pipelines;
+    /// Key hashes of disk records the background prebuild found lacking a value the translator
+    /// reads: the pipeline built when first needed is recorded again and supersedes the record.
+    std::unordered_set<u64> incomplete_prebuilds;
+    std::mutex incomplete_prebuilds_mutex;
     std::unordered_map<u64, u8> used_pipelines; ///< Key hash -> sessions since it was last used
     std::unordered_set<const GraphicsPipeline*> used_this_session;
     std::chrono::steady_clock::time_point used_pipelines_saved{};

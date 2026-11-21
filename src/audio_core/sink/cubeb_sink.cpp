@@ -85,6 +85,7 @@ public:
     void Finalize() override {
         std::scoped_lock lk{backend_mutex};
         finalized = true;
+        device_lost = false; // a finalized stream is never reopened, so it is not ready
         if (!stream_backend) {
             return;
         }
@@ -95,9 +96,12 @@ public:
     }
 
     /// Callers outside backend_mutex read this while the watchdog replaces the backend: it reads
-    /// backend_open, published under the mutex, not the pointer.
+    /// backend_open and device_lost, published under the mutex, not the pointer.
+    /// A stream whose device was lost stays ready while the watchdog reopens it: callers that
+    /// treat not-ready as a permanent fault (sysmix Pump and SetEngaged) must not end a stream
+    /// the watchdog would bring back. Only a failed first open and a real fault are not ready.
     bool IsReady() const override {
-        return backend_open && !failed;
+        return (backend_open || device_lost) && !failed;
     }
 
     /**
@@ -169,13 +173,14 @@ public:
         if (!reopen_logged) {
             LOG_WARNING(Audio_Sink, "cubeb stream {}: {}, reopening it", name, why);
         }
+        // device_lost before backend_open goes: IsReady stays true across the swap.
+        device_lost = true;
         if (stream_backend) {
             backend_open = false;
             cubeb_stream_stop(stream_backend);
             cubeb_stream_destroy(stream_backend);
             stream_backend = nullptr;
         }
-        device_lost = true;
         stalled_ticks = 0;
         if (!OpenBackend()) {
             if (!reopen_logged) {

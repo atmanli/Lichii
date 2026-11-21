@@ -1289,8 +1289,9 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
                                                                 &EVP_MD_CTX_free};
     std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(), &ZSTD_freeDCtx};
     if (!ctx || !dctx) {
+        // Not ErrorNotInitialized: callers take every status but the failed one as verified.
         LOG_ERROR(Loader, "NUP integrity check could not create a hash or a decoder");
-        return Loader::ResultStatus::ErrorNotInitialized;
+        return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
     }
     std::vector<u8> input(InputChunk);
     std::vector<u8> output(ZSTD_DStreamOutSize());

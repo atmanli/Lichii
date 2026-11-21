@@ -273,8 +273,9 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
                 if (start <= line.cend() && end <= line.cend()) {
                     // Actually IPS wants ordering from {lsb, ..., msb} -- so LE and BE are inverted, fun!
                     auto const hs = Common::HexStringToVector({start, end}, is_little_endian);
-                    r.data.resize(hs.size());
-                    std::memcpy(r.data.data(), hs.data(), hs.size());
+                    // An odd-length value of one digit converts to no bytes, and copying from an
+                    // empty vector passes memcpy a null pointer; the empty record is kept.
+                    r.data.assign(hs.begin(), hs.end());
                     LOG_INFO(Loader, "[H] value @ {:#08X}", offset);
                     patches.back().records.insert_or_assign(u32(offset), std::move(r));
                 } else {

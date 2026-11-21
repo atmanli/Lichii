@@ -895,6 +895,20 @@ TEST_CASE("IPSwitch offset shift without a value does not read the next lines",
     REQUIRE(out[0x20] == 0);
 }
 
+TEST_CASE("IPSwitch hex value of one digit is an empty record", "[core][file_sys]") {
+    // Found by fuzz_ips: "4" converts to no bytes, and parsing copied them with memcpy from an
+    // empty vector, a null pointer (undefined behaviour, reported by UBSan only). This pins what
+    // such a line does: an empty record at its offset, which writes nothing and replaces a record
+    // read before it at the same offset.
+    const IPSwitchCompiler compiler{
+        MakeText("@enabled\n00000004 AB\n00000004 4\n0000000a 4\n00000008 CD\n")};
+    const auto out = ApplyIPSwitch(compiler, 0x10);
+    REQUIRE(out.size() == 0x10);
+    CHECK(out[4] == 0);
+    CHECK(out[0xa] == 0);
+    CHECK(out[8] == 0xCD);
+}
+
 
 // A 0x480-byte NPDM with its ACID at 0x100 and its ACI0 at `aci_offset`.
 VirtualFile MakeNpdm(u32 aci_offset) {

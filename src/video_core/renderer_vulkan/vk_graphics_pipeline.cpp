@@ -1179,6 +1179,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
         scheduler.RequestOutsideRenderPassOperationContext();
     }
 
+    const u64 geometry_tick{scheduler.CurrentTick()};
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
@@ -1276,6 +1277,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
     if (IsBuilt() && (!pipeline || build->Failed())) {
         return false;
     }
+    if (scheduler.CurrentTick() != geometry_tick) {
+        // A wait since the geometry binds (in the render target lookup, say) submitted them with
+        // the previous command buffer, and the draw would run with no vertex or index buffer.
+        buffer_cache.BindHostGeometryBuffers(is_indexed);
+    }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area, deferred);
 }
@@ -1345,6 +1351,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
             }
         }
     }
+    const u64 geometry_tick{scheduler.CurrentTick()};
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
@@ -1451,6 +1458,11 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
     }
     if (IsBuilt() && (!pipeline || build->Failed())) {
         return false;
+    }
+    if (scheduler.CurrentTick() != geometry_tick) {
+        // A wait since the geometry binds (in the render target lookup, say) submitted them with
+        // the previous command buffer, and the draw would run with no vertex or index buffer.
+        buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area, deferred);

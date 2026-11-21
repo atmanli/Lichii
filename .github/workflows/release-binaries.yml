@@ -56,11 +56,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="build-${GITHUB_RUN_NUMBER}"
-          if tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null); then
-            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
-              echo "Release tag $tag points to $tag_sha instead of $GITHUB_SHA"
-              exit 1
-            fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" >/dev/null 2>&1; then
+            # The tag already exists. build-NN tags are inherited from the upstream
+            # fork (zortos293/Lichii), so a fresh run can hit a pre-existing tag that
+            # points at an unrelated commit. Move it onto this build's commit instead
+            # of failing, so the release attaches to the binaries we just built.
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/$tag" \
+              -f "sha=$GITHUB_SHA" -F "force=true"
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA"

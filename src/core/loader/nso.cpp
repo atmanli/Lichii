@@ -250,8 +250,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             if (!read(stored)) {
                 return std::nullopt;
             }
+            // An image whose segments are all empty has no storage, so an empty segment's target
+            // can be null, and lz4 does arithmetic on its destination even when it writes nothing:
+            // give it a byte it never writes. The empty segment's rule is lz4's, as before.
+            u8 nowhere;
             const int r = Common::Compression::DecompressDataLZ4(
-                target.data(), target.size(), stored.data(), stored.size());
+                target.empty() ? &nowhere : target.data(), target.size(), stored.data(),
+                stored.size());
             // As for ZBIC: a segment that does not decompress to its size would boot corrupt.
             if (r != static_cast<int>(segment.size)) {
                 LOG_ERROR(Loader, "{}: segment {} decompressed to {} of {:#x} bytes",

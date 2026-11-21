@@ -210,6 +210,20 @@ TEST_CASE("NSO keeps the rule for an empty LZ4 segment", "[core][loader]") {
     CHECK_FALSE(Load(MakeNso({}, 0)).has_value());
 }
 
+TEST_CASE("NSO keeps the rule for an empty LZ4 segment in an empty image", "[core][loader]") {
+    // Every segment empty and at 0, so the image has no storage until the arguments and .bss are
+    // added after the segments: lz4 was handed a null destination, which UBSan reports inside it.
+    const auto empty_image = [](const std::vector<u8>& text) {
+        auto bytes = MakeNso(text, 0)->ReadAllBytes();
+        for (const std::size_t field : {0x24, 0x28, 0x34, 0x38, 0x64, 0x68}) {
+            Put32(bytes, field, 0); // .rodata's and .data's location, size and stored size
+        }
+        return AsFile(std::move(bytes));
+    };
+    CHECK(Load(empty_image({0x00})).has_value());
+    CHECK_FALSE(Load(empty_image({})).has_value());
+}
+
 
 TEST_CASE("NSO loads an empty segment whose offset lies past the file", "[core][loader]") {
     // It reads no bytes, as it always did, wherever its offset points.

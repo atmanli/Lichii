@@ -679,8 +679,18 @@ void GameList::UpdateIconSizes() {
     case Settings::GameListMode::CarouselView:
         carousel_view->UpdateIconSize();
         break;
-    case Settings::GameListMode::TreeView:
+    case Settings::GameListMode::TreeView: {
+        const int size = static_cast<int>(UISettings::values.game_icon_size.GetValue());
+        tree_view->setIconSize(QSize(size, size));
+        if (size > 0) {
+            auto* header = tree_view->header();
+            const int needed = size + 16;
+            if (header->sectionSize(GameListModel::COLUMN_NAME) < needed) {
+                header->resizeSection(GameListModel::COLUMN_NAME, needed);
+            }
+        }
         break;
+    }
     }
 }
 

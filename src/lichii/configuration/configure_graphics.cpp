@@ -16,6 +16,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QString>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
 #include <qabstractbutton.h>
@@ -454,7 +455,8 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     graphics_layout.addWidget(ocarina_preset_widget);
 
     const auto update_ocarina_details = [this, hold_graphics, ocarina_custom_input_widgets,
-                                         ocarina_custom_output_widgets]() mutable {
+                                         ocarina_custom_output_widgets,
+                                         ocarina_xess_checkbox]() {
         const auto input = Settings::OcarinaRenderInputResolution();
         const auto window = Layout::DefaultFrameLayout(
             std::max(ui->graphics_widget->width(), 1),
@@ -475,7 +477,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         qobject_cast<QLabel*>(ocarina_ratio_widget)->setText(
             tr("Ocarina scale ratio: %1").arg(ratio, 0, 'f', 2));
         qobject_cast<QLabel*>(ocarina_preset_widget)->setText(
-            tr("Matching XeSS preset: %1").arg(preset));
+            tr("Matching XeSS preset: %1").arg(QString::fromLatin1(preset)));
         const bool custom_input = ocarina_render_input_combobox != nullptr &&
             ocarina_render_input_combobox->currentData().toUInt() ==
                 static_cast<u32>(Settings::OcarinaRenderInput::Custom);
@@ -501,15 +503,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     };
     if (ocarina_render_input_combobox != nullptr) {
         connect(ocarina_render_input_combobox, &QComboBox::currentIndexChanged,
-                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
     }
     if (ocarina_upscale_output_combobox != nullptr) {
         connect(ocarina_upscale_output_combobox, &QComboBox::currentIndexChanged,
-                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
     }
     if (ocarina_upscaler_combobox != nullptr) {
         connect(ocarina_upscaler_combobox, &QComboBox::currentIndexChanged,
-                this, [update_ocarina_details](int) mutable { update_ocarina_details(); });
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
     }
     update_ocarina_details();
 

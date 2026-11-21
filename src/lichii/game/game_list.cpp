@@ -1213,7 +1213,13 @@ GameListPlaceholder::GameListPlaceholder(MainWindow* parent) : QWidget{parent} {
     image = new QLabel;
     text = new QLabel;
     layout->setAlignment(Qt::AlignCenter);
-    image->setPixmap(QIcon::fromTheme(QStringLiteral("plus_folder")).pixmap(200));
+    QPixmap placeholder =
+        QIcon::fromTheme(QStringLiteral("plus_folder"))
+            .pixmap(QSize(128, 128), image->devicePixelRatioF());
+    if (placeholder.isNull()) {
+        placeholder = GetDefaultIcon(128);
+    }
+    image->setPixmap(placeholder);
 
     RetranslateUI();
     QFont font = text->font();

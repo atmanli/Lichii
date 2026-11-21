@@ -615,8 +615,12 @@ void ConfigurePerGame::UpdateIconPreview(const QPixmap& map) {
     if (map.isNull()) {
         return;
     }
-    scene->addPixmap(map.scaled(ui->icon_view->width(), ui->icon_view->height(),
-                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    const qreal dpr = devicePixelRatioF();
+    const QSize physical(qRound(ui->icon_view->width() * dpr),
+                         qRound(ui->icon_view->height() * dpr));
+    QPixmap scaled = map.scaled(physical, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(dpr);
+    scene->addPixmap(scaled);
 }
 
 void ConfigurePerGame::StageCustomIcon(QImage icon) {

@@ -140,6 +140,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_folder_white@2x.png</file>
         <file>icons/menu_gamepad.png</file>
         <file>icons/menu_gamepad@2x.png</file>
+        <file>icons/menu_gamepad_256.png</file>
         <file>icons/menu_gamepad_white.png</file>
         <file>icons/menu_gamepad_white@2x.png</file>
         <file>icons/menu_globe.png</file>

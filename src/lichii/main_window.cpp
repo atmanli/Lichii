@@ -487,6 +487,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     UpdateUITheme();
 
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // Native menus follow the system appearance; re-tint their icons if it changes while running.
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this](Qt::ColorScheme) { UpdateMenuIcons(); });
+#endif
+
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
     discord_rpc->Update();
 
@@ -1510,7 +1516,11 @@ void MainWindow::InitializeWidgets() {
 
     // Setup Refresh Button
     refresh_button = new QPushButton();
-    refresh_button->setIcon(QIcon::fromTheme(QStringLiteral("view-refresh")));
+    const QIcon refresh_icon = WidgetIcon("refresh");
+    refresh_button->setIcon(refresh_icon.isNull()
+                                ? QIcon::fromTheme(QStringLiteral("view-refresh"))
+                                : refresh_icon);
+    refresh_button->setIconSize(QSize(16, 16));
     refresh_button->setObjectName(QStringLiteral("RefreshButton"));
     refresh_button->setFocusPolicy(Qt::NoFocus);
     connect(refresh_button, &QPushButton::clicked, this, &MainWindow::OnGameListRefresh);

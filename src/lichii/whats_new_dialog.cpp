@@ -5,6 +5,7 @@
 #include <charconv>
 #include <functional>
 #include <utility>
+#include <QByteArray>
 #include <QDesktopServices>
 #include <QFile>
 #include <QGridLayout>
@@ -22,6 +23,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "qt_common/qt_common.h"
+#include "lichii/util/util.h"
 #include "lichii/whats_new_dialog.h"
 
 namespace {
@@ -62,11 +65,11 @@ QWidget* Highlight(const QString& icon, const QString& title, const QString& tex
     badge->setObjectName(QStringLiteral("WhatsNewBadge"));
     badge->setFixedSize(40, 40);
     badge->setAlignment(Qt::AlignCenter);
-    QIcon glyph(QStringLiteral(":/lichii/icons/menu_%1.png").arg(icon));
-    QPixmap pixmap = glyph.pixmap(QSize(22, 22), row->devicePixelRatioF());
+    const QByteArray glyph_name = QStringLiteral("menu_%1").arg(icon).toLatin1();
+    QPixmap pixmap = ThemePixmap(glyph_name.constData(), QSize(18, 18));
     if (pixmap.isNull()) {
-        pixmap = QIcon(QStringLiteral(":/lichii/icons/menu_sparkles.png"))
-                     .pixmap(QSize(22, 22), row->devicePixelRatioF());
+        pixmap = QtCommon::LoadPixmapForDpr(
+            QStringLiteral(":/lichii/icons/menu_sparkles@2x.png"), 2.0);
     }
     if (!pixmap.isNull() && row->palette().color(QPalette::Window).lightness() > 127) {
         QPainter painter(&pixmap);

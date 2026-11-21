@@ -11,6 +11,8 @@
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include "common/common_types.h"
+#include "qt_common/qt_common.h"
+#include "lichii/util/util.h"
 
 namespace Column {
 enum List {
@@ -42,8 +44,16 @@ public:
 
     QVariant data(int role) const override {
         if (role == Qt::DecorationRole) {
-            bool has_password = data(PasswordRole).toBool();
-            return has_password ? QIcon::fromTheme(QStringLiteral("lock")).pixmap(16) : QIcon();
+            const bool has_password = data(PasswordRole).toBool();
+            if (!has_password) {
+                return QIcon();
+            }
+            QPixmap lock = ThemePixmap("menu_key", QSize(16, 16));
+            if (lock.isNull()) {
+                lock = QIcon::fromTheme(QStringLiteral("lock"))
+                           .pixmap(QSize(16, 16), 2.0);
+            }
+            return lock;
         }
         if (role != Qt::DisplayRole) {
             return LobbyItem::data(role);

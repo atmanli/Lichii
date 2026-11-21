@@ -215,6 +215,9 @@ private:
         u64 serial{};
         /// The API key the lookup ran with.
         std::string key;
+        /// The language the lookup was queued for; the store query and cache path use it.
+        int language_index{};
+        std::string language_tag;
     };
     QList<ArtworkLookup> artwork_queue;
     QSet<u64> artwork_attempted;

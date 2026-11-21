@@ -170,12 +170,13 @@ bool RemoveCustomArtwork(u64 program_id) {
     return true;
 }
 
-std::filesystem::path CoverCachePath(u64 program_id) {
+std::filesystem::path CoverCachePath(u64 program_id, std::string_view language_tag) {
     // v2 marks covers chosen by composition rather than by region order. Older caches can hold a
     // 16:9 store banner cropped to a square, which cuts off part of the key art.
+    const std::string tag =
+        language_tag.empty() ? FileSys::GetConfiguredLanguageTag() : std::string(language_tag);
     return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "covers" /
-           fmt::format("{:016X}.{}.v2.jpg", program_id,
-                       FileSys::GetConfiguredLanguageTag());
+           fmt::format("{:016X}.{}.v2.jpg", program_id, tag);
 }
 
 std::vector<u8> ReadCachedCover(u64 program_id) {
@@ -194,7 +195,7 @@ std::vector<u8> ReadCachedCover(u64 program_id) {
     return std::vector<u8>(bytes.begin(), bytes.end());
 }
 
-bool SaveCachedCover(u64 program_id, const QImage& image) {
+bool SaveCachedCover(u64 program_id, const QImage& image, std::string_view language_tag) {
     if (program_id == 0 || image.isNull()) {
         return false;
     }
@@ -206,7 +207,7 @@ bool SaveCachedCover(u64 program_id, const QImage& image) {
         cover = cover.scaled(MaxSide, MaxSide, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
 
-    const auto path = CoverCachePath(program_id);
+    const auto path = CoverCachePath(program_id, language_tag);
     if (!Common::FS::CreateDirs(path.parent_path())) {
         LOG_ERROR(Frontend, "Cannot create the cover cache folder");
         return false;

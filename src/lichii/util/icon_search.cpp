@@ -518,19 +518,32 @@ std::string FindOgImage(const std::string& html) {
     constexpr std::string_view marker = "og:image";
     const auto marker_pos = html.find(marker.data());
     if (marker_pos != std::string::npos) {
-        constexpr std::string_view attribute = "content=\"";
-        auto content = html.find(attribute.data(), marker_pos);
-        if (content == std::string::npos) {
-            content = html.rfind(attribute.data(), marker_pos);
+        // Stay inside the matching <meta> tag: content may come before or after the property,
+        // and a neighbouring tag's content is not this image.
+        auto tag_begin = html.rfind("<meta", marker_pos);
+        if (tag_begin == std::string::npos) {
+            tag_begin = 0;
         }
-        if (content != std::string::npos) {
+        auto tag_end = html.find('>', marker_pos);
+        if (tag_end == std::string::npos) {
+            tag_end = html.size();
+        }
+        const std::string_view tag(html.data() + tag_begin, tag_end - tag_begin);
+        for (const std::string_view attribute : {std::string_view{"content=\""},
+                                                 std::string_view{"content='"}}) {
+            const auto content = tag.find(attribute);
+            if (content == std::string_view::npos) {
+                continue;
+            }
             const auto begin = content + attribute.size();
-            const auto end = html.find('"', begin);
-            if (end != std::string::npos) {
-                if (auto url = NormalizeNintendoImageUrl(html.substr(begin, end - begin));
-                    !url.empty()) {
-                    return url;
-                }
+            const auto end = tag.find(attribute.back(), begin);
+            if (end == std::string_view::npos) {
+                continue;
+            }
+            if (auto url =
+                    NormalizeNintendoImageUrl(std::string(tag.substr(begin, end - begin)));
+                !url.empty()) {
+                return url;
             }
         }
     }
@@ -985,8 +998,8 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
     return out;
 }
 
-static std::vector<std::string> NintendoStoreRegions() {
-    switch (Settings::values.language_index.GetValue()) {
+static std::vector<std::string> NintendoStoreRegions(int language_index) {
+    switch (static_cast<Settings::Language>(language_index)) {
     case Settings::Language::EnglishBritish:
         return {"GB", "US", "HK"};
     case Settings::Language::Japanese:
@@ -1027,7 +1040,8 @@ static std::vector<std::string> NintendoStoreRegions() {
     }
 }
 
-ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, const std::atomic_bool& cancel) {
+ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, int language_index,
+                                               const std::atomic_bool& cancel) {
     ArtworkLookupResult out;
     if (title_id == 0) {
         out.status = ArtworkLookupStatus::NotFound;
@@ -1053,7 +1067,7 @@ ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, const std::atomic_b
     // while another region has the proper square cover the grid expects.
     QImage fallback;
     std::string fallback_detail;
-    const auto regions = NintendoStoreRegions();
+    const auto regions = NintendoStoreRegions(language_index);
     for (const auto& id : ids) {
         for (const auto& region : regions) {
             if (cancel) {

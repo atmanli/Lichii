@@ -447,9 +447,14 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
         return;
     }
     artwork_attempted.insert(program_id);
+    const int language_index = static_cast<int>(Settings::values.language_index.GetValue());
+    const std::string language_tag = FileSys::GetConfiguredLanguageTag();
     for (auto& queued : artwork_queue) {
         if (queued.program_id == program_id) {
             // A forced lookup takes over the waiting one, with the name the game has now.
+            // A language change updates the queued lookup so it queries the new locale.
+            queued.language_index = language_index;
+            queued.language_tag = language_tag;
             if (forced) {
                 queued.title = title.trimmed();
                 queued.forced = true;
@@ -459,7 +464,14 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
     }
     const u64 serial = ++artwork_serial;
     artwork_newest.insert(program_id, serial);
-    artwork_queue.append({program_id, title.trimmed(), forced, serial});
+    ArtworkLookup lookup;
+    lookup.program_id = program_id;
+    lookup.title = title.trimmed();
+    lookup.forced = forced;
+    lookup.serial = serial;
+    lookup.language_index = language_index;
+    lookup.language_tag = language_tag;
+    artwork_queue.append(std::move(lookup));
     StartArtworkLookups();
 }
 
@@ -506,7 +518,8 @@ void GameList::StartArtworkLookups() {
                 const bool saved =
                     save_as_custom
                         ? QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)
-                        : QtCommon::Game::SaveCachedCover(lookup.program_id, result.image);
+                        : QtCommon::Game::SaveCachedCover(lookup.program_id, result.image,
+                                                          lookup.language_tag);
                 if (saved) {
                     LOG_INFO(Frontend, "Artwork saved for {:016X}", lookup.program_id);
                     artwork_saved.insert(lookup.program_id);
@@ -537,11 +550,12 @@ void GameList::StartArtworkLookups() {
         const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
         watcher->setFuture(QtConcurrent::run(
             &artwork_pool, [title = lookup.title.toStdString(), key = lookup.key,
-                            program_id = lookup.program_id, cancel = artwork_cancel,
+                            program_id = lookup.program_id,
+                            language_index = lookup.language_index, cancel = artwork_cancel,
                             prefer_newest] {
                 // The ROM icon is used when it exists; this only runs for games without one.
                 // Nintendo's store is keyed by title ID, so it needs no name or API key.
-                auto official = LookUpNintendoStoreArtwork(program_id, *cancel);
+                auto official = LookUpNintendoStoreArtwork(program_id, language_index, *cancel);
                 if (official.status == ArtworkLookupStatus::Found ||
                     official.status == ArtworkLookupStatus::Cancelled) {
                     return official;
@@ -558,7 +572,8 @@ void GameList::ShowArtwork(u64 program_id) {
     // Updates the shown pictures in place. A rescan here would stop and wait for a scan that is
     // still running on the UI thread, and rebuild the whole library for one picture.
     std::vector<u8> artwork = QtCommon::Game::ReadCustomArtwork(program_id);
-    if (artwork.empty()) {
+    const bool is_custom = !artwork.empty();
+    if (!is_custom) {
         artwork = QtCommon::Game::ReadCachedCover(program_id);
     }
     if (artwork.empty()) {
@@ -570,7 +585,11 @@ void GameList::ShowArtwork(u64 program_id) {
             if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
                 GameListItemType::Game) {
                 if (item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
-                    GameListItemPath::SetPicture(item, artwork);
+                    // An automatic cached cover must not replace a row that already has an
+                    // embedded ROM icon or custom artwork. A user-chosen custom cover still does.
+                    if (is_custom || !item->data(GameListItemPath::HasIconRole).toBool()) {
+                        GameListItemPath::SetPicture(item, artwork);
+                    }
                 }
             } else {
                 visit(item);

@@ -58,8 +58,11 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
 
 // Finds the official square artwork for a title on Nintendo's store. The title ID is resolved
 // through ec.nintendo.com, so no name search is needed; Switch 2 Edition IDs fall back to their
-// Switch 1 store page. Blocking, so run it off the UI thread. The caller caches the image.
-ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, const std::atomic_bool& cancel);
+// Switch 1 store page. `language_index` pins the store region to the language the lookup was
+// queued for, so a language change cannot swap the result's locale mid-flight. Blocking, so run
+// it off the UI thread. The caller caches the image.
+ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, int language_index,
+                                              const std::atomic_bool& cancel);
 
 // Looks an icon up by game name on switchiconshowdown.com, falling back to SteamGridDB when the
 // user has set an API key. The search runs in the background under one 10 second deadline; errors,

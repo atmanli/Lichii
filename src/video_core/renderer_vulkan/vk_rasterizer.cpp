@@ -2901,7 +2901,8 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
         // title menu or background read as zeros once the shader cache's read flushed it.
         gpu.InvalidateGPUCache();
     }
-    if (True(which & VideoCommon::CacheType::TextureCache)) {
+    if (True(which & VideoCommon::CacheType::TextureCache) &&
+        texture_cache.page_filter.Any(addr, size)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.DownloadMemory(addr, size);
     }
@@ -2925,7 +2926,7 @@ void RasterizerVulkan::FlushRegionForRead(DAddr addr, u64 size) {
         addr, size, Tegra::Nx2ListIndirect::OwedReader::CpuRead,
         std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     gpu.InvalidateGPUCache();
-    {
+    if (texture_cache.page_filter.Any(addr, size)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.DownloadMemory(addr, size);
     }

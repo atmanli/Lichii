@@ -96,6 +96,19 @@ void ClearHomeMenuArtworkCache();
 /// Deletes the program's custom artwork. Returns true when none is left.
 bool RemoveCustomArtwork(u64 program_id);
 
+// Fetched cover cache //
+
+/// Where an online cover for the configured system language is cached. The language is part of
+/// the path, so switching languages never reuses or overwrites another language's cover.
+std::filesystem::path CoverCachePath(u64 program_id);
+
+/// The cached online cover for the program in the configured language, or empty.
+std::vector<u8> ReadCachedCover(u64 program_id);
+
+/// Stores an online cover for the configured language. The image is cropped square and stored
+/// as JPEG; it is only used when the game file has no icon.
+[[nodiscard]] bool SaveCachedCover(u64 program_id, const QImage& image);
+
 // Custom name //
 
 /// Where the name the user gave a program is stored (one UTF-8 line). Like custom artwork it

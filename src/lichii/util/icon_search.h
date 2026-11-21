@@ -43,6 +43,8 @@ struct ArtworkLookupResult {
     ArtworkLookupStatus status{ArtworkLookupStatus::NotFound};
     QImage image;
     std::string detail; // Never contains the API key.
+    /// The image came from Nintendo's store, so it does not depend on the SteamGridDB key.
+    bool from_official_store{};
 };
 
 // Finds square artwork for a game title on SteamGridDB with the user's API key: the best title
@@ -53,6 +55,11 @@ struct ArtworkLookupResult {
 ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
                                              const std::atomic_bool& cancel,
                                              bool prefer_newest = false);
+
+// Finds the official square artwork for a title on Nintendo's store. The title ID is resolved
+// through ec.nintendo.com, so no name search is needed; Switch 2 Edition IDs fall back to their
+// Switch 1 store page. Blocking, so run it off the UI thread. The caller caches the image.
+ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, const std::atomic_bool& cancel);
 
 // Looks an icon up by game name on switchiconshowdown.com, falling back to SteamGridDB when the
 // user has set an API key. The search runs in the background under one 10 second deadline; errors,

@@ -165,13 +165,15 @@ private:
 
     void RetranslateUI();
 
-    /// Queues a SteamGridDB lookup for every game without artwork, once per game per session.
+    /// Queues an artwork lookup for every game without a ROM icon, once per game per session.
+    /// Nintendo's store is tried first; SteamGridDB is the fallback when its key is set.
     void QueueArtworkLookups();
     /// Queues one game; forced lookups run again and replace existing custom artwork.
     void QueueArtworkLookup(u64 program_id, const QString& title, bool forced);
     void StartArtworkLookups();
-    /// Shows the program's custom artwork in every library entry of it, without a rescan.
-    void ShowCustomArtwork(u64 program_id);
+    /// Shows the program's custom artwork, else its cached online cover, in every library entry
+    /// of it, without a rescan.
+    void ShowArtwork(u64 program_id);
     QString GameTitle(u64 program_id) const;
 
     friend class GameListSearchField;
@@ -222,6 +224,8 @@ private:
     u64 artwork_serial = 0;
     /// The API key the attempted games were looked up with.
     std::string artwork_key;
+    /// The system language the attempted artwork was looked up for.
+    std::string artwork_language;
     int artwork_running = 0;
     bool artwork_failure_logged = false;
     /// Programs whose looked up artwork was saved since the last scan finished. A scan can add

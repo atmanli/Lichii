@@ -33,6 +33,7 @@
 #include "common/fs/fs_util.h"
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_writer.h"
 #ifdef LICHII_NX_TOOLS
 #include "lichii/nx_tools.h"
@@ -382,7 +383,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
 
     // Artwork a lookup saved while this scan ran can be missing from rows added after the save.
     for (const u64 program_id : std::as_const(artwork_saved)) {
-        ShowCustomArtwork(program_id);
+        ShowArtwork(program_id);
     }
     artwork_saved.clear();
 
@@ -408,8 +409,11 @@ QString GameList::GameTitle(u64 program_id) const {
 }
 
 void GameList::QueueArtworkLookups() {
-    if (UISettings::values.steamgriddb_api_key.GetValue().empty()) {
-        return;
+    // A language change gives every game another chance at a localized cover.
+    const auto language = FileSys::GetConfiguredLanguageTag();
+    if (language != artwork_language) {
+        artwork_language = language;
+        artwork_attempted.clear();
     }
     const std::function<void(const QStandardItem*)> visit = [&](const QStandardItem* parent) {
         for (int row = 0; row < parent->rowCount(); ++row) {
@@ -431,7 +435,7 @@ void GameList::QueueArtworkLookups() {
 
 void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool forced) {
     const std::string& key = UISettings::values.steamgriddb_api_key.GetValue();
-    if (program_id == 0 || title.trimmed().isEmpty() || key.empty()) {
+    if (program_id == 0) {
         return;
     }
     // A new key gives the games looked up with the old one another try.
@@ -488,15 +492,25 @@ void GameList::StartArtworkLookups() {
             const bool artwork_added =
                 !lookup.forced &&
                 std::filesystem::exists(QtCommon::Game::CustomArtworkPath(lookup.program_id), ec);
-            // A lookup whose key was cleared or replaced while it ran saves nothing.
+            // A SteamGridDB lookup whose key was cleared or replaced while it ran saves nothing.
+            // Nintendo's store is keyed by title ID, so its result is always current.
             const bool key_current =
+                result.from_official_store ||
                 lookup.key == UISettings::values.steamgriddb_api_key.GetValue();
             if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added &&
                 key_current) {
-                if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
-                    LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
+                // An automatic Nintendo store cover is cached separately and only used when the
+                // game file has no icon. A forced lookup, like SteamGridDB, replaces the shown
+                // artwork. Both stores persist across rescans.
+                const bool save_as_custom = !result.from_official_store || lookup.forced;
+                const bool saved =
+                    save_as_custom
+                        ? QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)
+                        : QtCommon::Game::SaveCachedCover(lookup.program_id, result.image);
+                if (saved) {
+                    LOG_INFO(Frontend, "Artwork saved for {:016X}", lookup.program_id);
                     artwork_saved.insert(lookup.program_id);
-                    ShowCustomArtwork(lookup.program_id);
+                    ShowArtwork(lookup.program_id);
                 }
             } else if (newest && result.status != ArtworkLookupStatus::Found &&
                        result.status != ArtworkLookupStatus::Cancelled &&
@@ -511,15 +525,11 @@ void GameList::StartArtworkLookups() {
                 } else if (result.status == ArtworkLookupStatus::NotFound) {
                     reason = "no match was found";
                 }
-                LOG_INFO(Frontend, "SteamGridDB artwork lookup for {:016X} failed: {} {}",
-                         lookup.program_id, reason, result.detail);
+                LOG_INFO(Frontend, "Artwork lookup for {:016X} failed: {} {}", lookup.program_id,
+                         reason, result.detail);
             }
-            if (result.status == ArtworkLookupStatus::BadApiKey &&
-                lookup.key == UISettings::values.steamgriddb_api_key.GetValue()) {
-                // Every other lookup would fail the same way. A late failure with a key that was
-                // replaced since leaves the lookups of the new key alone.
-                artwork_queue.clear();
-            }
+            // A bad SteamGridDB key does not stop the queue: Nintendo's store lookup is keyed by
+            // title ID and still works for the remaining games.
             StartArtworkLookups();
         });
         // Switch 2 program IDs start with 04. Their titles are often remakes that share the name
@@ -527,16 +537,30 @@ void GameList::StartArtworkLookups() {
         const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
         watcher->setFuture(QtConcurrent::run(
             &artwork_pool, [title = lookup.title.toStdString(), key = lookup.key,
-                            cancel = artwork_cancel, prefer_newest] {
-                return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
+                            program_id = lookup.program_id, cancel = artwork_cancel,
+                            prefer_newest] {
+                // The ROM icon is used when it exists; this only runs for games without one.
+                // Nintendo's store is keyed by title ID, so it needs no name or API key.
+                auto official = LookUpNintendoStoreArtwork(program_id, *cancel);
+                if (official.status == ArtworkLookupStatus::Found ||
+                    official.status == ArtworkLookupStatus::Cancelled) {
+                    return official;
+                }
+                if (!key.empty()) {
+                    return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
+                }
+                return official;
             }));
     }
 }
 
-void GameList::ShowCustomArtwork(u64 program_id) {
+void GameList::ShowArtwork(u64 program_id) {
     // Updates the shown pictures in place. A rescan here would stop and wait for a scan that is
     // still running on the UI thread, and rebuild the whole library for one picture.
-    const std::vector<u8> artwork = QtCommon::Game::ReadCustomArtwork(program_id);
+    std::vector<u8> artwork = QtCommon::Game::ReadCustomArtwork(program_id);
+    if (artwork.empty()) {
+        artwork = QtCommon::Game::ReadCachedCover(program_id);
+    }
     if (artwork.empty()) {
         return;
     }
@@ -621,8 +645,8 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
     artwork_forced.remove(program_id);
     // An automatic lookup only fills a game that still has no artwork.
     std::error_code ec;
-    if (search_title.isEmpty() || UISettings::values.steamgriddb_api_key.GetValue().empty() ||
-        (!forced && std::filesystem::exists(QtCommon::Game::CustomArtworkPath(program_id), ec))) {
+    if (!forced &&
+        std::filesystem::exists(QtCommon::Game::CustomArtworkPath(program_id), ec)) {
         return;
     }
     const u64 serial = ++artwork_serial;
@@ -844,9 +868,9 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         edit_nup = context_menu.addAction(tr("Edit NUP Metadata..."));
         edit_nup->setEnabled(!nup_conversion_running);
     }
-    QAction* lookup_artwork = context_menu.addAction(tr("Look up artwork on SteamGridDB"));
+    QAction* lookup_artwork = context_menu.addAction(tr("Look up artwork"));
     lookup_artwork->setVisible(program_id != 0);
-    lookup_artwork->setEnabled(!UISettings::values.steamgriddb_api_key.GetValue().empty());
+    lookup_artwork->setEnabled(program_id != 0);
     QAction* properties = context_menu.addAction(tr("Configure Game"));
     if (program_id != 0 && program_id == reportable_program_id) {
         auto* report = context_menu.addAction(tr("Submit compatibility report…"));

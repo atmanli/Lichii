@@ -108,22 +108,26 @@ struct PipelineCacheFlushState {
 /// A flush is due once `pipelines_needed` pipelines were built, `interval` after the last flush
 /// that counts (PipelineCacheFlushInterval; see AfterPipelineCacheSave), and
 /// PipelineCacheFlushRetryFloor after the last attempt ended. After an attempt that got nothing
-/// usable from the driver (a build overtook every read) the pipeline count is not waited for, and
-/// the floor spaces the next try: the pipelines built since may stay fewer than the count (the
-/// burst that overtook the reads ended), and everything since the last good save would then reach
-/// the file only on a clean close. The floor runs from the end of the attempt, so a save that
-/// itself takes longer than the floor is not queued again with no pause.
+/// usable from the driver (a build overtook every read) neither the pipeline count nor the
+/// interval is waited for, and the floor alone spaces the next try: the pipelines built since may
+/// stay fewer than the count (the burst that overtook the reads ended), the last flush that counts
+/// may be recent (the save after the boot builds, with the one after the precache overtaken), and
+/// everything since that save would then reach the file only on a clean close. The floor runs
+/// from the end of the attempt, so a save that itself takes longer than the floor is not queued
+/// again with no pause.
 inline constexpr std::chrono::seconds PipelineCacheFlushRetryFloor{30};
 [[nodiscard]] inline bool PipelineCacheFlushDue(const PipelineCacheFlushState& state,
                                                 std::chrono::steady_clock::time_point now,
                                                 std::chrono::seconds interval,
                                                 size_t pipelines_needed) {
     using TimePoint = std::chrono::steady_clock::time_point;
-    if (!state.last_failed && state.pipelines < pipelines_needed) {
-        return false;
-    }
-    if (state.last_saved != TimePoint{} && now - state.last_saved < interval) {
-        return false;
+    if (!state.last_failed) {
+        if (state.pipelines < pipelines_needed) {
+            return false;
+        }
+        if (state.last_saved != TimePoint{} && now - state.last_saved < interval) {
+            return false;
+        }
     }
     return state.last_attempt == TimePoint{} ||
            now - state.last_attempt >= PipelineCacheFlushRetryFloor;

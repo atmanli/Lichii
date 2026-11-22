@@ -294,6 +294,33 @@ TEST_CASE("A driver pipeline cache flush that read nothing usable is due at the 
                                         std::chrono::seconds{300}, 128));
 }
 
+TEST_CASE("A driver pipeline cache save overtaken soon after a good one is due at the floor",
+          "[video_core][vulkan_pipeline_cache]") {
+    using namespace std::chrono_literals;
+    using Clock = std::chrono::steady_clock;
+    // The save after the boot builds worked; the one after the precache, a minute later, was
+    // overtaken by the prebuild. The cache is 600 MiB, so the interval is ten minutes.
+    const Clock::time_point boot_saved = Clock::now();
+    const auto ended = boot_saved + 60s;
+    const auto interval = Vulkan::PipelineCacheFlushInterval(size_t{600} * 1024 * 1024);
+    auto state =
+        Vulkan::AfterPipelineCacheSave({.last_saved = boot_saved, .last_attempt = boot_saved},
+                                       Vulkan::PipelineCacheSaveOutcome::NothingUsable, ended,
+                                       ended);
+    state.pipelines = 1;
+    CHECK_FALSE(Vulkan::PipelineCacheFlushDue(state, ended + 10s, interval, 128));
+    // The floor after the attempt, not the interval after the boot save.
+    CHECK(Vulkan::PipelineCacheFlushDue(state, ended + Vulkan::PipelineCacheFlushRetryFloor,
+                                        interval, 128));
+    // The retry is written: the interval counts again, from when it was queued.
+    const auto retried = ended + Vulkan::PipelineCacheFlushRetryFloor;
+    state = Vulkan::AfterPipelineCacheSave(state, Vulkan::PipelineCacheSaveOutcome::Whole, retried,
+                                           retried + 2s);
+    state.pipelines = 128;
+    CHECK_FALSE(Vulkan::PipelineCacheFlushDue(state, retried + 599s, interval, 128));
+    CHECK(Vulkan::PipelineCacheFlushDue(state, retried + 600s, interval, 128));
+}
+
 TEST_CASE("A driver pipeline cache flush that failed to write waits the interval its size gives",
           "[video_core][vulkan_pipeline_cache]") {
     using namespace std::chrono_literals;

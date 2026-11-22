@@ -1115,6 +1115,9 @@ struct Values {
     Setting<bool> nextendo_enabled{linkage, false, "nextendo_enabled", Category::Network};
     // Google Drive sync of profiles and saves (frontend_common/cloud_sync).
     Setting<bool> cloud_sync_enabled{linkage, false, "cloud_sync_enabled", Category::Network};
+    // Also syncs the web service login (eden_username, eden_token) on "Sync now".
+    Setting<bool> cloud_sync_web_service{linkage, true, "cloud_sync_web_service",
+                                         Category::Network};
     // Replaces the current user's nickname and icon with the Nextendo account's.
     Setting<bool> nextendo_sync_profile{linkage, false, "nextendo_sync_profile", Category::Network};
     Setting<std::string> nextendo_server_ip{linkage, "51.178.29.194", "nextendo_server_ip",

@@ -103,6 +103,7 @@ add_executable(tests
     frontend_common/cloud_sync_drive.cpp
     frontend_common/cloud_sync_engine.cpp
     frontend_common/cloud_sync_profiles.cpp
+    frontend_common/cloud_sync_web_service.cpp
     frontend_common/cloud_sync_machine.h
     frontend_common/fake_drive.h
     frontend_common/fake_google.h

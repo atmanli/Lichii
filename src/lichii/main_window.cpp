@@ -1853,6 +1853,7 @@ void MainWindow::ConnectWidgetEvents() {
     });
     connect(cloud_sync, &CloudSyncController::StatusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 15000); });
+    connect(cloud_sync, &CloudSyncController::SettingsChanged, this, &MainWindow::OnSaveConfig);
     // A Nextendo profile pulled during the sync was left for now.
     connect(cloud_sync, &CloudSyncController::BusyChanged, this, [this](bool busy) {
         UpdateCloudSyncButton();

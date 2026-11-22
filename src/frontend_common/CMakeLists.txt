@@ -27,7 +27,8 @@ add_library(frontend_common STATIC
     cloud_sync/sync_state.h cloud_sync/sync_state.cpp
     cloud_sync/sync_layout.h cloud_sync/sync_layout.cpp
     cloud_sync/sync_engine.h cloud_sync/sync_engine.cpp
-    cloud_sync/profile_sync.h cloud_sync/profile_sync.cpp)
+    cloud_sync/profile_sync.h cloud_sync/profile_sync.cpp
+    cloud_sync/web_service_sync.h cloud_sync/web_service_sync.cpp)
 
 target_link_libraries(frontend_common PRIVATE httplib::httplib nlohmann_json::nlohmann_json
     OpenSSL::SSL OpenSSL::Crypto minizip::minizip)

@@ -27,6 +27,11 @@ std::string StringField(const nlohmann::json& object, const char* key) {
     return it != object.end() && it->is_string() ? it->get<std::string>() : std::string{};
 }
 
+SyncedVersion ReadVersion(const nlohmann::json& value) {
+    return {StringField(value, "fileId"), StringField(value, "contentHash"),
+            StringField(value, "modifiedTime")};
+}
+
 std::map<std::string, SyncedVersion> ReadVersions(const nlohmann::json& root, const char* key) {
     std::map<std::string, SyncedVersion> versions;
     const auto object = root.find(key);
@@ -35,20 +40,22 @@ std::map<std::string, SyncedVersion> ReadVersions(const nlohmann::json& root, co
     }
     for (const auto& [name, value] : object->items()) {
         if (value.is_object()) {
-            versions.emplace(name, SyncedVersion{StringField(value, "fileId"),
-                                                 StringField(value, "contentHash"),
-                                                 StringField(value, "modifiedTime")});
+            versions.emplace(name, ReadVersion(value));
         }
     }
     return versions;
 }
 
+nlohmann::json VersionJson(const SyncedVersion& version) {
+    return {{"fileId", version.file_id},
+            {"contentHash", version.content_hash},
+            {"modifiedTime", version.modified_time}};
+}
+
 nlohmann::json VersionsJson(const std::map<std::string, SyncedVersion>& versions) {
     nlohmann::json json = nlohmann::json::object();
     for (const auto& [name, version] : versions) {
-        json[name] = {{"fileId", version.file_id},
-                      {"contentHash", version.content_hash},
-                      {"modifiedTime", version.modified_time}};
+        json[name] = VersionJson(version);
     }
     return json;
 }
@@ -122,6 +129,10 @@ std::optional<SyncState> LoadSyncState() {
         last_sync != root.end() && last_sync->is_number_integer()) {
         state.last_sync = last_sync->get<s64>();
     }
+    if (const auto login = root.find("webServiceLogin");
+        login != root.end() && login->is_object()) {
+        state.web_service_login = ReadVersion(*login);
+    }
     if (const auto links = root.find("links"); links != root.end() && links->is_object()) {
         for (const auto& [local, remote] : links->items()) {
             if (remote.is_string()) {
@@ -140,11 +151,14 @@ bool SaveSyncState(const SyncState& state) {
     std::filesystem::create_directories(path.parent_path(), ec);
     {
         std::ofstream file{temporary, std::ios::binary | std::ios::trunc};
-        file << nlohmann::json{{"saves", VersionsJson(state.saves)},
-                               {"profiles", VersionsJson(state.profiles)},
-                               {"links", state.links},
-                               {"last_sync", state.last_sync}}
-                    .dump(1, '\t');
+        nlohmann::json root{{"saves", VersionsJson(state.saves)},
+                            {"profiles", VersionsJson(state.profiles)},
+                            {"links", state.links},
+                            {"last_sync", state.last_sync}};
+        if (state.web_service_login) {
+            root["webServiceLogin"] = VersionJson(*state.web_service_login);
+        }
+        file << root.dump(1, '\t');
         // Closed here, as a failed flush shows only then.
         file.close();
         if (file.fail()) {

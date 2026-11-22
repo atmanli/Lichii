@@ -68,6 +68,8 @@ public:
 signals:
     void BusyChanged(bool busy);
     void StatusMessage(const QString& message);
+    // A sync changed the settings (the web service login): they should be saved.
+    void SettingsChanged();
 
 private:
     using Work = std::function<FrontendCommon::CloudSync::SyncResult(std::stop_token)>;
@@ -76,6 +78,8 @@ private:
     FrontendCommon::CloudSync::SyncCallbacks Callbacks();
     // Shows the question without blocking and answers through answer when the user picks.
     QMessageBox* AskConflict(const FrontendCommon::CloudSync::Conflict& conflict, Answer answer);
+    // Adds the choices to the question, shows it and answers through answer.
+    QMessageBox* ShowConflict(QMessageBox* box, Answer answer);
     void RunInBackground(const QString& what, Work work, bool report_in_dialog);
     void Report(const QString& what, const FrontendCommon::CloudSync::SyncResult& result,
                 bool report_in_dialog);

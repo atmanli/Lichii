@@ -31,6 +31,8 @@ struct SyncState {
     std::map<std::string, SyncedVersion> profiles;
     // Local profile uuid to the Drive user id it was linked to (both FormattedString).
     std::map<std::string, std::string> links;
+    // The web service login's.
+    std::optional<SyncedVersion> web_service_login;
     // Unix time the last sync finished without errors, 0 before the first.
     s64 last_sync{};
 };

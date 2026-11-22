@@ -24,8 +24,8 @@ namespace Core {
 class System;
 }
 
-// Google Drive sync settings: on or off, the Google account, the OAuth client, which Drive profile
-// each local profile syncs as, and "Sync now".
+// Google Drive sync settings: on or off, whether the web service login syncs, the Google account,
+// the OAuth client, which Drive profile each local profile syncs as, and "Sync now".
 class ConfigureCloudSync : public QWidget {
     Q_OBJECT
 
@@ -61,6 +61,7 @@ private:
 
     QCheckBox* enabled;
     QLabel* description;
+    QCheckBox* web_service;
     QGroupBox* account_group;
     QGroupBox* link_group;
     QFormLayout* link_layout;

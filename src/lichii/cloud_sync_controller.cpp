@@ -142,6 +142,18 @@ QMessageBox* CloudSyncController::AskConflict(const CloudSync::Conflict& conflic
         answer(CloudSync::ConflictChoice::Skip);
         return nullptr;
     }
+    if (conflict.web_service) {
+        auto* const box = new QMessageBox(
+            QMessageBox::Question, tr("Cloud Sync Conflict"),
+            tr("The web service login changed both on this device and on Google Drive.\n\n"
+               "This device: %1\nGoogle Drive: %2 (%3)\n\n"
+               "Which one do you want to keep? Google Drive keeps old versions of its login.")
+                .arg(QString::fromStdString(conflict.nickname),
+                     QString::fromStdString(conflict.remote_nickname),
+                     FormatTime(conflict.remote_time)),
+            QMessageBox::NoButton, window);
+        return ShowConflict(box, std::move(answer));
+    }
     QString what;
     if (conflict.title_id == 0) {
         what = tr("The profile %1").arg(QString::fromStdString(conflict.nickname));
@@ -161,6 +173,10 @@ QMessageBox* CloudSyncController::AskConflict(const CloudSync::Conflict& conflic
            "cloud_sync folder of the configuration folder).")
             .arg(what, FormatTime(conflict.local_time), FormatTime(conflict.remote_time)),
         QMessageBox::NoButton, window);
+    return ShowConflict(box, std::move(answer));
+}
+
+QMessageBox* CloudSyncController::ShowConflict(QMessageBox* box, Answer answer) {
     box->setAttribute(Qt::WA_DeleteOnClose);
     // Over the progress dialog of a pull before boot, which is application modal too.
     box->setWindowModality(Qt::ApplicationModal);
@@ -276,11 +292,16 @@ void CloudSyncController::SyncTitle(const CloudSync::Title& title) {
 
 void CloudSyncController::SyncAll() {
     auto titles = title_source ? title_source() : std::vector<CloudSync::Title>{};
+    std::optional<std::optional<CloudSync::WebServiceLogin>> web_service;
+    if (Settings::values.cloud_sync_web_service.GetValue()) {
+        web_service = CloudSync::LocalWebServiceLogin();
+    }
     RunInBackground(
         tr("Syncing profiles and saves"),
-        [selected = std::move(titles), callbacks = Callbacks()](std::stop_token token) {
+        [selected = std::move(titles), web_service,
+         callbacks = Callbacks()](std::stop_token token) {
             return CloudSync::SyncAll(QtCommon::system->GetProfileManager(), selected, callbacks,
-                                      token);
+                                      token, web_service);
         },
         true);
 }
@@ -300,6 +321,11 @@ void CloudSyncController::RunInBackground(const QString& what, Work work, bool r
             [this, watcher, what, report_in_dialog] {
                 const auto result = watcher->result();
                 watcher->deleteLater();
+                if (result.web_service_login) {
+                    Settings::values.eden_username = result.web_service_login->username;
+                    Settings::values.eden_token = result.web_service_login->token;
+                    emit SettingsChanged();
+                }
                 SetRunning(-1);
                 Report(what, result, report_in_dialog);
             });

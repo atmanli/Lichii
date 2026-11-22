@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -61,6 +62,10 @@ struct Conflict {
     // For a profile, the newer of its avatar's and the shared profiles.dat's: approximate.
     std::chrono::system_clock::time_point local_time;
     std::chrono::system_clock::time_point remote_time;
+    // The web service login: nickname is this device's username and remote_nickname Drive's.
+    // local_time is unknown (the epoch).
+    bool web_service{};
+    std::string remote_nickname;
 };
 
 struct SyncCallbacks {
@@ -91,6 +96,20 @@ bool SyncRunning();
 // can't be read. Reads the state without waiting for a running sync.
 std::optional<s64> LastSyncTime();
 
+// The web service login (eden_username and eden_token in the settings), synced by SyncAll as
+// Lichii/Web Service Login.json (lichii=webServiceLogin, contentHash) like a profile: the side
+// that changed wins, one without a login gets the other's, and when both changed the caller picks.
+struct WebServiceLogin {
+    std::string username;
+    std::string token;
+
+    bool operator==(const WebServiceLogin&) const = default;
+};
+
+// This device's login, from the settings. nullopt while the username is the default one: the
+// token is then the one Lichii generates for every device, not a login to sync.
+std::optional<WebServiceLogin> LocalWebServiceLogin();
+
 struct SyncResult {
     std::size_t pushed{};
     std::size_t pulled{};
@@ -99,6 +118,10 @@ struct SyncResult {
     bool cancelled{};
     // What went wrong, for the user. Empty when everything synced.
     std::vector<std::string> errors;
+    // Drive's web service login, when SyncAll took it: the frontend sets it in the settings and
+    // saves them. It becomes the base on the next sync, once this device has it, so a login that
+    // never got applied is pulled again rather than overwriting Drive's.
+    std::optional<WebServiceLogin> web_service_login;
 };
 
 // Before the title boots, after BeginGuest: brings in the saves that changed on Drive, and
@@ -113,9 +136,11 @@ SyncResult PushTitle(Service::Account::ProfileManager& profiles, const Title& ti
 
 // "Sync now": both directions for the profiles (profile_sync.h), then every title. The profiles
 // wait for the next SyncAll while a guest runs, as it may be using them. Stops when Drive can't be
-// reached.
+// reached. With web_service set, the web service login is synced after the profiles, and when
+// they are: web_service holds this device's (LocalWebServiceLogin).
 SyncResult SyncAll(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
-                   const SyncCallbacks& callbacks, std::stop_token stop);
+                   const SyncCallbacks& callbacks, std::stop_token stop,
+                   std::optional<std::optional<WebServiceLogin>> web_service = std::nullopt);
 
 // Both directions for the titles' saves, without the profiles: safe while a guest runs.
 SyncResult SyncSaves(Service::Account::ProfileManager& profiles, std::span<const Title> titles,

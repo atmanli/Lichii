@@ -42,6 +42,7 @@ ConfigureCloudSync::ConfigureCloudSync(Core::System& system_, QWidget* parent)
     enabled = new QCheckBox;
     description = new QLabel;
     description->setWordWrap(true);
+    web_service = new QCheckBox;
 
     account_status = new QLabel;
     account_status->setWordWrap(true);
@@ -111,12 +112,14 @@ ConfigureCloudSync::ConfigureCloudSync(Core::System& system_, QWidget* parent)
     auto* const layout = new QVBoxLayout(this);
     layout->addWidget(enabled);
     layout->addWidget(description);
+    layout->addWidget(web_service);
     layout->addWidget(account_group);
     layout->addWidget(link_group);
     layout->addLayout(sync_row);
     layout->addStretch();
 
     enabled->setChecked(Settings::values.cloud_sync_enabled.GetValue());
+    web_service->setChecked(Settings::values.cloud_sync_web_service.GetValue());
     if (auto* const controller = CloudSyncController::Instance()) {
         busy = controller->Busy();
         connect(controller, &CloudSyncController::BusyChanged, this, [this](bool busy_) {
@@ -164,6 +167,7 @@ ConfigureCloudSync::~ConfigureCloudSync() {
 
 void ConfigureCloudSync::ApplyConfiguration() {
     Settings::values.cloud_sync_enabled = enabled->isChecked();
+    Settings::values.cloud_sync_web_service = web_service->isChecked();
 }
 
 void ConfigureCloudSync::changeEvent(QEvent* event) {
@@ -185,6 +189,10 @@ void ConfigureCloudSync::RetranslateUI() {
     description->setText(tr("Saves are downloaded before a game starts and uploaded after it "
                             "closes. Lichii only sees the files it puts in the Lichii folder of "
                             "your Drive."));
+    web_service->setText(tr("Sync the web service login (username and token) on Sync Now"));
+    web_service->setToolTip(tr("Only a login of your own is synced, not the default \"Eden\" "
+                               "username with the token generated for this device. The token is "
+                               "stored in the Lichii folder of your Drive."));
     account_group->setTitle(tr("Google Account"));
     sign_out->setText(tr("Sign Out"));
     copy_code->setText(tr("Copy Code"));
@@ -435,4 +443,5 @@ void ConfigureCloudSync::UpdateState() {
         link_status->clear();
     }
     sync_now->setEnabled(signed_in && enabled->isChecked() && !syncing);
+    web_service->setEnabled(enabled->isChecked());
 }

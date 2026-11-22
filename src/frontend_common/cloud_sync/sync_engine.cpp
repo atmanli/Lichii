@@ -21,6 +21,7 @@
 #include "frontend_common/cloud_sync/sync_engine.h"
 #include "frontend_common/cloud_sync/sync_layout.h"
 #include "frontend_common/cloud_sync/sync_state.h"
+#include "frontend_common/cloud_sync/web_service_sync.h"
 
 namespace FrontendCommon::CloudSync {
 
@@ -372,7 +373,8 @@ private:
 
 SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
                       const SyncCallbacks& callbacks, Direction direction, bool with_profiles,
-                      std::stop_token caller_stop) {
+                      std::stop_token caller_stop,
+                      const std::optional<std::optional<WebServiceLogin>>& web_service = {}) {
     SyncResult result;
     const JobScope job{titles, with_profiles, caller_stop};
     const std::stop_token stop = job.Token();
@@ -398,6 +400,10 @@ SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<cons
     // First, so that the saves of profiles new here are pulled too.
     if (job.Profiles() &&
         (!SyncProfiles(profiles, callbacks, state, result, stop) || result.cancelled)) {
+        return result;
+    }
+    if (job.Profiles() && web_service &&
+        (!SyncWebServiceLogin(*web_service, callbacks, state, result, stop) || result.cancelled)) {
         return result;
     }
     for (std::size_t done = 0; done < titles.size(); ++done) {
@@ -494,8 +500,9 @@ SyncResult PushTitle(Service::Account::ProfileManager& profiles, const Title& ti
 }
 
 SyncResult SyncAll(Service::Account::ProfileManager& profiles, std::span<const Title> titles,
-                   const SyncCallbacks& callbacks, std::stop_token stop) {
-    return SyncTitles(profiles, titles, callbacks, Direction::Both, true, stop);
+                   const SyncCallbacks& callbacks, std::stop_token stop,
+                   std::optional<std::optional<WebServiceLogin>> web_service) {
+    return SyncTitles(profiles, titles, callbacks, Direction::Both, true, stop, web_service);
 }
 
 SyncResult SyncSaves(Service::Account::ProfileManager& profiles, std::span<const Title> titles,

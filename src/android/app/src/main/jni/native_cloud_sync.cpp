@@ -15,6 +15,8 @@
 
 #include "common/android/android_common.h"
 #include "common/android/id_cache.h"
+#include "common/logging.h"
+#include "common/settings.h"
 #include "common/uuid.h"
 #include "frontend_common/cloud_sync/google_auth.h"
 #include "frontend_common/cloud_sync/profile_sync.h"
@@ -33,18 +35,26 @@ constexpr const char* SignInResultClass =
 // The guest beginGuest began, until it stops or the app gives it up.
 struct Guest {
     jlong token{};
+    // The game's program id beginGuest got; title follows the program that runs.
+    u64 game_id{};
     CloudSync::Title title;
     bool loaded{};
+    // Stops the pull before the guest boots, also when cancelPull comes before pullTitle.
+    std::stop_source pull_stop;
+    // Its BeginGuest's, for EndGuest.
+    u64 registration{};
 };
 
 std::mutex guest_mutex;
 std::optional<Guest> guest;
 jlong next_guest_token = 1;
-// The pull before the guest boots, for cancelPull.
-jlong pull_token = 0;
-std::stop_source pull_stop;
+// Held by beginGuest from its first look at the guest to the install, so that a begin can't
+// replace the guest of one that began after it.
+std::mutex begin_mutex;
 // NativeCloudSync, for GuestStopped to call on the emulation thread.
 jclass native_cloud_sync_class = nullptr;
+// CloudSyncManager, for the syncs of a program change on the emulation thread.
+jobject conflict_listener = nullptr;
 
 std::mutex sign_in_mutex;
 std::stop_source sign_in_stop;
@@ -141,10 +151,56 @@ std::vector<CloudSync::Title> ToTitles(JNIEnv* env, jobjectArray jprogram_ids,
 
 namespace AndroidCloudSync {
 
-void GuestLoaded() {
-    std::scoped_lock lock{guest_mutex};
-    if (guest) {
-        guest->loaded = true;
+void GuestLoaded(u64 program_id, std::stop_token stop) {
+    CloudSync::Title previous;
+    CloudSync::Title next;
+    jobject listener = nullptr;
+    jlong token = 0;
+    {
+        // As in beginGuest, so that no beginGuest registers between this registration and the
+        // look at the guest it is for.
+        std::scoped_lock begin_lock{begin_mutex};
+        {
+            std::scoped_lock lock{guest_mutex};
+            if (!guest) {
+                return;
+            }
+            if (!guest->loaded || guest->title.id == program_id) {
+                guest->loaded = true;
+                return;
+            }
+            // A program change to a program that saves under its own id.
+            previous = guest->title;
+            guest->title.id = program_id;
+            next = guest->title;
+            listener = conflict_listener;
+            token = guest->token;
+        }
+        // Before it runs, one after the other in case both programs use the same save: the
+        // previous program's saves go up, and the next one's come down.
+        const u64 registration = CloudSync::BeginGuest(next.id);
+        std::scoped_lock lock{guest_mutex};
+        // Unless the guest stopped meanwhile.
+        if (guest && guest->token == token) {
+            guest->registration = registration;
+        }
+    }
+    if (!Settings::values.cloud_sync_enabled.GetValue() || !CloudSync::SignedInSnapshot() ||
+        listener == nullptr) {
+        return;
+    }
+    JNIEnv* env = Common::Android::GetEnvForThread();
+    const auto callbacks = Callbacks(env, listener);
+    const auto log_errors = [](const CloudSync::SyncResult& result) {
+        for (const auto& error : result.errors) {
+            LOG_WARNING(Frontend, "Cloud sync at the program change: {}", error);
+        }
+    };
+    if (previous.id != 0) {
+        log_errors(CloudSync::PushTitle(Profiles(), previous, callbacks, stop));
+    }
+    if (next.id != 0) {
+        log_errors(CloudSync::PullTitle(Profiles(), next, callbacks, stop));
     }
 }
 
@@ -157,7 +213,7 @@ void GuestStopped() {
         if (!stopped) {
             return;
         }
-        CloudSync::EndGuest();
+        CloudSync::EndGuest(stopped->registration);
         callback_class = native_cloud_sync_class;
     }
     if (!stopped->loaded || callback_class == nullptr) {
@@ -291,8 +347,10 @@ jstring Java_io_github_zortos293_lichii_utils_NativeCloudSync_linkedProfile(JNIE
 
 jlong Java_io_github_zortos293_lichii_utils_NativeCloudSync_beginGuest(JNIEnv* env, jobject obj,
                                                                        jstring jprogram_id,
-                                                                       jstring jtitle) {
+                                                                       jstring jtitle,
+                                                                       jobject listener) {
     const u64 program_id = EmulationSession::GetProgramId(env, jprogram_id);
+    std::scoped_lock begin_lock{begin_mutex};
     {
         std::scoped_lock lock{guest_mutex};
         if (native_cloud_sync_class == nullptr) {
@@ -300,17 +358,27 @@ jlong Java_io_github_zortos293_lichii_utils_NativeCloudSync_beginGuest(JNIEnv* e
             native_cloud_sync_class = static_cast<jclass>(env->NewGlobalRef(object_class));
             env->DeleteLocalRef(object_class);
         }
+        if (conflict_listener == nullptr) {
+            conflict_listener = env->NewGlobalRef(listener);
+        }
         // Begun for an earlier view of this game, which still runs.
-        if (guest && guest->loaded && guest->title.id == program_id) {
+        if (guest && guest->loaded && guest->game_id == program_id) {
             return 0;
         }
     }
-    CloudSync::BeginGuest(program_id);
+    const u64 registration = CloudSync::BeginGuest(program_id);
     std::scoped_lock lock{guest_mutex};
+    // The replaced guest's pull can no longer be cancelled by its token.
+    if (guest) {
+        guest->pull_stop.request_stop();
+    }
     guest = Guest{
         .token = next_guest_token++,
+        .game_id = program_id,
         .title = {program_id, Common::Android::GetJString(env, jtitle)},
         .loaded = false,
+        .pull_stop = {},
+        .registration = registration,
     };
     return guest->token;
 }
@@ -326,9 +394,7 @@ jobject Java_io_github_zortos293_lichii_utils_NativeCloudSync_pullTitle(JNIEnv* 
             return ToJSyncResult(env, {.cancelled = true});
         }
         title = guest->title;
-        pull_token = token;
-        pull_stop = std::stop_source{};
-        stop = pull_stop.get_token();
+        stop = guest->pull_stop.get_token();
     }
     return ToJSyncResult(env,
                          CloudSync::PullTitle(Profiles(), title, Callbacks(env, listener), stop));
@@ -337,8 +403,8 @@ jobject Java_io_github_zortos293_lichii_utils_NativeCloudSync_pullTitle(JNIEnv* 
 void Java_io_github_zortos293_lichii_utils_NativeCloudSync_cancelPull(JNIEnv* env, jobject obj,
                                                                       jlong token) {
     std::scoped_lock lock{guest_mutex};
-    if (pull_token == token) {
-        pull_stop.request_stop();
+    if (guest && guest->token == token) {
+        guest->pull_stop.request_stop();
     }
 }
 
@@ -349,11 +415,9 @@ void Java_io_github_zortos293_lichii_utils_NativeCloudSync_endGuest(JNIEnv* env,
     if (!guest || guest->token != token || guest->loaded) {
         return;
     }
-    if (pull_token == token) {
-        pull_stop.request_stop();
-    }
+    guest->pull_stop.request_stop();
+    CloudSync::EndGuest(guest->registration);
     guest.reset();
-    CloudSync::EndGuest();
 }
 
 jobject Java_io_github_zortos293_lichii_utils_NativeCloudSync_pushTitle(JNIEnv* env, jobject obj,

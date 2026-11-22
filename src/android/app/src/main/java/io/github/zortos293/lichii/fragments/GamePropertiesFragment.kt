@@ -45,6 +45,7 @@ import io.github.zortos293.lichii.model.InstallableProperty
 import io.github.zortos293.lichii.model.SubMenuPropertySecondaryAction
 import io.github.zortos293.lichii.model.SubmenuProperty
 import io.github.zortos293.lichii.model.TaskState
+import io.github.zortos293.lichii.model.TaskViewModel
 import io.github.zortos293.lichii.utils.CloudSyncManager
 import io.github.zortos293.lichii.utils.DirectoryInitialization
 import io.github.zortos293.lichii.utils.FileUtil
@@ -66,6 +67,7 @@ class GamePropertiesFragment : Fragment() {
     private val gamesViewModel: GamesViewModel by activityViewModels()
     private val addonViewModel: AddonViewModel by activityViewModels()
     private val driverViewModel: DriverViewModel by activityViewModels()
+    private val taskViewModel: TaskViewModel by activityViewModels()
 
     private val args by navArgs<GamePropertiesFragmentArgs>()
 
@@ -445,7 +447,13 @@ class GamePropertiesFragment : Fragment() {
                             R.string.cloud_sync_sync_save,
                             R.string.cloud_sync_sync_save_description,
                             R.drawable.ic_refresh,
-                            action = { CloudSyncManager.syncTitle(args.game) }
+                            action = {
+                                if (CloudSyncManager.isSyncing()) {
+                                    showCloudSyncBusy()
+                                } else {
+                                    CloudSyncManager.syncTitle(args.game)
+                                }
+                            }
                         )
                     )
                 }
@@ -465,6 +473,11 @@ class GamePropertiesFragment : Fragment() {
                                     positiveButtonTitleId = android.R.string.cancel,
                                     negativeButtonTitleId = android.R.string.ok,
                                     negativeAction = {
+                                        // A sync may be restoring this save.
+                                        if (CloudSyncManager.isSyncing()) {
+                                            showCloudSyncBusy()
+                                            return@newInstance
+                                        }
                                         File(args.game.saveDir).deleteRecursively()
                                         Toast.makeText(
                                             LichiiApplication.appContext,
@@ -611,6 +624,13 @@ class GamePropertiesFragment : Fragment() {
             if (result == null) {
                 return@registerForActivityResult
             }
+            // A sync may be restoring this save; none starts until the import is done. The
+            // progress dialog skips its task while another one runs, so endSaveImport would never
+            // come.
+            if (taskViewModel.isRunning.value || !CloudSyncManager.beginSaveImport()) {
+                showCloudSyncBusy()
+                return@registerForActivityResult
+            }
 
             val savesFolder = File(args.game.saveDir)
             val cacheSaveDir = File("${requireContext().cacheDir.path}/saves/")
@@ -666,9 +686,19 @@ class GamePropertiesFragment : Fragment() {
                         getString(R.string.fatal_error),
                         Toast.LENGTH_LONG
                     ).show()
+                } finally {
+                    CloudSyncManager.endSaveImport()
                 }
             }.show(parentFragmentManager, ProgressDialogFragment.TAG)
         }
+
+    private fun showCloudSyncBusy() {
+        Toast.makeText(
+            LichiiApplication.appContext,
+            R.string.cloud_sync_busy_description,
+            Toast.LENGTH_SHORT
+        ).show()
+    }
 
     /**
      * Exports the save file located in the given folder path by creating a zip file and opening a

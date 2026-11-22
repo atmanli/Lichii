@@ -96,9 +96,10 @@ object NativeCloudSync {
     /**
      * Before a game boots, sync on or off: stops the syncs touching it and waits for them. Returns
      * the guest's token for [pullTitle], [cancelPull] and [endGuest]; 0 when that game already
-     * runs. The native emulation run ends the guest once it loaded.
+     * runs. The native emulation run ends the guest once it loaded, and asks listener about the
+     * conflicts of the syncs at a program change.
      */
-    external fun beginGuest(programId: String, title: String): Long
+    external fun beginGuest(programId: String, title: String, listener: ConflictListener): Long
 
     /** Brings in the guest's saves that changed on Drive. [cancelPull] stops it. */
     external fun pullTitle(token: Long, listener: ConflictListener): SyncResult

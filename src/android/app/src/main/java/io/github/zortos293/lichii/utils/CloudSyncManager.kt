@@ -27,10 +27,12 @@ import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -54,6 +56,9 @@ object CloudSyncManager : NativeCloudSync.ConflictListener {
     private var running = 0
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> get() = _busy
+
+    // The save imports between beginSaveImport and endSaveImport, which boots and uploads wait for.
+    private val saveImports = MutableStateFlow(0)
 
     private var foreground = WeakReference<Activity>(null)
 
@@ -113,11 +118,33 @@ object CloudSyncManager : NativeCloudSync.ConflictListener {
     fun isSyncing(): Boolean = _busy.value || NativeCloudSync.isSyncRunning()
 
     /**
-     * Before [game] boots, sync on or off: stops the syncs touching it and waits for them, then
-     * pulls its saves if sync is on. A dialog appears when this takes a while; its Cancel and
-     * PULL_BUDGET_MS stop only the pull. Calls onReady once nothing touches the game (after a
-     * notice when the pull failed or took too long), unless [abandonBoot] came first. The native
-     * emulation run ends the guest once the game loaded; [abandonBoot] must end it otherwise.
+     * Counts a save import as a sync until [endSaveImport] (callable on any thread), so that
+     * syncs started meanwhile are refused by their [isSyncing] check, and boots and uploads wait
+     * for it. False when a sync runs.
+     */
+    fun beginSaveImport(): Boolean {
+        if (isSyncing()) {
+            return false
+        }
+        setRunning(1)
+        saveImports.value++
+        return true
+    }
+
+    fun endSaveImport() {
+        mainHandler.post {
+            saveImports.value--
+            setRunning(-1)
+        }
+    }
+
+    /**
+     * Before [game] boots, sync on or off: waits for the save imports, stops the syncs touching it
+     * and waits for them, then pulls its saves if sync is on. A dialog appears when this takes a
+     * while; its Cancel and PULL_BUDGET_MS stop only the pull. Calls onReady once nothing touches
+     * the game (after a notice when the pull failed or took too long), unless [abandonBoot] came
+     * first. The native emulation run ends the guest once the game loaded; [abandonBoot] must end
+     * it otherwise.
      */
     fun prepareBoot(activity: FragmentActivity, game: Game, onReady: () -> Unit): Boot {
         val boot = Boot()
@@ -151,29 +178,31 @@ object CloudSyncManager : NativeCloudSync.ConflictListener {
             var timedOut = false
             val showLater = launch {
                 delay(PROGRESS_DELAY_MS)
-                if (!activity.isFinishing && !activity.isDestroyed) {
+                if (!boot.abandoned && !activity.isFinishing && !activity.isDestroyed) {
                     progress.show()
                 }
             }
-            val budget = launch {
-                delay(PULL_BUDGET_MS)
-                timedOut = true
-                stopPull()
-            }
+            var budget: Job? = null
             // Not cut short by Cancel: nothing may touch the game once it boots.
+            saveImports.first { it == 0 }
             val token = withContext(Dispatchers.IO) {
-                NativeCloudSync.beginGuest(game.programId, game.title)
+                NativeCloudSync.beginGuest(game.programId, game.title, CloudSyncManager)
             }
             boot.token = token
             var result: NativeCloudSync.SyncResult? = null
             if (token != 0L && pull && !boot.stopRequested && !boot.abandoned) {
                 binding.message.setText(R.string.cloud_sync_pulling)
+                budget = launch {
+                    delay(PULL_BUDGET_MS)
+                    timedOut = true
+                    stopPull()
+                }
                 result = withContext(Dispatchers.IO) {
                     NativeCloudSync.pullTitle(token, CloudSyncManager)
                 }
             }
             showLater.cancel()
-            budget.cancel()
+            budget?.cancel()
             progress.dismiss()
             boot.dialog = null
             boot.pullDone = true
@@ -293,6 +322,7 @@ object CloudSyncManager : NativeCloudSync.ConflictListener {
             toast(LichiiApplication.appContext.getString(R.string.cloud_sync_status_running, what))
         }
         scope.launch {
+            saveImports.first { it == 0 }
             val result = withContext(Dispatchers.IO) { work() }
             setRunning(-1)
             report(what, result, reportInDialog)

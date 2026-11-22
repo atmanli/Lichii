@@ -283,6 +283,7 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
                                                                const std::size_t program_index,
                                                                const bool frontend_initiated) {
     std::scoped_lock lock(m_mutex);
+    m_halt_stop = std::stop_source{};
 
     // Create the render window.
     m_window = std::make_unique<EmuWindow_Android>(m_native_window, m_vulkan_library);
@@ -402,12 +403,23 @@ void EmulationSession::UnPauseEmulation() {
 void EmulationSession::HaltEmulation() {
     std::scoped_lock lock(m_mutex);
     m_is_running = false;
+    m_halt_stop.request_stop();
     m_cv.notify_one();
+}
+
+std::stop_token EmulationSession::HaltToken() const {
+    std::scoped_lock lock(m_mutex);
+    return m_halt_stop.get_token();
 }
 
 void EmulationSession::RunEmulation() {
     {
         std::scoped_lock lock(m_mutex);
+        // Stopped since it loaded, e.g. during the cloud sync of a program change.
+        if (m_halt_stop.stop_requested()) {
+            m_applet_id = static_cast<int>(Service::AM::AppletId::Application);
+            return;
+        }
         m_is_running = true;
     }
 
@@ -545,7 +557,9 @@ static Core::SystemResultStatus RunEmulation(const std::string& filepath,
     if (result != Core::SystemResultStatus::Success) {
         return result;
     }
-    AndroidCloudSync::GuestLoaded();
+    AndroidCloudSync::GuestLoaded(
+        EmulationSession::GetInstance().System().GetApplicationProcessProgramID(),
+        EmulationSession::GetInstance().HaltToken());
 
     EmulationSession::GetInstance().RunEmulation();
 

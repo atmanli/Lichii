@@ -365,8 +365,10 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
 
         emulationState = EmulationState(game!!.path) {
+            // In front, or in picture-in-picture, where onPause keeps the game running.
+            val foreground = isResumed || emulationActivity?.isInPictureInPictureMode == true
             return@EmulationState driverViewModel.isInteractionAllowed.value &&
-                !isStoppingForRomSwap && cloudSyncReady
+                !isStoppingForRomSwap && cloudSyncReady && foreground
         }
         cloudSyncBoot = CloudSyncManager.prepareBoot(requireActivity(), game!!) {
             cloudSyncReady = true
@@ -1533,6 +1535,13 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 updatePauseMenuEntry(emulationState.isPaused)
                 updatePausedFrameVisibility()
             }
+        }
+
+        // A first start that came while paused.
+        if (this::emulationState.isInitialized &&
+            runCatching { emulationState.emulationThread }.isFailure
+        ) {
+            runEmulationIfAllowed()
         }
 
         // if the overlay auto-hide setting is changed while paused,

@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <stop_token>
 #include <string>
 #include <thread>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
 #include "frontend_common/cloud_sync/build_client.h"
 #include "frontend_common/cloud_sync/google_auth.h"
 #include "tests/frontend_common/fake_google.h"
@@ -37,6 +41,18 @@ SignInResult SignInWith(FakeGoogle& google, std::vector<DeviceCode>& shown,
     REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
     return SignIn([&shown](const DeviceCode& code) { shown.push_back(code); }, stop);
 }
+
+#ifndef _WIN32
+// Whether a file can be made in folder: a runner that bypasses permissions (root) can.
+bool CanWriteIn(const std::filesystem::path& folder) {
+    const auto probe = folder / "probe";
+    if (!std::ofstream{probe}.is_open()) {
+        return false;
+    }
+    std::filesystem::remove(probe);
+    return true;
+}
+#endif
 
 } // Anonymous namespace
 
@@ -95,6 +111,17 @@ TEST_CASE("CloudSync: device flow sign-in", "[cloud_sync]") {
         REQUIRE(SignInWith(google, shown).status == SignInStatus::Expired);
         REQUIRE(google.Hits(TokenEndpoint) == 2);
         REQUIRE_FALSE(SignedIn());
+    }
+    SECTION("expires while the code is shown") {
+        google.Answer(DeviceCodeEndpoint, 200,
+                      R"({"device_code":"device.1","user_code":"ABCD-EFGH",)"
+                      R"("verification_url":"u","expires_in":1,"interval":0})");
+        REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
+        const auto result = SignIn(
+            [](const DeviceCode&) { std::this_thread::sleep_for(std::chrono::milliseconds{1100}); },
+            {});
+        REQUIRE(result.status == SignInStatus::Expired);
+        REQUIRE(google.Hits(TokenEndpoint) == 0);
     }
     SECTION("is cancelled") {
         google.Answer(DeviceCodeEndpoint, 200,
@@ -175,12 +202,33 @@ TEST_CASE("CloudSync: a token isn't refreshed with another client", "[cloud_sync
     REQUIRE(Param(google.Requests(TokenEndpoint).at(1), "client_id") == "client.id");
 }
 
+TEST_CASE("CloudSync: a token saved without its client takes the one that refreshed it",
+          "[cloud_sync]") {
+    FakeGoogle google;
+    REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
+    google.SignIn(0);
+    google.Answer(TokenEndpoint, 200, R"({"access_token":"access.new","expires_in":3599})");
+    REQUIRE(AccessToken() == "access.new");
+
+    REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("other.id", "other.secret")));
+    const auto refused = SessionAccessToken(true, std::nullopt);
+    REQUIRE_FALSE(refused.access_token.has_value());
+    REQUIRE(refused.error == "The sign-in is from another OAuth client; sign in again to use this "
+                             "one");
+    REQUIRE(google.Hits(TokenEndpoint) == 1);
+    REQUIRE(SignedIn());
+    REQUIRE(std::filesystem::exists(google.directory / "cloud_sync" / "token.json"));
+}
+
 TEST_CASE("CloudSync: a code that arrives after sign-out isn't shown", "[cloud_sync]") {
     FakeGoogle google;
     google.Answer(DeviceCodeEndpoint, 200, Code, {}, std::chrono::milliseconds{500});
     std::vector<DeviceCode> shown;
-    std::jthread signer_out{[&google] {
+    std::jthread signer_out{[&google](std::stop_token own_stop) {
         while (google.Hits(DeviceCodeEndpoint) == 0) {
+            if (own_stop.stop_requested()) {
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
         SignOut();
@@ -232,9 +280,13 @@ TEST_CASE("CloudSync: a grant that arrives after cancel or sign-out isn't saved"
     google.Answer(TokenEndpoint, 200, Granted, {}, std::chrono::milliseconds{500});
     std::vector<DeviceCode> shown;
     std::stop_source stop;
+    // Stopped by its jthread's destructor if the sign-in fails before polling.
     const auto when_polled = [&google](auto action) {
-        return std::jthread{[&google, action] {
+        return std::jthread{[&google, action](std::stop_token own_stop) {
             while (google.Hits(TokenEndpoint) == 0) {
+                if (own_stop.stop_requested()) {
+                    return;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds{10});
             }
             action();
@@ -258,11 +310,24 @@ TEST_CASE("CloudSync: a stop request ends a Google request right away", "[cloud_
     std::vector<DeviceCode> shown;
     google.Answer(DeviceCodeEndpoint, 200, Code, {}, std::chrono::seconds{2});
     const auto start = std::chrono::steady_clock::now();
-    std::jthread canceller{[&stop] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    // Stops once the request is out; its own stop ends the wait if the sign-in never sends it.
+    std::atomic<bool> requested = false;
+    std::jthread canceller{[&google, &stop, &requested](std::stop_token own_stop) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (google.Hits(DeviceCodeEndpoint) == 0) {
+            if (own_stop.stop_requested() || std::chrono::steady_clock::now() >= deadline) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        requested = true;
         stop.request_stop();
     }};
-    REQUIRE(SignInWith(google, shown, stop.get_token()).status == SignInStatus::Cancelled);
+    const auto result = SignInWith(google, shown, stop.get_token());
+    canceller.request_stop();
+    canceller.join();
+    REQUIRE(requested);
+    REQUIRE(result.status == SignInStatus::Cancelled);
     REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
     REQUIRE(shown.empty());
 }
@@ -317,9 +382,15 @@ TEST_CASE("CloudSync: a token that can't be saved", "[cloud_sync]") {
     FakeGoogle google;
     REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
     const auto folder = google.directory / "cloud_sync";
+    SCOPE_EXIT {
+        std::filesystem::permissions(folder, std::filesystem::perms::owner_all);
+    };
     const auto lock_folder = [&folder] {
         std::filesystem::permissions(folder, std::filesystem::perms::owner_read |
                                                  std::filesystem::perms::owner_exec);
+        if (CanWriteIn(folder)) {
+            SKIP("Folder permissions don't keep this runner from writing");
+        }
     };
 
     SECTION("fails the sign-in") {
@@ -353,19 +424,27 @@ TEST_CASE("CloudSync: sign-out holds when the token can't be removed", "[cloud_s
     REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
     const auto folder = google.directory / "cloud_sync";
     const auto token = folder / "token.json";
+    SCOPE_EXIT {
+        std::filesystem::permissions(folder, std::filesystem::perms::owner_all);
+    };
+    const auto lock_folder = [&folder] {
+        std::filesystem::permissions(folder, std::filesystem::perms::owner_read |
+                                                 std::filesystem::perms::owner_exec);
+        if (CanWriteIn(folder)) {
+            SKIP("Folder permissions don't keep this runner from removing files");
+        }
+    };
 
     SECTION("sign-out") {
         google.SignIn(3600);
         google.Answer(RevokeEndpoint, 200, "{}");
-        std::filesystem::permissions(folder, std::filesystem::perms::owner_read |
-                                                 std::filesystem::perms::owner_exec);
+        lock_folder();
         REQUIRE_FALSE(SignOut());
     }
     SECTION("invalid_grant") {
         google.SignIn(0);
         google.Answer(TokenEndpoint, 400, R"({"error":"invalid_grant"})");
-        std::filesystem::permissions(folder, std::filesystem::perms::owner_read |
-                                                 std::filesystem::perms::owner_exec);
+        lock_folder();
         REQUIRE_FALSE(AccessToken().has_value());
     }
     REQUIRE(std::filesystem::exists(token));

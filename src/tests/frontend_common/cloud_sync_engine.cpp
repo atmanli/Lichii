@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -14,6 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
 #include "frontend_common/cloud_sync/drive_client.h"
 #include "frontend_common/cloud_sync/google_auth.h"
 #include "frontend_common/cloud_sync/save_archive.h"
@@ -310,12 +312,18 @@ TEST_CASE("CloudSync: a sync without Drive fails fast and changes nothing", "[cl
         drive.list_delay = std::chrono::seconds{2};
         std::stop_source stop;
         const auto start = std::chrono::steady_clock::now();
-        std::jthread canceller{[&stop] {
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        // Once a search is on its way.
+        std::jthread canceller{[&drive, &stop](std::stop_token own_stop) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while (drive.list_requests == 0 && !own_stop.stop_requested() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
             stop.request_stop();
         }};
         const auto result =
             PullTitle(*machine.profiles, Game, resolver.Callbacks(), stop.get_token());
+        REQUIRE(drive.list_requests > 0);
         REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
         REQUIRE(result.cancelled);
         REQUIRE(result.errors.empty());
@@ -491,7 +499,24 @@ TEST_CASE("CloudSync: waiting for another sync ends on a stop request", "[cloud_
     FakeDriveServer drive;
     CloudSyncMachine machine;
     Resolver resolver;
-    std::scoped_lock busy{SyncStateMutex()};
+    // Another sync, on its own thread: the mutex isn't recursive.
+    std::atomic<bool> busy = false;
+    // Set when the holder let go only at its deadline: a pull that ignored the stop request.
+    std::atomic<bool> held_to_deadline = false;
+    std::jthread other_sync{[&busy, &held_to_deadline](std::stop_token own_stop) {
+        std::scoped_lock lock{SyncStateMutex()};
+        busy = true;
+        busy.notify_one();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!own_stop.stop_requested()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                held_to_deadline = true;
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+    }};
+    busy.wait(false);
     std::stop_source stop;
     std::jthread canceller{[&stop] {
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
@@ -499,6 +524,7 @@ TEST_CASE("CloudSync: waiting for another sync ends on a stop request", "[cloud_
     }};
     const auto start = std::chrono::steady_clock::now();
     const auto result = PullTitle(*machine.profiles, Game, resolver.Callbacks(), stop.get_token());
+    REQUIRE_FALSE(held_to_deadline);
     REQUIRE(result.cancelled);
     REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
 }
@@ -511,6 +537,9 @@ TEST_CASE("CloudSync: an unreadable save is reported, not taken as missing", "[c
     machine.WriteSave(device, "device");
     const auto file = LocalSavePath(device) / "save.dat";
     std::filesystem::permissions(file, std::filesystem::perms::none);
+    if (std::ifstream{file}.is_open()) {
+        SKIP("File permissions don't keep this runner from reading the save");
+    }
     Resolver resolver;
     const auto result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
     std::filesystem::permissions(file, std::filesystem::perms::owner_all);
@@ -617,26 +646,61 @@ TEST_CASE("CloudSync: booting a title stops the syncs touching it", "[cloud_sync
             return WaitForAnswer(stop, [](auto) {});
         }};
     SyncResult pushed;
-    std::jthread push{[&] { pushed = PushTitle(*machine.profiles, Game, never_answered, {}); }};
+    std::jthread push{[&](std::stop_token own_stop) {
+        pushed = PushTitle(*machine.profiles, Game, never_answered, own_stop);
+    }};
+    // Stops the push should BeginGuest not, so that the test fails rather than hangs.
+    std::atomic<bool> watchdog_stopped_push = false;
+    std::jthread watchdog{[&push, &watchdog_stopped_push](std::stop_token own_stop) {
+        std::mutex mutex;
+        std::unique_lock lock{mutex};
+        std::condition_variable_any{}.wait_for(lock, own_stop, std::chrono::seconds{5},
+                                               [] { return false; });
+        watchdog_stopped_push = !own_stop.stop_requested();
+        push.request_stop();
+    }};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!asked && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     REQUIRE(asked);
 
-    const auto start = std::chrono::steady_clock::now();
-    BeginGuest(TitleId);
-    REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
-    push.join();
-    REQUIRE(pushed.skipped == 1);
-    REQUIRE(pushed.pushed == 0);
-    REQUIRE_FALSE(SyncRunning());
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const u64 registration = BeginGuest(TitleId);
+        SCOPE_EXIT {
+            EndGuest(registration);
+        };
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
+        push.join();
+        REQUIRE_FALSE(watchdog_stopped_push);
+        REQUIRE(pushed.skipped == 1);
+        REQUIRE(pushed.pushed == 0);
+        REQUIRE_FALSE(SyncRunning());
 
-    // While it runs, only the pull before boot syncs it.
-    auto result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
-    REQUIRE(result.errors.size() == 1);
-    REQUIRE(resolver.asked.empty());
-    EndGuest();
-    result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
+        // While it runs, only the pull before boot syncs it.
+        const auto result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
+        REQUIRE(result.errors.size() == 1);
+        REQUIRE(resolver.asked.empty());
+    }
+    PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
     REQUIRE(resolver.asked.size() == 1);
+}
+
+TEST_CASE("CloudSync: ending a replaced guest leaves the later one running", "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    machine.WriteSave({TitleId, machine.FirstUser()}, "save");
+    Resolver resolver;
+    const u64 earlier = BeginGuest(0x0100EA80032EA000);
+    const u64 later = BeginGuest(TitleId);
+    SCOPE_EXIT {
+        EndGuest(later);
+    };
+    EndGuest(earlier);
+    const auto result = PushTitle(*machine.profiles, Game, resolver.Callbacks(), {});
+    REQUIRE(result.errors.size() == 1);
+    REQUIRE(result.pushed == 0);
+    EndGuest(later);
+    REQUIRE(PushTitle(*machine.profiles, Game, resolver.Callbacks(), {}).pushed == 1);
 }

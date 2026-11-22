@@ -7,6 +7,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <random>
@@ -20,6 +21,7 @@
 
 #include "common/fs/path_util.h"
 #include "common/httplib.h"
+#include "common/scope_exit.h"
 #include "frontend_common/cloud_sync/google_auth.h"
 #include "tests/common/restore_eden_path.h"
 
@@ -40,11 +42,14 @@ public:
         directory = std::filesystem::temp_directory_path() /
                     fmt::format("lichii-cloud-sync-google-{}", std::random_device{}());
         std::filesystem::create_directories(directory);
-        previous_config = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir);
-        Common::FS::SetEdenPath(Common::FS::EdenPath::ConfigDir, directory);
+        // The destructor doesn't run when the server fails to start.
+        auto remove_directory = SCOPE_GUARD {
+            std::error_code ec;
+            std::filesystem::remove_all(directory, ec);
+        };
 
         const auto handle = [this](const httplib::Request& request, httplib::Response& response) {
-            Canned reply{404, "{}", {}, {}};
+            Canned reply{404, "{}", {}, {}, {}};
             {
                 std::scoped_lock lock{mutex};
                 const std::string key = request.method + " " + request.path;
@@ -59,6 +64,12 @@ public:
                 }
             }
             std::this_thread::sleep_for(reply.delay);
+            // At most 5 s, so that a test whose release never comes still ends.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while (reply.release && !reply.release() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
             response.status = reply.status;
             for (const auto& [name, value] : reply.headers) {
                 response.set_header(name, value);
@@ -73,7 +84,11 @@ public:
         REQUIRE(port > 0);
         thread = std::thread{[this] { void(server.listen_after_bind()); }};
         server.wait_until_ready();
+        previous_config = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir);
+        Common::FS::SetEdenPath(Common::FS::EdenPath::ConfigDir, directory);
         FrontendCommon::CloudSync::SetOAuthBaseForTests(Base());
+        FrontendCommon::CloudSync::ResetSignInForTests();
+        remove_directory.Cancel();
     }
 
     ~FakeGoogle() {
@@ -81,6 +96,7 @@ public:
         thread.join();
         FrontendCommon::CloudSync::SetOAuthBaseForTests(
             std::string{FrontendCommon::CloudSync::OAuthBase});
+        FrontendCommon::CloudSync::ResetSignInForTests();
         Tests::RestoreEdenPath(Common::FS::EdenPath::ConfigDir, previous_config);
         std::error_code ec;
         std::filesystem::remove_all(directory, ec);
@@ -90,10 +106,12 @@ public:
         return fmt::format("http://127.0.0.1:{}", port);
     }
 
-    void Answer(const std::string& key, int status, std::string body,
-                httplib::Headers headers = {}, std::chrono::milliseconds delay = {}) {
+    // release, when set, holds the reply until it returns true.
+    void Answer(const std::string& key, int status, std::string body, httplib::Headers headers = {},
+                std::chrono::milliseconds delay = {}, std::function<bool()> release = {}) {
         std::scoped_lock lock{mutex};
-        replies[key].push_back({status, std::move(body), std::move(headers), delay});
+        replies[key].push_back(
+            {status, std::move(body), std::move(headers), delay, std::move(release)});
     }
 
     std::vector<Request> Requests(const std::string& key) {
@@ -132,6 +150,7 @@ private:
         std::string body;
         httplib::Headers headers;
         std::chrono::milliseconds delay;
+        std::function<bool()> release;
     };
 
     std::filesystem::path previous_config;

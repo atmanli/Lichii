@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <atomic>
 #include <chrono>
 #include <stop_token>
 #include <string>
@@ -29,9 +30,10 @@ constexpr const char* SaveZip =
 // FakeGoogle answering Drive too, signed in with a token that is still good.
 struct FakeDrive : FakeGoogle {
     FakeDrive() {
-        Drive::SetDriveBaseForTests(Base());
         REQUIRE(FrontendCommon::CloudSync::ImportClientSecret(ClientSecret("id", "secret")));
         SignIn(3600);
+        // Last: the destructor doesn't run when the constructor fails.
+        Drive::SetDriveBaseForTests(Base());
     }
     ~FakeDrive() {
         Drive::SetDriveBaseForTests(std::string{Drive::DriveBase});
@@ -91,9 +93,13 @@ TEST_CASE("CloudSync: Drive file search pages through the results", "[cloud_sync
 TEST_CASE("CloudSync: Drive folders are created with their properties", "[cloud_sync]") {
     FakeDrive drive;
     drive.Answer("GET /drive/v3/files/generateIds", 200, R"({"ids":["folder.1"]})");
+    drive.Answer("GET /drive/v3/files/generateIds", 200, R"({"ids":["folder.2"]})");
     drive.Answer("POST /drive/v3/files", 200, R"({"id":"folder.1","name":"Lichii"})");
+    drive.Answer("POST /drive/v3/files", 200,
+                 R"({"id":"folder.2","name":"Saves","parents":["folder.1"]})");
 
     const auto folder = Drive::CreateFolder("Lichii", "", {{"lichii", "root"}});
+    REQUIRE(folder.has_value());
     REQUIRE(folder->id == "folder.1");
     REQUIRE(drive.Param("GET /drive/v3/files/generateIds", "count") == "1");
     REQUIRE(drive.Param("POST /drive/v3/files", "fields") == FileFields);
@@ -103,8 +109,13 @@ TEST_CASE("CloudSync: Drive folders are created with their properties", "[cloud_
                            {"mimeType", Drive::FolderMimeType},
                            {"appProperties", {{"lichii", "root"}}}});
 
-    REQUIRE(Drive::CreateFolder("Saves", "folder.1", {})->id == "folder.1");
-    REQUIRE(drive.Body("POST /drive/v3/files", 1)["parents"] == nlohmann::json{"folder.1"});
+    const auto saves = Drive::CreateFolder("Saves", "folder.1", {});
+    REQUIRE(saves.has_value());
+    REQUIRE(saves->id == "folder.2");
+    REQUIRE(saves->parents == std::vector<std::string>{"folder.1"});
+    REQUIRE(drive.Body("POST /drive/v3/files", 1)["id"] == "folder.2");
+    REQUIRE(drive.Body("POST /drive/v3/files", 1)["parents"] ==
+            nlohmann::json::array({"folder.1"}));
 }
 
 TEST_CASE("CloudSync: a Drive folder made by a failed attempt isn't made again", "[cloud_sync]") {
@@ -132,6 +143,7 @@ TEST_CASE("CloudSync: Drive uploads go through a resumable session", "[cloud_syn
         drive.Answer("PUT /upload/session", 200, SaveZip);
         const auto file = Drive::UploadFile("Player.zip", "game.1", {{"lichii", "save"}},
                                             "application/zip", data);
+        REQUIRE(file.has_value());
         REQUIRE(file->id == "file.1");
         const char* start = "POST /upload/drive/v3/files";
         REQUIRE(drive.Param(start, "uploadType") == "resumable");
@@ -148,6 +160,7 @@ TEST_CASE("CloudSync: Drive uploads go through a resumable session", "[cloud_syn
         drive.Answer("PUT /upload/session", 200, SaveZip);
         const auto file =
             Drive::UpdateFile("file.1", {{"contentHash", "ff"}}, "application/zip", data);
+        REQUIRE(file.has_value());
         REQUIRE(file->app_properties.at("lichii") == "save");
         const char* start = "PATCH /upload/drive/v3/files/file.1";
         REQUIRE(drive.Param(start, "uploadType") == "resumable");
@@ -180,7 +193,9 @@ TEST_CASE("CloudSync: Drive files download and rename", "[cloud_sync]") {
 
     REQUIRE(Drive::DownloadFile("file.1") == Bytes("zip bytes"));
     REQUIRE(drive.Param("GET /drive/v3/files/file.1", "alt") == "media");
-    REQUIRE(Drive::RenameFile("file.1", "New.zip")->name == "New.zip");
+    const auto renamed = Drive::RenameFile("file.1", "New.zip");
+    REQUIRE(renamed.has_value());
+    REQUIRE(renamed->name == "New.zip");
     REQUIRE(drive.Body("PATCH /drive/v3/files/file.1") == nlohmann::json{{"name", "New.zip"}});
 }
 
@@ -202,7 +217,9 @@ TEST_CASE("CloudSync: a 401 from Drive refreshes the token once", "[cloud_sync]"
 
     SECTION("and retries with the new one") {
         drive.Answer(List, 200, R"({"files":[]})");
-        REQUIRE(Drive::FindFiles({{"lichii", "root"}})->empty());
+        const auto files = Drive::FindFiles({{"lichii", "root"}});
+        REQUIRE(files.has_value());
+        REQUIRE(files->empty());
         REQUIRE(drive.Hits("POST /token") == 1);
         REQUIRE(drive.Hits(List) == 2);
         REQUIRE(drive.Header(List, "Authorization", 1) == "Bearer access.new");
@@ -220,17 +237,55 @@ TEST_CASE("CloudSync: a Drive call isn't retried under another sign-in", "[cloud
     drive.Answer("POST /revoke", 200, "{}");
     drive.Answer(List, 401, "{}", {}, std::chrono::milliseconds{500});
     // Signed out and in again while the 401 is on its way.
-    std::jthread switcher{[&drive] {
+    std::jthread switcher{[&drive](std::stop_token own_stop) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
         while (drive.Hits(List) == 0) {
+            if (own_stop.stop_requested() || std::chrono::steady_clock::now() >= deadline) {
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
         FrontendCommon::CloudSync::SignOut();
         drive.SignIn(3600);
     }};
     REQUIRE_FALSE(Drive::FindFiles({{"lichii", "root"}}).has_value());
+    REQUIRE(drive.Hits(List) == 1);
     REQUIRE(Drive::LastError() == "The Google Drive sign-in changed during the request");
     REQUIRE(drive.Hits("POST /token") == 0);
+}
+
+TEST_CASE("CloudSync: a Drive call isn't retried under a sign-in granted meanwhile",
+          "[cloud_sync]") {
+    FakeDrive drive;
+    drive.Answer("POST /device/code", 200,
+                 R"({"device_code":"device.1","user_code":"ABCD-EFGH",)"
+                 R"("verification_url":"u","expires_in":1800,"interval":0})");
+    // Another account's sign-in, granted once the request with the old one is out, and the 401
+    // only after that.
+    std::atomic<bool> granted = false;
+    drive.Answer("POST /token", 200,
+                 R"({"access_token":"access.new","refresh_token":"refresh.new","expires_in":3599})",
+                 {}, {}, [&drive] { return drive.Hits(List) > 0; });
+    drive.Answer(List, 401, "{}", {}, {}, [&granted] { return granted.load(); });
+    FrontendCommon::CloudSync::SignInResult signed_in{
+        FrontendCommon::CloudSync::SignInStatus::Failed, {}};
+    std::jthread signer{[&signed_in, &granted](std::stop_token own_stop) {
+        signed_in = FrontendCommon::CloudSync::SignIn([](const auto&) {}, own_stop);
+        granted = signed_in.status == FrontendCommon::CloudSync::SignInStatus::SignedIn;
+    }};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (drive.Hits("POST /token") == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    REQUIRE(drive.Hits("POST /token") == 1);
+
+    REQUIRE_FALSE(Drive::FindFiles({{"lichii", "root"}}).has_value());
     REQUIRE(drive.Hits(List) == 1);
+    REQUIRE(drive.Header(List, "Authorization") == "Bearer access.old");
+    REQUIRE(Drive::LastError() == "The Google Drive sign-in changed during the request");
+    signer.join();
+    REQUIRE(signed_in.status == FrontendCommon::CloudSync::SignInStatus::SignedIn);
+    REQUIRE(drive.Hits("POST /token") == 1);
 }
 
 TEST_CASE("CloudSync: a failed token refresh isn't reported as a sign-out", "[cloud_sync]") {
@@ -271,6 +326,22 @@ TEST_CASE("CloudSync: Drive calls back off on 429 and 5xx", "[cloud_sync]") {
         REQUIRE_FALSE(Drive::DownloadFile("file.1").has_value());
         REQUIRE(drive.Hits(download) == 1);
         REQUIRE(Drive::LastError() == "HTTP 404: File not found");
+    }
+    SECTION("and on a 403 for a rate limit") {
+        drive.Answer(download, 403,
+                     R"({"error":{"code":403,"message":"Rate limit","errors":[{"domain":)"
+                     R"("usageLimits","reason":"userRateLimitExceeded"}]}})");
+        drive.Answer(download, 200, "zip");
+        REQUIRE(Drive::DownloadFile("file.1") == Bytes("zip"));
+        REQUIRE(drive.Hits(download) == 2);
+    }
+    SECTION("but not on another 403") {
+        drive.Answer(download, 403,
+                     R"({"error":{"code":403,"message":"Forbidden","errors":[{"domain":)"
+                     R"("global","reason":"insufficientFilePermissions"}]}})");
+        REQUIRE_FALSE(Drive::DownloadFile("file.1").has_value());
+        REQUIRE(drive.Hits(download) == 1);
+        REQUIRE(Drive::LastError() == "HTTP 403: Forbidden");
     }
     REQUIRE(drive.Hits("POST /token") == 0);
 }

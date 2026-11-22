@@ -5,12 +5,14 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
 
+#include "common/scope_exit.h"
 #include "frontend_common/cloud_sync/profile_sync.h"
 #include "frontend_common/cloud_sync/save_archive.h"
 #include "frontend_common/cloud_sync/sync_engine.h"
@@ -213,6 +215,31 @@ TEST_CASE("CloudSync: a linked profile's own Drive profile isn't imported", "[cl
     REQUIRE(drive.Find({{"lichii", "profileJson"}}).size() == 2);
 }
 
+TEST_CASE("CloudSync: a removed profile's link doesn't pair the profile imported in its place",
+          "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    const auto second = Common::UUID::MakeRandomWithSeed(5);
+    const auto third = Common::UUID::MakeRandomWithSeed(6);
+    REQUIRE(machine.profiles->CreateNewUser(second, "Second").IsSuccess());
+    REQUIRE(machine.profiles->CreateNewUser(third, "Third").IsSuccess());
+    REQUIRE(SyncAll(*machine.profiles, {}, FailOnConflict(), {}).pushed == 3);
+    REQUIRE(machine.profiles->RemoveUser(second));
+    REQUIRE(LinkProfile(*machine.profiles, third, second));
+    // Removed outside the frontend, which leaves the link.
+    REQUIRE(machine.profiles->RemoveUser(third));
+
+    const auto result = SyncAll(*machine.profiles, {}, FailOnConflict(), {});
+    REQUIRE(result.errors.empty());
+    REQUIRE(result.pulled == 2);
+    REQUIRE(machine.profiles->UserExists(second));
+    REQUIRE(machine.profiles->UserExists(third));
+    REQUIRE(!LinkedProfile(third).has_value());
+    const auto again = SyncAll(*machine.profiles, {}, FailOnConflict(), {});
+    REQUIRE(again.errors.empty());
+    REQUIRE(again.pushed + again.pulled == 0);
+}
+
 TEST_CASE("CloudSync: pulling profiles changes them but deletes nothing", "[cloud_sync]") {
     FakeDriveServer drive;
     CloudSyncMachine machine;
@@ -307,6 +334,42 @@ TEST_CASE("CloudSync: a changed avatar leaves the published one until profile.js
     REQUIRE(result.errors.empty());
     REQUIRE(result.pulled == 1);
     REQUIRE(ReadText(AvatarPath(other, user)) == "first avatar");
+}
+
+TEST_CASE("CloudSync: a profile.json changed during the avatar upload is decided on again",
+          "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    const auto user = machine.FirstUser();
+    std::filesystem::create_directories(AvatarPath(machine, user).parent_path());
+    std::ofstream{AvatarPath(machine, user), std::ios::binary} << "first avatar";
+    REQUIRE(SyncAll(*machine.profiles, {}, FailOnConflict(), {}).pushed == 1);
+
+    // Another machine publishes while the new avatar goes up: the read before the update sees it.
+    std::ofstream{AvatarPath(machine, user), std::ios::binary} << "second avatar";
+    const std::string id = ProfileJson(drive, user).id;
+    bool edited = false;
+    drive.before_get = [&](const std::string& file) {
+        if (file == id && drive.Find({{"lichii", "avatar"}}).size() == 2 &&
+            !std::exchange(edited, true)) {
+            EditProfile(drive, id, [](nlohmann::json& profile) { profile["nickname"] = "Remote"; });
+        }
+    };
+    std::vector<Conflict> asked;
+    const SyncCallbacks keep_local{
+        .resolve_conflict = [&asked](const Conflict& conflict, std::stop_token) {
+            asked.push_back(conflict);
+            return ConflictChoice::KeepLocal;
+        }};
+    const auto result = SyncAll(*machine.profiles, {}, keep_local, {});
+    REQUIRE(result.errors.empty());
+    REQUIRE(result.pushed == 1);
+    REQUIRE(asked.size() == 1);
+    // The avatar uploaded before the retry is the one profile.json names.
+    REQUIRE(drive.Find({{"lichii", "avatar"}}).size() == 2);
+    const auto profile = nlohmann::json::parse(ProfileJson(drive, user).data);
+    REQUIRE(profile.at("nickname") == "Eden");
+    REQUIRE(profile.at("avatarHash") == AvatarHash("second avatar"));
 }
 
 TEST_CASE("CloudSync: keeping Drive's profile backs up the local one", "[cloud_sync]") {
@@ -510,12 +573,14 @@ TEST_CASE("CloudSync: the profile list shows the duplicate sync picks", "[cloud_
     const auto json = ProfileJson(drive, user);
     auto older = nlohmann::json::parse(json.data);
     older["nickname"] = "Older";
+    const std::string older_data = older.dump();
+    const ZipEntry older_entry{"profile.json", {older_data.begin(), older_data.end()}};
     drive.Add({.name = "profile.json",
                .parents = json.parents,
                .app_properties = {{"lichii", "profileJson"},
                                   {"userUuid", user.FormattedString()},
-                                  {"contentHash", "older"}},
-               .data = older.dump(),
+                                  {"contentHash", ContentHash({&older_entry, 1})}},
+               .data = older_data,
                .created_time = "2026-01-01T00:00:00.000Z"});
     const auto listed = ListRemoteProfiles();
     REQUIRE(listed.has_value());
@@ -529,16 +594,20 @@ TEST_CASE("CloudSync: profiles aren't synced while a guest runs", "[cloud_sync]"
     const auto user = machine.FirstUser();
     machine.WriteSave({TitleId, user}, "save");
     const Title other{0x0100EA80032EA000, "Other"};
-    BeginGuest(other.id);
-    auto result = SyncAll(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
-    REQUIRE(result.errors.empty());
-    // The save went up, the profile waits.
-    REQUIRE(result.pushed == 1);
-    REQUIRE(drive.Find({{"lichii", "profileJson"}}).empty());
-    result = SyncSaves(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
-    REQUIRE(result.pushed + result.pulled == 0);
-    EndGuest();
-    result = SyncAll(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
+    {
+        const u64 registration = BeginGuest(other.id);
+        SCOPE_EXIT {
+            EndGuest(registration);
+        };
+        auto result = SyncAll(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
+        REQUIRE(result.errors.empty());
+        // The save went up, the profile waits.
+        REQUIRE(result.pushed == 1);
+        REQUIRE(drive.Find({{"lichii", "profileJson"}}).empty());
+        result = SyncSaves(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
+        REQUIRE(result.pushed + result.pulled == 0);
+    }
+    const auto result = SyncAll(*machine.profiles, {&Game, 1}, FailOnConflict(), {});
     REQUIRE(result.pushed == 1);
     REQUIRE(drive.Find({{"lichii", "profileJson"}}).size() == 1);
 }

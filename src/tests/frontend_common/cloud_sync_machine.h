@@ -11,9 +11,11 @@
 #include <string>
 #include <string_view>
 
+#include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
 #include "common/fs/path_util.h"
+#include "common/settings.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "frontend_common/cloud_sync/save_archive.h"
 #include "tests/common/restore_eden_path.h"
@@ -30,11 +32,14 @@ public:
         previous_save = Common::FS::GetEdenPath(Common::FS::EdenPath::SaveDir);
         Common::FS::SetEdenPath(Common::FS::EdenPath::NANDDir, nand);
         Common::FS::SetEdenPath(Common::FS::EdenPath::SaveDir, nand);
+        // Opening the profiles picks the first user when current_user isn't one of them.
+        previous_user = Settings::values.current_user.GetValue();
         profiles.emplace();
     }
 
     ~CloudSyncMachine() {
         profiles.reset();
+        Settings::values.current_user = previous_user;
         Tests::RestoreEdenPath(Common::FS::EdenPath::NANDDir, previous_nand);
         Tests::RestoreEdenPath(Common::FS::EdenPath::SaveDir, previous_save);
         std::error_code ec;
@@ -62,9 +67,14 @@ public:
     FrontendCommon::CloudSync::PackedSave Packed(std::string_view text) const {
         const auto folder = root / "packed";
         std::filesystem::create_directories(folder);
-        std::ofstream{folder / "save.dat", std::ios::binary} << text;
-        auto packed = FrontendCommon::CloudSync::PackSave(folder);
+        std::ofstream file{folder / "save.dat", std::ios::binary};
+        file << text;
+        file.close();
+        const bool written = !file.fail();
+        auto packed = written ? FrontendCommon::CloudSync::PackSave(folder) : std::nullopt;
         std::filesystem::remove_all(folder);
+        REQUIRE(written);
+        REQUIRE(packed.has_value());
         return *packed;
     }
 
@@ -77,6 +87,7 @@ public:
 private:
     std::filesystem::path previous_nand;
     std::filesystem::path previous_save;
+    s32 previous_user{};
 };
 
 } // namespace Tests

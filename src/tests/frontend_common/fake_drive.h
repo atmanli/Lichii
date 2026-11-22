@@ -9,9 +9,12 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -52,11 +55,18 @@ public:
         google.SignIn(3600);
 
         server.Get("/drive/v3/files", [this](const auto& request, auto& response) {
+            ++list_requests;
             std::this_thread::sleep_for(list_delay.load());
+            // Refused, not asserted: this is the server's thread, and the sync reports the error.
+            const auto query = ParseQuery(request.get_param_value("q"));
+            if (!query) {
+                response.status = 400;
+                return;
+            }
             std::scoped_lock lock{mutex};
             nlohmann::json list = nlohmann::json::array();
             for (const auto& [id, file] : files) {
-                if (!file.hidden && Matches(file, request.get_param_value("q"))) {
+                if (!file.hidden && Matches(file, *query)) {
                     list.push_back(Json(file));
                 }
             }
@@ -196,6 +206,8 @@ public:
     FakeGoogle google;
     // How long file searches take to answer.
     std::atomic<std::chrono::milliseconds> list_delay{};
+    // File searches received, counted before list_delay.
+    std::atomic<int> list_requests{};
     // When not 0, the status every update (UpdateFile) is refused with.
     std::atomic<int> update_status{};
     // Called with the id before a metadata lookup (GetFile) is answered.
@@ -218,22 +230,48 @@ private:
         return out;
     }
 
-    static bool Matches(const File& file, const std::string& query) {
-        static const std::regex parent{R"('((?:[^'\\]|\\.)*)' in parents)"};
-        static const std::regex property{
-            R"(appProperties has \{ key='((?:[^'\\]|\\.)*)' and value='((?:[^'\\]|\\.)*)' \})"};
-        REQUIRE(query.starts_with("trashed = false"));
+    struct Query {
+        std::vector<std::string> parents;
+        std::vector<std::pair<std::string, std::string>> properties;
+    };
+
+    // The terms of a files.list query, nullopt when any of it isn't one the fake knows.
+    static std::optional<Query> ParseQuery(const std::string& query) {
+        static const std::regex term{
+            R"( and (?:'((?:[^'\\]|\\.)*)' in parents|)"
+            R"(appProperties has \{ key='((?:[^'\\]|\\.)*)' and value='((?:[^'\\]|\\.)*)' \}))"};
+        constexpr std::string_view trashed = "trashed = false";
+        if (!query.starts_with(trashed)) {
+            return std::nullopt;
+        }
+        Query parsed;
+        std::smatch match;
+        for (auto it = query.begin() + trashed.size(); it != query.end(); it = match[0].second) {
+            if (!std::regex_search(it, query.end(), match, term,
+                                   std::regex_constants::match_continuous)) {
+                return std::nullopt;
+            }
+            if (match[1].matched) {
+                parsed.parents.push_back(Unescape(match[1]));
+            } else {
+                parsed.properties.emplace_back(Unescape(match[2]), Unescape(match[3]));
+            }
+        }
+        return parsed;
+    }
+
+    static bool Matches(const File& file, const Query& query) {
         if (file.trashed) {
             return false;
         }
-        for (std::sregex_iterator it{query.begin(), query.end(), parent}, end; it != end; ++it) {
-            if (std::ranges::find(file.parents, Unescape((*it)[1])) == file.parents.end()) {
+        for (const auto& parent : query.parents) {
+            if (std::ranges::find(file.parents, parent) == file.parents.end()) {
                 return false;
             }
         }
-        for (std::sregex_iterator it{query.begin(), query.end(), property}, end; it != end; ++it) {
-            const auto value = file.app_properties.find(Unescape((*it)[1]));
-            if (value == file.app_properties.end() || value->second != Unescape((*it)[2])) {
+        for (const auto& [key, value] : query.properties) {
+            const auto it = file.app_properties.find(key);
+            if (it == file.app_properties.end() || it->second != value) {
                 return false;
             }
         }

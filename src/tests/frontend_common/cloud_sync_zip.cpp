@@ -41,10 +41,12 @@ TEST_CASE("CloudSync: a zip with no entries round-trips", "[cloud_sync]") {
 TEST_CASE("CloudSync: damaged zips are refused", "[cloud_sync]") {
     REQUIRE_FALSE(ReadZip(Bytes("not a zip")).has_value());
 
-    auto zip = *WriteZip(std::vector<ZipEntry>{{"a.txt", Bytes("some data to compress")}});
+    auto zip = WriteZip(std::vector<ZipEntry>{{"a.txt", Bytes("some data to compress")}});
+    REQUIRE(zip.has_value());
     // The deflated data starts after the 30-byte local header and the name.
-    zip[30 + 5] ^= 0xFF;
-    REQUIRE_FALSE(ReadZip(zip).has_value());
+    REQUIRE(zip->size() > 30 + 5);
+    (*zip)[30 + 5] ^= 0xFF;
+    REQUIRE_FALSE(ReadZip(*zip).has_value());
 }
 
 TEST_CASE("CloudSync: ZIP64 is chosen when deflate could reach 4 GiB", "[cloud_sync]") {

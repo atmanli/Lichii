@@ -46,6 +46,7 @@ class ConfigureNetwork;
 class ConfigureApplets;
 
 class QGraphicsScene;
+class QLabel;
 class QStandardItem;
 class QStandardItemModel;
 class QTreeView;
@@ -53,6 +54,10 @@ class QVBoxLayout;
 
 namespace Ui {
 class ConfigurePerGame;
+}
+
+namespace Spotlight {
+class SettingsPage;
 }
 
 class ConfigurePerGame : public QDialog {
@@ -85,6 +90,7 @@ public:
 
 signals:
     void BrowseModsRequested();
+    void OpenSaveDataRequested();
 
     /// The custom artwork was saved or removed.
     void CustomArtworkChanged(u64 program_id);
@@ -95,6 +101,8 @@ private:
     void RetranslateUI();
 
     void HandleApplyButtonClicked();
+    void BuildSettings();
+    void UpdateSpotlightIdentity();
 
     void LoadConfiguration();
     void UpdateIconPreview(const QPixmap& map);
@@ -131,6 +139,13 @@ private:
     std::shared_ptr<std::atomic_bool> detect_cancel;
 
     QGraphicsScene* scene;
+    Spotlight::SettingsPage* settings_page = nullptr;
+    QLabel* game_banner_icon = nullptr;
+    QLabel* game_banner_title = nullptr;
+    QLabel* game_banner_summary = nullptr;
+    QLabel* game_banner_version = nullptr;
+    QLabel* update_summary = nullptr;
+    QPixmap shown_icon;
 
     std::unique_ptr<QtConfig> game_config;
 

@@ -15,8 +15,6 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout_3">
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout">
-     <item>
       <widget class="QGroupBox" name="gameInfo">
        <property name="sizePolicy">
         <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
@@ -295,37 +293,19 @@
         </item>
        </layout>
       </widget>
-     </item>
-     <item>
-      <layout class="QVBoxLayout" name="VerticalLayout">
-       <item>
-        <layout class="QVBoxLayout" name="verticalLayout_2"/>
-       </item>
-       <item>
-        <widget class="QTabWidget" name="tabWidget">
-         <property name="enabled">
-          <bool>true</bool>
-         </property>
-         <property name="currentIndex">
-          <number>-1</number>
-         </property>
-         <property name="usesScrollButtons">
-          <bool>true</bool>
-         </property>
-         <property name="documentMode">
-          <bool>false</bool>
-         </property>
-         <property name="tabsClosable">
-          <bool>false</bool>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </item>
-    </layout>
    </item>
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_2">
+    <widget class="QWidget" name="footer">
+    <layout class="QHBoxLayout" name="footerLayout">
+     <property name="leftMargin">
+      <number>40</number>
+     </property>
+     <property name="rightMargin">
+      <number>40</number>
+     </property>
+     <property name="bottomMargin">
+      <number>14</number>
+     </property>
      <item>
       <widget class="QLabel" name="label_8">
        <property name="text">
@@ -350,6 +330,7 @@
       </widget>
      </item>
     </layout>
+    </widget>
    </item>
   </layout>
  </widget>

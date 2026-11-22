@@ -5,7 +5,7 @@
 
 #include <QTreeView>
 
-class GameListModel;
+class QPainter;
 
 class GameTree : public QTreeView {
     Q_OBJECT
@@ -13,20 +13,16 @@ class GameTree : public QTreeView {
 public:
     explicit GameTree(QWidget* parent = nullptr);
 
-    void SetModel(GameListModel* model);
-
-    QString GetLastFilterResultItem() const;
-    int FilterClosedResultCount(GameListModel* model);
-    void ApplyFilter(const QString& edit_filter_text, GameListModel* model);
+    void SetModel(QAbstractItemModel* model);
 
     void SaveInterfaceLayout();
     void LoadInterfaceLayout();
 
-    void UpdateColumnVisibility(GameListModel* model);
+    void UpdateColumnVisibility();
 
-signals:
-    void ItemExpandedChanged(const QModelIndex& item);
-    void FilterResultReady(int visible, int total);
+protected:
+    void drawRow(QPainter* painter, const QStyleOptionViewItem& option,
+                 const QModelIndex& index) const override;
 
 private slots:
     void OnItemExpanded(const QModelIndex& item);

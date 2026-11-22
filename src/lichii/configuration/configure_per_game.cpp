@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <set>
@@ -28,8 +28,10 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QGraphicsScene>
 #include <QIcon>
 #include <QImage>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
@@ -37,12 +39,11 @@
 #include <QNetworkRequest>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QScrollArea>
-#include <QScrollBar>
 #include <QStandardPaths>
 #include <QString>
 #include <QTimer>
 #include <QUrl>
+#include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include "common/fs/fs_util.h"
@@ -76,6 +77,9 @@
 #include "lichii/configuration/configure_per_game_addons.h"
 #include "lichii/configuration/configure_system.h"
 #include "lichii/configuration/iidb_artwork_dialog.h"
+#include "lichii/spotlight/settings_page.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "lichii/configuration/iidb_key_dialog.h"
 #include "lichii/game/artwork_image.h"
 #include "lichii/util/util.h"
@@ -354,36 +358,8 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
 
     ui->setupUi(this);
 
-    auto* const info_area = new QScrollArea(this);
-    ui->horizontalLayout->replaceWidget(ui->gameInfo, info_area);
-    info_area->setFrameShape(QFrame::NoFrame);
-    info_area->setWidgetResizable(true);
-    info_area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    info_area->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
-    info_area->setWidget(ui->gameInfo);
-
-    const std::array<std::tuple<QWidget*, const char*, QString>, 10> tabs{{
-        {addons_tab.get(), "puzzle", tr("Add-Ons")},
-        {system_tab.get(), "system", tr("System")},
-        {cpu_tab.get(), "cpu", tr("CPU")},
-        {graphics_tab.get(), "monitor", tr("Graphics")},
-        {graphics_advanced_tab.get(), "layers", tr("Adv. Graphics")},
-        {graphics_extensions_tab.get(), "wand", tr("Ext. Graphics")},
-        {audio_tab.get(), "audio", tr("Audio")},
-        {input_tab.get(), "gamepad", tr("Input Profiles")},
-        {network_tab.get(), "globe", tr("Network")},
-        {applets_tab.get(), "apps", tr("Applets")},
-    }};
-    for (const auto& [tab, icon, name] : tabs) {
-        if (tab != addons_tab.get() && tab != input_tab.get()) {
-            ConfigurationShared::UseToggles(tab);
-        }
-        ui->tabWidget->addTab(ConfigurationShared::ScrollTab(tab),
-                              ConfigurationShared::PageIcon(QString::fromLatin1(icon)), name);
-    }
-
     setFocusPolicy(Qt::ClickFocus);
-    setWindowTitle(tr("Properties"));
+    setWindowTitle(tr("Game Settings"));
 
     addons_tab->SetTitleId(title_id);
 
@@ -436,10 +412,233 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
                 &ConfigurePerGame::HandleApplyButtonClicked);
     }
 
-    LoadConfiguration();
-    info_area->setMinimumWidth(ui->gameInfo->sizeHint().width() +
-                               info_area->verticalScrollBar()->sizeHint().width());
-    ConfigurationShared::FitToScreen(this, QSize(1040, 760));
+    ui->label_8->setVisible(system.IsPoweredOn());
+    BuildSettings();
+    UpdateIconPreview({});
+    ConfigurationShared::FitToScreen(this, QSize(1280, 800));
+}
+
+void ConfigurePerGame::BuildSettings() {
+    using Spotlight::SettingsPage;
+    namespace Color = Spotlight::Color;
+    namespace Tints = Spotlight::SettingsColor;
+    settings_page = new SettingsPage(this, true);
+    ui->verticalLayout_3->setContentsMargins(0, 0, 0, 0);
+    ui->verticalLayout_3->setSpacing(0);
+    ui->verticalLayout_3->addWidget(settings_page);
+    settings_page->SetFooter(ui->footer);
+    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::reject);
+
+    const int overview = settings_page->AddCategory(
+        tr("Overview"), tr("Only what you change here differs from global"),
+        QStringLiteral("house"), Color::Accent());
+    const bool is_switch_2 =
+        Core::FindSwitch2Program(Core::GetGameFileFromPath(system.GetFilesystem(),
+                                                           Common::FS::PathToUTF8String(file_path)),
+                                 title_id, 0)
+            .has_value();
+    const int graphics = settings_page->AddCategory(
+        tr("Graphics"), tr("Only what you change here differs from global"),
+        QStringLiteral("monitor"), Tints::Green(),
+        is_switch_2 ? tr("Graphics and frame rate") : tr("Graphics"));
+    auto* fps = is_switch_2 ? SettingsPage::Editor(graphics_tab.get(), Settings::values.fps_limit)
+                            : nullptr;
+    const int frame_rate =
+        fps == nullptr
+            ? -1
+            : settings_page->AddCategory(tr("Frame rate"), tr("Set a guest FPS cap for this game"),
+                                         QStringLiteral("timer"), Tints::Gold());
+    const int controls =
+        settings_page->AddCategory(tr("Controls"), tr("Choose input profiles for this game"),
+                                   QStringLiteral("game-controller"), Tints::Blue());
+    const int mods = settings_page->AddCategory(tr("Mods and cheats"),
+                                                tr("Manage the installed add-ons for this game"),
+                                                QStringLiteral("puzzle-piece"), Tints::Lavender());
+    const int updates = settings_page->AddCategory(
+        tr("Updates and DLC"), tr("Find the installed version and manage downloadable content"),
+        QStringLiteral("download-simple"), Color::Accent());
+    const int saves =
+        settings_page->AddCategory(tr("Save data"), tr("Access this game's save data"),
+                                   QStringLiteral("archive"), Tints::Green());
+
+    auto* banner = new QWidget;
+    auto* banner_layout = new QHBoxLayout(banner);
+    banner_layout->setContentsMargins(0, 4, 0, 6);
+    banner_layout->setSpacing(18);
+    game_banner_icon = new QLabel;
+    game_banner_icon->setFixedSize(72, 72);
+    banner_layout->addWidget(game_banner_icon, 0, Qt::AlignVCenter);
+    auto* identity = new QVBoxLayout;
+    identity->setSpacing(4);
+    game_banner_title = SettingsPage::Text({}, 24, 600);
+    game_banner_title->setFont(Spotlight::DisplayFont(24));
+    game_banner_title->setWordWrap(true);
+    game_banner_summary = SettingsPage::Text({}, 13, 400, true);
+    game_banner_summary->setWordWrap(true);
+    identity->addWidget(game_banner_title);
+    identity->addWidget(game_banner_summary);
+    auto* details = new QHBoxLayout;
+    details->setSpacing(8);
+    if (title_id != 0) {
+        details->addWidget(SettingsPage::Badge(is_switch_2 ? tr("Switch 2") : tr("Switch 1"),
+                                               is_switch_2 ? Color::Accent() : Color::Text(),
+                                               is_switch_2 ? Color::OnAccent() : Color::OnLight()));
+    }
+    game_banner_version = SettingsPage::Text({}, 12, 500, true);
+    details->addWidget(game_banner_version, 1);
+    identity->addLayout(details);
+    banner_layout->addLayout(identity, 1);
+    auto* reset =
+        new Spotlight::PillButton(tr("Reset all"), QStringLiteral("arrow-counter-clockwise"));
+    reset->setToolTip(tr("Remove this game's custom configuration"));
+    reset->setEnabled(!system.IsPoweredOn());
+    connect(reset, &QAbstractButton::clicked, this, [this] {
+        if (QMessageBox::question(
+                this, tr("Reset game settings"),
+                tr("Remove this game's custom configuration and close Game Settings?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            return;
+        }
+        QtCommon::Game::RemoveCustomConfiguration(title_id,
+                                                  Common::FS::PathToUTF8String(file_path));
+        reject();
+    });
+    banner_layout->addWidget(reset, 0, Qt::AlignVCenter);
+    settings_page->SetBanner(banner);
+    connect(ui->display_name, &QLineEdit::textChanged, this, [this] { UpdateSpotlightIdentity(); });
+
+    const auto add_setting = [this](QVBoxLayout* section, const Settings::BasicSetting& setting,
+                                    const QString& name, const QString& description,
+                                    const QString& icon, const QColor& color) {
+        if (auto* source = SettingsPage::Editor(graphics_tab.get(), setting)) {
+            if (auto* control = SettingsPage::BindSetting(source)) {
+                SettingsPage::AddRow(section, name, description, icon, color, control);
+            }
+        }
+    };
+    auto* common = settings_page->AddSection(overview, tr("This game"));
+    auto* picture = settings_page->AddSection(graphics, tr("This game"));
+    if (frame_rate != -1) {
+        for (auto* section :
+             {common, picture, settings_page->AddSection(frame_rate, tr("Frame rate"))}) {
+            add_setting(section, Settings::values.fps_limit, tr("Guest FPS cap"),
+                        tr("Auto follows the game; other values cap how often it presents"),
+                        QStringLiteral("timer"), Tints::Green());
+        }
+    }
+    const auto& values = Settings::values;
+    const int global_preset = Spotlight::PerformancePresetIndex({
+        values.resolution_setup.GetValue(true),
+        values.scaling_filter.GetValue(true),
+        values.anti_aliasing.GetValue(true),
+        values.frame_gen.GetValue(true),
+    });
+    const auto preset_name = Spotlight::PerformancePresetName(global_preset);
+    SettingsPage::AddRow(picture, tr("Global preset"), preset_name, QStringLiteral("lightning"),
+                         Color::Accent(), nullptr);
+    for (auto* section : {common, picture}) {
+        add_setting(section, Settings::values.resolution_setup, tr("Resolution"),
+                    tr("Internal rendering scale for this game"), QStringLiteral("monitor"),
+                    Tints::Blue());
+    }
+    add_setting(picture, Settings::values.scaling_filter, tr("Scaling filter"),
+                tr("How the image fits the window"), QStringLiteral("sliders-horizontal"),
+                Tints::Lavender());
+    add_setting(picture, Settings::values.frame_gen, tr("Frame generation"),
+                tr("Adds displayed frames between game frames"), QStringLiteral("film-strip"),
+                Tints::Gold());
+    const auto add_updates_row = [this, mods](QVBoxLayout* section, const QString& detail) {
+        auto* button = SettingsPage::Manage();
+        connect(button, &QAbstractButton::clicked, this,
+                [this, mods] { settings_page->SetCategory(mods); });
+        return SettingsPage::AddRow(section, tr("Updates and DLC"), detail,
+                                    QStringLiteral("download-simple"), Tints::Lavender(), button);
+    };
+    for (const int category : {overview, graphics}) {
+        auto* content = settings_page->AddSection(category);
+        auto* manage_mods = SettingsPage::Manage(tr("Manage"));
+        connect(manage_mods, &QAbstractButton::clicked, this,
+                [this, mods] { settings_page->SetCategory(mods); });
+        SettingsPage::AddRow(content, tr("Mods and cheats"), tr("Manage installed mods and cheats"),
+                             QStringLiteral("puzzle-piece"), Tints::Blue(), manage_mods);
+        add_updates_row(content, tr("Review installed updates and DLC"));
+    }
+    update_summary =
+        add_updates_row(settings_page->AddSection(updates), tr("Review installed content"));
+
+    auto* save = SettingsPage::Manage(tr("Open folder"));
+    save->setEnabled(title_id != 0);
+    connect(save, &QAbstractButton::clicked, this, &ConfigurePerGame::OpenSaveDataRequested);
+    SettingsPage::AddRow(settings_page->AddSection(saves), tr("Save data folder"),
+                         tr("Open this game's saves in the file manager"),
+                         QStringLiteral("folder-open"), Tints::Green(), save);
+
+    settings_page->AddPage(mods, addons_tab.get(), tr("Add-ons"), false);
+    settings_page->AddPage(controls, input_tab.get(), tr("Input profiles"), false);
+    settings_page->AddPage(overview, ui->gameInfo, tr("Game information and artwork"));
+    for (const auto& [category, widget, name] :
+         std::initializer_list<std::tuple<int, QWidget*, QString>>{
+             {overview, system_tab.get(), tr("System")},
+             {overview, cpu_tab.get(), tr("CPU")},
+             {overview, audio_tab.get(), tr("Audio")},
+             {overview, network_tab.get(), tr("Network")},
+             {overview, applets_tab.get(), tr("Applets")},
+             {graphics, graphics_tab.get(), tr("Graphics")},
+             {graphics, graphics_advanced_tab.get(), tr("Advanced graphics")},
+             {graphics, graphics_extensions_tab.get(), tr("Extra graphics")},
+         }) {
+        ConfigurationShared::UseToggles(widget);
+        settings_page->AddPage(category, widget, name);
+    }
+
+    QHash<u32, ConfigurationShared::Widget*> editors;
+    for (auto* editor : findChildren<ConfigurationShared::Widget*>()) {
+        if (editor->Valid() && editor->restore_button != nullptr) {
+            editors.insert(editor->SettingId(), editor);
+        }
+    }
+    const auto update_count = [this, editors] {
+        int count = 0;
+        for (const auto& entry : Settings::values.linkage.by_category) {
+            for (const auto* setting : entry.second) {
+                const auto* editor = editors.value(setting->Id());
+                if (editor ? editor->property("custom").toBool()
+                           : setting->Switchable() && !setting->UsingGlobal()) {
+                    ++count;
+                }
+            }
+        }
+        game_banner_summary->setText(
+            count == 0 ? tr("Uses your global settings.")
+            : count == 1
+                ? tr("Uses your global settings, except 1 change. Presets never overwrite these.")
+                : tr("Uses your global settings, except %n changes. Presets never overwrite these.",
+                     nullptr, count));
+    };
+    for (auto* editor : editors) {
+        SettingsPage::WatchOverride(editor, game_banner_summary, update_count);
+    }
+    update_count();
+    settings_page->SetCategory(graphics);
+}
+
+void ConfigurePerGame::UpdateSpotlightIdentity() {
+    const QString name = ui->display_name->text().simplified();
+    const auto fallback = QString::fromStdString(Common::FS::PathToUTF8String(file_path.stem()));
+    const QString title = name.isEmpty() ? ui->display_name->placeholderText().isEmpty()
+                                               ? fallback
+                                               : ui->display_name->placeholderText()
+                                         : name;
+    game_banner_title->setText(title);
+    settings_page->SetGame(title, shown_icon);
+    const QString version = ui->display_version->text();
+    const QString id = title_id == 0 ? QString{} : ui->display_title_id->text();
+    const QString shown_version = version.isEmpty() ? QString{} : tr("Version %1").arg(version);
+    game_banner_version->setText(id.isEmpty() || shown_version.isEmpty()
+                                     ? shown_version + id
+                                     : tr("%1 · %2").arg(shown_version, id));
+    update_summary->setText(version.isEmpty() ? tr("Review installed content")
+                                              : tr("Game version %1").arg(version));
 }
 
 ConfigurePerGame::~ConfigurePerGame() {
@@ -488,6 +687,7 @@ void ConfigurePerGame::changeEvent(QEvent* event) {
 
 void ConfigurePerGame::RetranslateUI() {
     ui->retranslateUi(this);
+    setWindowTitle(tr("Game Settings"));
 }
 
 void ConfigurePerGame::HandleApplyButtonClicked() {
@@ -603,12 +803,15 @@ void ConfigurePerGame::LoadConfiguration() {
 }
 
 void ConfigurePerGame::UpdateIconPreview(const QPixmap& map) {
+    shown_icon = map;
+    game_banner_icon->setPixmap(Spotlight::SettingsPage::WholeIcon(map, 72, devicePixelRatioF()));
+    UpdateSpotlightIdentity();
     scene->clear();
     if (map.isNull()) {
         return;
     }
-    scene->addPixmap(map.scaled(ui->icon_view->width(), ui->icon_view->height(),
-                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    scene->addPixmap(
+        Spotlight::SettingsPage::WholeIcon(map, ui->icon_view->width(), devicePixelRatioF()));
 }
 
 void ConfigurePerGame::StageCustomIcon(QImage icon) {

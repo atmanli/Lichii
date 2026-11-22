@@ -83,6 +83,7 @@ public:
      * @returns True if the Widget successfully created the components for the setting
      */
     bool Valid() const;
+    u32 SettingId() const;
 
     /**
      * Creates a button to appear when a setting has been modified. This exists for custom

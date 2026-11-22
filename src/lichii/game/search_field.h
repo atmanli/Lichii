@@ -1,52 +1,41 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 
-#include <QWidget>
+#include <QLineEdit>
 
-class GameList;
-class QHBoxLayout;
-class QTreeView;
-class QLabel;
-class QLineEdit;
 class QToolButton;
 
-class GameListSearchField : public QWidget {
+namespace Spotlight {
+class KeyCap;
+}
+
+class GameListSearchField final : public QLineEdit {
     Q_OBJECT
 
 public:
-    explicit GameListSearchField(GameList* parent = nullptr);
+    explicit GameListSearchField(QWidget* parent = nullptr);
+    QSize sizeHint() const override;
+    void SetShortcutLabel(const QString& label);
 
-    QString filterText() const;
-    void setFilterResult(int visible_, int total_);
+signals:
+    void Submitted();
 
-    void clear();
-    void setFocus();
+protected:
+    bool event(QEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void focusInEvent(QFocusEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
-    void changeEvent(QEvent*) override;
+    void UpdateAffordances();
     void RetranslateUI();
 
-    class KeyReleaseEater : public QObject {
-    public:
-        explicit KeyReleaseEater(GameList* gamelist_, QObject* parent = nullptr);
-
-    private:
-        GameList* gamelist = nullptr;
-        QString edit_filter_text_old;
-
-    protected:
-        // EventFilter in order to process systemkeys while editing the searchfield
-        bool eventFilter(QObject* obj, QEvent* event) override;
-    };
-    int visible;
-    int total;
-
-    QHBoxLayout* layout_filter = nullptr;
-    QTreeView* tree_view = nullptr;
-    QLabel* label_filter = nullptr;
-    QLineEdit* edit_filter = nullptr;
-    QLabel* label_filter_result = nullptr;
-    QToolButton* button_filter_close = nullptr;
+    Spotlight::KeyCap* keycap;
+    QToolButton* clear_button;
+    bool has_shortcut = true;
 };

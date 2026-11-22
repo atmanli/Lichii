@@ -68,9 +68,15 @@ class ShaderWarmDialog;
 class WhatsNewDialog;
 class NxTools;
 class QSlider;
+class QMenu;
 class QHBoxLayout;
 class WaitTreeWidget;
 class PerformanceOverlay;
+namespace Spotlight {
+class FullscreenHint;
+class InGameBar;
+class InGameMenu;
+} // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
 #endif
@@ -144,6 +150,11 @@ namespace Ui {
 class MainWindow;
 }
 
+namespace Spotlight {
+class Launcher;
+class RunningTitleBar;
+} // namespace Spotlight
+
 enum class EmulatedDirectoryTarget {
     NAND,
     SDMC,
@@ -153,28 +164,6 @@ namespace VkDeviceInfo {
 class Record;
 }
 
-class VolumeButton : public QPushButton {
-    Q_OBJECT
-public:
-    explicit VolumeButton(QWidget* parent = nullptr) : QPushButton(parent), scroll_multiplier(1) {
-        connect(&scroll_timer, &QTimer::timeout, this, &VolumeButton::ResetMultiplier);
-    }
-
-signals:
-    void VolumeChanged();
-
-protected:
-    void wheelEvent(QWheelEvent* event) override;
-
-private slots:
-    void ResetMultiplier();
-
-private:
-    int scroll_multiplier;
-    QTimer scroll_timer;
-    constexpr static int MaxMultiplier = 8;
-};
-
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -182,7 +171,6 @@ class MainWindow : public QMainWindow {
     static const int max_recent_files_item = 10;
 
 public:
-    void filterBarSetChecked(bool state);
     void UpdateUITheme();
     explicit MainWindow(bool has_broken_vulkan);
     ~MainWindow() override;
@@ -433,7 +421,7 @@ private slots:
     void OnApplyRecommendedSettings();
     void OnRestorePreviousSettings();
     void OnDataDialog();
-    void OnToggleFilterBar();
+    void OnFocusLibrarySearch();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
 #ifdef HAS_RESHADE
@@ -516,6 +504,8 @@ private:
 
     void UpdateVolumeUI();
     void UpdateStatusBar();
+    void ToggleInGameMenu();
+    void UpdateInGameGraphicsSummary();
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
     void UpdateMenuIcons();
@@ -578,6 +568,8 @@ private:
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
+    Spotlight::Launcher* launcher = nullptr;
+    Spotlight::RunningTitleBar* running_title_bar = nullptr;
     LoadingScreen* loading_screen = nullptr;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
@@ -607,24 +599,31 @@ private:
 
     std::vector<VkDeviceInfo::Record> vk_device_records;
 
-    // Status bar elements
-    QLabel* message_label = nullptr;
-    QLabel* shader_building_label = nullptr;
-    QLabel* res_scale_label = nullptr;
-    QLabel* emu_speed_label = nullptr;
-    QLabel* game_fps_label = nullptr;
-    QLabel* dlss_status_label = nullptr;
-    QLabel* emu_frametime_label = nullptr;
-    QLabel* tas_label = nullptr;
-    QLabel* firmware_label = nullptr;
-    QPushButton* gpu_accuracy_button = nullptr;
-    QPushButton* renderer_status_button = nullptr;
-    QPushButton* refresh_button = nullptr;
-    QPushButton* dock_status_button = nullptr;
-    QPushButton* filter_status_button = nullptr;
-    QPushButton* aa_status_button = nullptr;
-    QPushButton* post_shader_status_button = nullptr;
-    QPushButton* frame_gen_status_button = nullptr;
+    Spotlight::InGameBar* ingame_bar = nullptr;
+    Spotlight::InGameMenu* ingame_menu = nullptr;
+    Spotlight::FullscreenHint* fullscreen_hint = nullptr;
+    Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
+    QMenu* quick_controls = nullptr;
+    QAction* ingame_menu_action = nullptr;
+    QAction* tas_action = nullptr;
+    QAction* firmware_action = nullptr;
+    QAction* gpu_accuracy_action = nullptr;
+    QAction* renderer_status_action = nullptr;
+    QAction* refresh_action = nullptr;
+    QAction* dock_status_action = nullptr;
+    QAction* filter_status_action = nullptr;
+    QAction* aa_status_action = nullptr;
+    QAction* post_shader_status_action = nullptr;
+    QAction* frame_gen_status_action = nullptr;
+    QAction* mute_action = nullptr;
+    QAction* speed_limit_action = nullptr;
+    QAction* turbo_action = nullptr;
+    QAction* slow_action = nullptr;
+    QString frame_gen_status_text;
+    QString session_status_text;
+    bool ingame_fullscreen = false;
+    bool fullscreen_hint_shown = false;
+    bool fullscreen_shader_active = false;
 
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;
@@ -633,8 +632,6 @@ private:
     bool frame_gen_generating = false;
     double frame_gen_fps = 0.0;
     QElapsedTimer frame_gen_fps_timer;
-    VolumeButton* volume_button = nullptr;
-    QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
 

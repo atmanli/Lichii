@@ -6,7 +6,6 @@
 
 #include <future>
 #include <QColor>
-#include <QImage>
 #include <QList>
 #include <QLocale>
 #include <QMessageBox>
@@ -17,15 +16,17 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/internal_network/network_interface.h"
-#include "network/announce_multiplayer_session.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_host_room.h"
-#include "qt_common/game_list/game_list_p.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/game/common.h"
 #include "lichii/main_window.h"
 #include "lichii/multiplayer/host_room.h"
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/multiplayer/validation.h"
+#include "network/announce_multiplayer_session.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/game_list_p.h"
+#include "ui_host_room.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/verify_user_jwt.h"
 #endif
@@ -82,12 +83,10 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
 HostRoomWindow::~HostRoomWindow() = default;
 
 void HostRoomWindow::UpdateGameList(QStandardItemModel* list) {
-    game_list->clear();
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
+    Lichii::CopyLibraryGames(*game_list, *list);
+    for (int row = 0; row < game_list->rowCount(); ++row) {
+        auto* game = game_list->item(row);
+        game->setIcon(ArtworkImage::Icon(game->data(Qt::DecorationRole).value<QPixmap>(), 16, 4));
     }
 }
 
@@ -244,11 +243,7 @@ void HostRoomWindow::Host() {
 
 QVariant ComboBoxProxyModel::data(const QModelIndex& idx, int role) const {
     if (role != Qt::DisplayRole) {
-        auto val = QSortFilterProxyModel::data(idx, role);
-        // If its the icon, shrink it to 16x16
-        if (role == Qt::DecorationRole)
-            val = val.value<QImage>().scaled(16, 16, Qt::KeepAspectRatio);
-        return val;
+        return QSortFilterProxyModel::data(idx, role);
     }
     std::string filename;
     Common::SplitPath(

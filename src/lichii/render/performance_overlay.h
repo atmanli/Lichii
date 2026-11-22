@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <deque>
 #include <optional>
 #include <vector>
 #include <QWidget>
@@ -21,7 +20,7 @@ class PerformanceOverlay : public QWidget {
     Q_OBJECT
 
 public:
-    explicit PerformanceOverlay(MainWindow* parent = nullptr);
+    explicit PerformanceOverlay(MainWindow* parent, QWidget* anchor);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -30,22 +29,27 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
-    void resetPosition(const QPoint& pos);
+    void ResetPosition();
     void updateStats(const Core::PerfStatsResults& results, const VideoCore::ShaderNotify& shaders);
     void paintGraph(QPainter& painter, const QRectF& area);
 
     MainWindow* m_mainWindow = nullptr;
+    QWidget* m_anchor = nullptr;
 
-    QPoint m_offset{25, 75};
+    QPoint m_offset{20, 20};
 
     // drag
     QPoint m_drag_start_pos;
 
     std::optional<double> m_fps;
-    /// The last 5 s of 500 ms fps readings, for min/median/max
-    std::deque<float> m_fpsSamples;
+    std::optional<double> m_low_fps;
+    std::optional<double> m_speed;
+    double m_generated = 0;
+    int m_shaders = 0;
+    bool m_at_target = false;
     std::optional<double> m_frameMs;
     std::optional<double> m_cpuPercent;
     std::optional<double> m_gpuPercent;

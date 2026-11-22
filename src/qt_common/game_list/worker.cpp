@@ -434,6 +434,9 @@ void GameListWorker::AddTitlesToGameList(GameListDir* parent_dir, GameListItemTy
 
         auto entry = MakeGameListEntry(file->GetFullPath(), name, file->GetSize(), icon, *loader,
                                        program_id, play_time_manager, patch, patch_cache);
+        entry[GameListModel::COLUMN_NAME]->setData(
+            Core::FindSwitch2Program(file, program_id, 0).has_value(),
+            GameListItemPath::Switch2Role);
         auto pending = std::make_shared<PendingRow>(std::move(entry));
         RecordEvent([=](GameListModel* model) { model->AddEntry(pending->Release(), parent_dir); });
     }
@@ -531,7 +534,7 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                 (!title_container || !program_ids.empty()) &&
                 (file_type != Loader::FileType::NCA ||
                  Loader::AppLoader_NCA::IdentifyType(file) == Loader::FileType::NCA);
-            const auto addEntry = [this, physical_name, can_forward,
+            const auto addEntry = [this, file, physical_name, can_forward,
                                    parent_dir](std::unique_ptr<Loader::AppLoader>& app_loader,
                                                const u64 id) {
                 std::vector<u8> icon;
@@ -562,6 +565,9 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
 
                 auto entry = MakeGameListEntry(physical_name, name, size, icon, *app_loader, id,
                                                play_time_manager, patch, patch_cache);
+                entry[GameListModel::COLUMN_NAME]->setData(
+                    Core::FindSwitch2Program(file, id, 0).has_value(),
+                    GameListItemPath::Switch2Role);
 
                 if (loose_dump) {
                     entry[GameListModel::COLUMN_SIZE]->setText(tr("Calculating..."));

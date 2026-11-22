@@ -1,179 +1,169 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <algorithm>
-
-#include <QApplication>
 #include <QHeaderView>
 #include <QPainter>
-#include <QScroller>
-#include <QScrollerProperties>
 #include <QStyledItemDelegate>
 
-#include "qt_common/config/uisettings.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/game/game_tree.h"
+#include "lichii/spotlight/theme.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
-#include "lichii/game/common.h"
-#include "lichii/game/game_tree.h"
-#include "lichii/util/util.h"
 
 namespace {
 
-// Draws the name column the way Lichii Dark lays it out: a game's title over a muted
-// monospace second line with a star for favourites, and a folder's game count after its path.
-class LichiiNameDelegate final : public QStyledItemDelegate {
+class LibraryRowDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override {
-        const auto type = index.data(GameListItem::TypeRole).value<GameListItemType>();
-        if (!IsLichiiTheme() || type == GameListItemType::AddDir) {
-            QStyledItemDelegate::paint(painter, option, index);
-            return;
-        }
-
-        QStyleOptionViewItem item = option;
-        initStyleOption(&item, index);
-        const QStringList lines =
-            item.text.replace(QChar::LineSeparator, QLatin1Char('\n')).split(QLatin1Char('\n'));
-        item.text.clear();
-        if (const QPixmap picture = index.data(Qt::DecorationRole).value<QPixmap>();
-            !picture.isNull()) {
-            QIcon icon(picture);
-            icon.addPixmap(picture, QIcon::Selected);
-            item.icon = icon;
-        }
-        const QWidget* widget = item.widget;
-        QStyle* style = widget != nullptr ? widget->style() : QApplication::style();
-        style->drawControl(QStyle::CE_ItemViewItem, &item, painter, widget);
-        const int text_left =
-            style->subElementRect(QStyle::SE_ItemViewItemText, &item, widget).left() + 4;
-        const QRect rect(text_left, item.rect.top(), item.rect.right() - text_left - 4,
-                         item.rect.height());
-
-        const bool selected = item.state & QStyle::State_Selected;
-        QFont title_font = item.font;
-        title_font.setWeight(QFont::DemiBold);
-
+        using namespace Spotlight;
+        const auto type =
+            index.siblingAtColumn(0).data(GameListItem::TypeRole).value<GameListItemType>();
+        const bool name_column = index.column() == GameListModel::COLUMN_NAME;
+        const bool is_game = type == GameListItemType::Game;
+        const auto lines = index.data().toString().split(QLatin1Char('\n'));
+        auto rect = option.rect.adjusted(6, 0, -8, 0);
         painter->save();
-        painter->setClipRect(item.rect);
-        painter->setFont(title_font);
-        const QFontMetrics title_metrics = painter->fontMetrics();
-        const QString title =
-            title_metrics.elidedText(lines.value(0), Qt::ElideRight, rect.width());
-        painter->setPen(selected ? QColor(Qt::white) : QColor(0xec, 0xec, 0xef));
+        painter->setClipRect(option.rect);
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setRenderHint(QPainter::SmoothPixmapTransform);
 
-        if (type != GameListItemType::Game) {
-            painter->drawText(rect, Qt::AlignVCenter | Qt::AlignLeft, title);
-            const int games = index.model()->rowCount(index);
-            const int x = rect.left() + title_metrics.horizontalAdvance(title) + 10;
-            painter->setFont(item.font);
-            painter->setPen(QColor(0x6f, 0x71, 0x78));
-            painter->drawText(QRect(x, rect.top(), std::max(0, rect.right() - x), rect.height()),
-                              Qt::AlignVCenter | Qt::AlignLeft,
-                              games == 1
-                                  ? QCoreApplication::translate("GameList", "1 game")
-                                  : QCoreApplication::translate("GameList", "%1 games").arg(games));
-            painter->restore();
-            return;
-        }
-
-        QFont id_font = GetMonospaceFont();
-        if (item.font.pixelSize() > 0) {
-            id_font.setPixelSize(std::max(1, item.font.pixelSize() * 17 / 20));
-        } else {
-            id_font.setPointSizeF(item.font.pointSizeF() * 0.85);
-        }
-        const bool two_lines = lines.size() > 1;
-        const int middle = rect.top() + rect.height() / 2;
-        const int flags = Qt::AlignLeft | Qt::TextDontClip;
-
-        QRect title_rect;
-        painter->drawText(
-            two_lines ? QRect(rect.left(), rect.top(), rect.width(), middle - rect.top() - 1)
-                      : rect,
-            flags | (two_lines ? Qt::AlignBottom : Qt::AlignVCenter), title, &title_rect);
-
-        const u64 program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
-        if (program_id != 0 && UISettings::values.favorited_ids.contains(program_id)) {
-            const int star_x = title_rect.right() + 8;
-            const int star_y = title_rect.center().y() - 7;
-            if (star_x + 14 <= rect.right()) {
-                painter->drawPixmap(QRect(star_x, star_y, 14, 14),
-                                    QPixmap(QStringLiteral(":/lichii/icons/star_accent@2x.png")));
+        if (name_column) {
+            const QPixmap image = index.data(Qt::DecorationRole).value<QPixmap>();
+            const int side = is_game ? GameIconSize() : 16;
+            if (side > 0 && !image.isNull()) {
+                const QRect square(rect.x(), rect.center().y() - side / 2, side, side);
+                ArtworkImage::PaintIcon(*painter, square, image, is_game ? 8 : 0);
+                rect.setLeft(square.right() + 13);
             }
         }
 
-        if (two_lines) {
-            painter->setFont(id_font);
-            painter->setPen(selected ? QColor(0xc4, 0xc5, 0xca) : QColor(0x6f, 0x71, 0x78));
-            painter->drawText(
-                QRect(rect.left(), middle + 2, rect.width(), rect.bottom() - middle - 2),
-                flags | Qt::AlignTop,
-                painter->fontMetrics().elidedText(lines.at(1).trimmed(), Qt::ElideRight,
-                                                  rect.width()));
+        const u64 id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
+        const bool favorite =
+            name_column && is_game && UISettings::values.favorited_ids.contains(id);
+        painter->setFont(name_column ? Font(14, 600) : Font(13));
+        const QColor native_text = option.palette.color(
+            option.state & QStyle::State_Selected ? QPalette::HighlightedText : QPalette::Text);
+        painter->setPen(IsLichiiTheme() ? (name_column ? Color::Text() : Color::TextSecondary())
+                                        : native_text);
+        QRect primary = rect;
+        if (lines.size() > 1) {
+            primary.setBottom(rect.center().y() + 1);
+        }
+        const QString label = painter->fontMetrics().elidedText(
+            lines.value(0), Qt::ElideRight, std::max(0, primary.width() - (favorite ? 21 : 0)));
+        QRect label_rect;
+        painter->drawText(primary,
+                          Qt::AlignLeft | (lines.size() > 1 ? Qt::AlignBottom : Qt::AlignVCenter),
+                          label, &label_rect);
+        if (favorite) {
+            painter->drawPixmap(label_rect.right() + 7, label_rect.center().y() - 7,
+                                IconPixmap(u"star-fill", 14, Color::Accent(),
+                                           painter->device()->devicePixelRatioF()));
+        }
+        if (lines.size() > 1) {
+            rect.setTop(primary.bottom() + 1);
+            painter->setFont(Font(12));
+            painter->setPen(IsLichiiTheme() ? Color::TextMuted() : native_text);
+            painter->drawText(rect, Qt::AlignLeft | Qt::AlignTop,
+                              painter->fontMetrics().elidedText(lines.value(1).trimmed(),
+                                                                Qt::ElideRight, rect.width()));
         }
         painter->restore();
     }
 
-    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        QSize size = QStyledItemDelegate::sizeHint(option, index);
-        if (!IsLichiiTheme()) {
-            return size;
-        }
-        const auto type = index.data(GameListItem::TypeRole).value<GameListItemType>();
-        if (type == GameListItemType::Game) {
-            const int icon = static_cast<int>(UISettings::values.game_icon_size.GetValue());
-            size.setHeight(std::max(size.height(), icon + 16));
-        } else {
-            size.setHeight(std::max(size.height(), 34));
-        }
-        return size;
+    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex& index) const override {
+        using namespace Spotlight;
+        const auto type =
+            index.siblingAtColumn(0).data(GameListItem::TypeRole).value<GameListItemType>();
+        const bool name_column = index.column() == GameListModel::COLUMN_NAME;
+        const bool game = type == GameListItemType::Game;
+        const auto lines = index.data().toString().split(QLatin1Char('\n'));
+        const int width = std::max(
+            QFontMetrics(name_column ? Font(14, 600) : Font(13)).horizontalAdvance(lines.value(0)),
+            QFontMetrics(Font(12)).horizontalAdvance(lines.value(1)));
+        const int icon_width = name_column ? (game ? GameIconSize() : 16) + 12 : 0;
+        return {width + icon_width + 14, game ? std::max(52, GameIconSize() + 12) : 34};
+    }
+
+private:
+    static int GameIconSize() {
+        const int size = int(UISettings::values.game_icon_size.GetValue());
+        return size == 44 ? 40 : size;
     }
 };
 
 } // namespace
 
-GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
-    setItemDelegateForColumn(GameListModel::COLUMN_NAME, new LichiiNameDelegate(this));
-    setAlternatingRowColors(true);
-    setSelectionMode(QHeaderView::SingleSelection);
-    setSelectionBehavior(QHeaderView::SelectRows);
-    setVerticalScrollMode(QHeaderView::ScrollPerPixel);
-    setHorizontalScrollMode(QHeaderView::ScrollPerPixel);
-    setSortingEnabled(true);
-    setEditTriggers(QHeaderView::NoEditTriggers);
+GameTree::GameTree(QWidget* parent) : QTreeView(parent) {
+    setItemDelegate(new LibraryRowDelegate(this));
+    setSelectionMode(QAbstractItemView::SingleSelection);
+    setSelectionBehavior(QAbstractItemView::SelectRows);
+    setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    setEditTriggers(QAbstractItemView::NoEditTriggers);
     setContextMenuPolicy(Qt::CustomContextMenu);
-    setAttribute(Qt::WA_AcceptTouchEvents, true);
-    setStyleSheet(QStringLiteral("QTreeView{ border: none; }"));
+    header()->setSectionsClickable(true);
+    header()->setSortIndicatorShown(true);
+    header()->setSectionsMovable(true);
+    setObjectName(QStringLiteral("spotlightTree"));
 
     connect(this, &QTreeView::expanded, this, &GameTree::OnItemExpanded);
     connect(this, &QTreeView::collapsed, this, &GameTree::OnItemExpanded);
 }
 
-void GameTree::SetModel(GameListModel* model) {
+void GameTree::drawRow(QPainter* painter, const QStyleOptionViewItem& option,
+                       const QModelIndex& index) const {
+    using namespace Spotlight;
+    if (!IsLichiiTheme()) {
+        QTreeView::drawRow(painter, option, index);
+        return;
+    }
+    const bool selected = selectionModel()->isSelected(index);
+    const bool focus = hasFocus() && index == currentIndex().siblingAtColumn(0);
+    const bool hover = option.state & QStyle::State_MouseOver;
+    if (selected || hover || focus) {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(focus ? Color::Accent() : Qt::transparent);
+        painter->setBrush(selected ? Color::Fill() : Color::FillFaint());
+        painter->drawRoundedRect(QRectF(option.rect).adjusted(2, 1, -2, -1), Radius::Row,
+                                 Radius::Row);
+        painter->restore();
+    }
+    auto row = option;
+    row.state &= ~(QStyle::State_Selected | QStyle::State_MouseOver | QStyle::State_HasFocus);
+    QTreeView::drawRow(painter, row, index);
+}
+
+void GameTree::SetModel(QAbstractItemModel* model) {
     QTreeView::setModel(model);
     LoadInterfaceLayout();
-    UpdateColumnVisibility(model);
+    UpdateColumnVisibility();
 }
 
 void GameTree::OnItemExpanded(const QModelIndex& item) {
     const auto type = item.data(GameListItem::TypeRole).value<GameListItemType>();
-    const bool is_dir = type == GameListItemType::CustomDir || type == GameListItemType::SdmcDir ||
-                        type == GameListItemType::UserNandDir ||
-                        type == GameListItemType::SysNandDir;
-    const bool is_fave = type == GameListItemType::Favorites;
-    if (!is_dir && !is_fave) {
-        return;
+    switch (type) {
+    case GameListItemType::Favorites:
+        UISettings::values.favorites_expanded = isExpanded(item);
+        break;
+    case GameListItemType::CustomDir:
+    case GameListItemType::SdmcDir:
+    case GameListItemType::UserNandDir:
+    case GameListItemType::SysNandDir: {
+        const int dir = item.data(GameListDir::GameDirRole).toInt();
+        if (dir >= 0 && dir < UISettings::values.game_dirs.size()) {
+            UISettings::values.game_dirs[dir].expanded = isExpanded(item);
+        }
+        break;
     }
-    const bool is_expanded = isExpanded(item);
-    if (is_fave) {
-        UISettings::values.favorites_expanded = is_expanded;
-        return;
+    default:
+        break;
     }
-    const int item_dir_index = item.data(GameListDir::GameDirRole).toInt();
-    UISettings::values.game_dirs[item_dir_index].expanded = is_expanded;
 }
 
 void GameTree::SaveInterfaceLayout() {
@@ -181,96 +171,15 @@ void GameTree::SaveInterfaceLayout() {
 }
 
 void GameTree::LoadInterfaceLayout() {
-    auto* hdr = header();
-
-    if (hdr->restoreState(UISettings::values.gamelist_header_state))
-        return;
-
-    hdr->resizeSection(GameListModel::COLUMN_NAME, 840);
+    if (!header()->restoreState(UISettings::values.gamelist_header_state)) {
+        header()->resizeSection(GameListModel::COLUMN_NAME, 540);
+        header()->setSortIndicator(-1, Qt::AscendingOrder);
+    }
 }
 
-void GameTree::UpdateColumnVisibility(GameListModel* model) {
-    Q_UNUSED(model)
+void GameTree::UpdateColumnVisibility() {
     setColumnHidden(GameListModel::COLUMN_ADD_ONS, !UISettings::values.show_add_ons);
     setColumnHidden(GameListModel::COLUMN_FILE_TYPE, !UISettings::values.show_types);
     setColumnHidden(GameListModel::COLUMN_SIZE, !UISettings::values.show_size);
     setColumnHidden(GameListModel::COLUMN_PLAY_TIME, !UISettings::values.show_play_time);
-}
-
-QString GameTree::GetLastFilterResultItem() const {
-    QString file_path;
-
-    auto* model = qobject_cast<GameListModel*>(QTreeView::model());
-    if (!model)
-        return {};
-
-    for (int i = 1; i < model->rowCount() - 1; ++i) {
-        const QStandardItem* folder = model->item(i, 0);
-        const QModelIndex folder_index = folder->index();
-        const int children_count = folder->rowCount();
-
-        for (int j = 0; j < children_count; ++j) {
-            if (isRowHidden(j, folder_index)) {
-                continue;
-            }
-
-            const QStandardItem* child = folder->child(j, 0);
-            file_path = child->data(GameListItemPath::FullPathRole).toString();
-        }
-    }
-
-    return file_path;
-}
-
-int GameTree::FilterClosedResultCount(GameListModel* model) {
-    int children_total = 0;
-
-    auto hide_favorites_row = UISettings::values.favorited_ids.size() == 0;
-    setRowHidden(0, model->invisibleRootItem()->index(), hide_favorites_row);
-
-    for (int i = 1; i < model->rowCount() - 1; ++i) {
-        auto* folder = model->item(i, 0);
-        const QModelIndex folder_index = folder->index();
-        const int children_count = folder->rowCount();
-        for (int j = 0; j < children_count; ++j) {
-            ++children_total;
-            setRowHidden(j, folder_index, false);
-        }
-    }
-
-    return children_total;
-}
-
-void GameTree::ApplyFilter(const QString& edit_filter_text, GameListModel* model) {
-    int children_total = 0;
-    int result_count = 0;
-
-    if (edit_filter_text.isEmpty()) {
-        children_total = FilterClosedResultCount(model);
-        emit FilterResultReady(children_total, children_total);
-        return;
-    }
-
-    setRowHidden(0, model->invisibleRootItem()->index(), true);
-
-    for (int i = 1; i < model->rowCount() - 1; ++i) {
-        auto* folder = model->item(i, 0);
-        const QModelIndex folder_index = folder->index();
-        const int children_count = folder->rowCount();
-
-        for (int j = 0; j < children_count; ++j) {
-            ++children_total;
-
-            const QStandardItem* child = folder->child(j, 0);
-
-            if (Lichii::FilterMatches(edit_filter_text, child)) {
-                setRowHidden(j, folder_index, false);
-                ++result_count;
-            } else {
-                setRowHidden(j, folder_index, true);
-            }
-        }
-    }
-
-    emit FilterResultReady(result_count, children_total);
 }

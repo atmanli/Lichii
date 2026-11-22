@@ -32,6 +32,7 @@
 #endif
 
 #include "main_window.h"
+#include "lichii/spotlight/theme.h"
 
 #ifdef _WIN32
 #include <QScreen>
@@ -235,6 +236,7 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     OverrideWindowsFont();
 #endif
+    Spotlight::LoadFonts();
 
     // Workaround for QTBUG-85409, for Suzhou numerals the number 1 is actually \u3021
     // so we can see if we get \u3008 instead

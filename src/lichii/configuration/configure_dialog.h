@@ -9,11 +9,8 @@
 #include <memory>
 #include <vector>
 #include <QDialog>
-#include <QHash>
-#include "configuration/shared_widget.h"
-#include "qt_common/config/shared_translation.h"
+#include "qt_common/config/uisettings.h"
 #include "qt_common/util/vk.h"
-#include "lichii/configuration/configuration_shared.h"
 
 namespace Core {
 class System;
@@ -37,6 +34,17 @@ class ConfigureUi;
 class ConfigureWeb;
 
 class HotkeyRegistry;
+class QLabel;
+class QVBoxLayout;
+
+namespace ConfigurationShared {
+class Builder;
+}
+
+namespace Spotlight {
+class SettingsPage;
+class ToggleSwitch;
+}
 
 namespace InputCommon {
 class InputSubsystem;
@@ -61,34 +69,32 @@ public:
     /// Drop the controller edits that were not applied; the Controls tab changes them live.
     void RestoreInputConfiguration();
 
+    /// A new interface language was applied: the dialog closed to be opened again translated.
+    bool ReopenRequested() const {
+        return reopen_requested;
+    }
+
 private slots:
     void OnLanguageChanged(const QString& locale);
 
 signals:
     void LanguageChanged(const QString& locale);
     void ExternalContentDirsChanged();
+    void FullscreenOnStartChanged(bool enabled);
+    void OpenGameFolderRequested(const QString& folder);
 
 private:
     void changeEvent(QEvent* event) override;
-    void showEvent(QShowEvent* event) override;
-    void RetranslateUI();
-
-    /// Widens the dialog until the open page and its tab row fit without a horizontal scrollbar,
-    /// up to the screen width. A page that still does not fit is switched to its compact style.
-    void FitPageWidth();
-
     void HandleApplyButtonClicked();
-
-    void SetConfiguration();
-    void UpdateVisibleTabs();
-    void PopulateSelectionList();
+    void BuildSettings(const std::vector<VkDeviceInfo::Record>& devices);
+    void BuildControls(int category, int shortcuts);
+    void RebuildGameFolders();
 
     std::unique_ptr<Ui::ConfigureDialog> ui;
     HotkeyRegistry& registry;
 
     Core::System& system;
     std::unique_ptr<ConfigurationShared::Builder> builder;
-    std::vector<ConfigurationShared::Tab*> tab_group;
 
     std::unique_ptr<ConfigureApplets> applets_tab;
     std::unique_ptr<ConfigureAudio> audio_tab;
@@ -107,6 +113,12 @@ private:
     std::unique_ptr<ConfigureSystem> system_tab;
     std::unique_ptr<ConfigureWeb> web_tab;
 
-    /// The scroll area each tab is shown in, created when its category is first opened.
-    QHash<QWidget*, QScrollArea*> scroll_areas;
+    Spotlight::SettingsPage* settings_page = nullptr;
+    Spotlight::ToggleSwitch* start_fullscreen = nullptr;
+    Spotlight::ToggleSwitch* check_updates = nullptr;
+    QVector<UISettings::GameDir> game_dirs;
+    QVBoxLayout* folders_layout = nullptr;
+    QLabel* folder_summary = nullptr;
+    bool game_dirs_changed = false;
+    bool reopen_requested = false;
 };

@@ -41,18 +41,25 @@
 #include "install_dialog.h"
 
 #include "bootmanager.h"
-#include "loading_screen.h"
-#include "qt_common/util/vk.h"
-#include "ryujinx_dialog.h"
-#include "set_play_time_dialog.h"
-#include "util/util.h"
+#include "lichii/bug_report_dialog.h"
 #include "lichii/game/game_list.h"
 #include "lichii/mod_store/mod_store_dialog.h"
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/spotlight/fullscreen_hint.h"
+#include "lichii/spotlight/ingame_bar.h"
+#include "lichii/spotlight/ingame_menu.h"
+#include "lichii/spotlight/launcher.h"
+#include "lichii/spotlight/shader_chip.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/whats_new_dialog.h"
-#include "lichii/bug_report_dialog.h"
+#include "loading_screen.h"
+#include "qt_common/util/vk.h"
+#include "ryujinx_dialog.h"
+#include "set_play_time_dialog.h"
+#include "util/util.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #ifdef LICHII_NX_TOOLS
 #include "lichii/nx_tools.h"
@@ -110,7 +117,10 @@
 #include <QScreen>
 #include <QSet>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStatusBar>
+#include <QVBoxLayout>
+#include <QWidgetAction>
 #include <QtConcurrentRun>
 
 #ifdef __APPLE__
@@ -684,8 +694,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 #endif
 
         UpdateAPIText();
-        renderer_status_button->setDisabled(true);
-        renderer_status_button->setChecked(false);
+        renderer_status_action->setDisabled(true);
     } else {
         VkDeviceInfo::PopulateRecords(vk_device_records, this->window()->windowHandle());
     }
@@ -1070,8 +1079,9 @@ void MainWindow::WebBrowserOpenWebPage(const std::string& main_url,
         const auto scale_ratio = devicePixelRatioF();
         web_applet->resize(layout.screen.GetWidth() / scale_ratio,
                            layout.screen.GetHeight() / scale_ratio);
-        web_applet->move(layout.screen.left / scale_ratio,
-                         (layout.screen.top / scale_ratio) + menuBar()->height());
+        const QPoint origin = ui->horizontalLayout->parentWidget()->mapTo(this, QPoint{});
+        web_applet->move(origin + QPoint(layout.screen.left / scale_ratio,
+                                        layout.screen.top / scale_ratio));
         web_applet->setZoomFactor(static_cast<qreal>(layout.screen.GetWidth() / scale_ratio) /
                                   static_cast<qreal>(Layout::ScreenUndocked::Width));
 
@@ -1174,13 +1184,46 @@ void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
 
+    auto* content = new QWidget(ui->centralwidget);
+    delete ui->horizontalLayout;
+    ui->horizontalLayout = new QHBoxLayout(content);
+    ui->horizontalLayout->setContentsMargins(0, 0, 0, 0);
+    ui->horizontalLayout->setSpacing(0);
+    auto* frame = new QVBoxLayout(ui->centralwidget);
+    frame->setContentsMargins(0, 0, 0, 0);
+    frame->setSpacing(0);
+    running_title_bar = new Spotlight::RunningTitleBar(ui->centralwidget);
+    frame->addWidget(running_title_bar);
+    frame->addWidget(content, 1);
+
     game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
                              *QtCommon::system, this);
-    ui->horizontalLayout->addWidget(game_list);
-
     game_list_placeholder = new GameListPlaceholder(this);
-    ui->horizontalLayout->addWidget(game_list_placeholder);
-    game_list_placeholder->setVisible(false);
+    ui->menu_View->removeAction(ui->action_Show_Filter_Bar);
+    ui->action_Show_Filter_Bar->setCheckable(false);
+    launcher = new Spotlight::Launcher(this, game_list, game_list_placeholder, running_title_bar,
+                                       *play_time_manager,
+                                       {.load_file = ui->action_Load_File,
+                                        .load_folder = ui->action_Load_Folder,
+                                        .install = ui->action_Install_File_NAND,
+                                        .settings = ui->action_Configure,
+                                        .search = ui->action_Show_Filter_Bar,
+                                        .grid = ui->action_Grid_View,
+                                        .list = ui->action_Tree_View,
+                                        .tools = ui->menu_Tools,
+                                        .multiplayer = ui->menu_Multiplayer,
+                                        .help = ui->menu_Help},
+                                       content);
+    ui->horizontalLayout->addWidget(launcher);
+    connect(launcher, &Spotlight::Launcher::RescanRequested, this, &MainWindow::OnGameListRefresh);
+    connect(game_list, &GameList::OpenGameModsRequested, this,
+            [this](u64 title_id, const std::string& file_name) {
+                QSet<QString> store_toggled;
+                if (OpenModStore(this, title_id, file_name, store_toggled) ||
+                    !store_toggled.isEmpty()) {
+                    OnGameListRefresh();
+                }
+            });
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -1190,6 +1233,7 @@ void MainWindow::InitializeWidgets() {
         if (emulation_running) {
             render_window->show();
             render_window->setFocus();
+            OnToggleStatusBar();
         }
     });
 
@@ -1197,116 +1241,116 @@ void MainWindow::InitializeWidgets() {
                                              ui->action_Show_Room, *QtCommon::system);
     multiplayer_state->setVisible(false);
 
-    // Create status bar
-    message_label = new QLabel();
-    // Configured separately for left alignment
-    message_label->setFrameStyle(QFrame::NoFrame);
-    message_label->setContentsMargins(4, 0, 4, 0);
-    message_label->setAlignment(Qt::AlignLeft);
-    statusBar()->addPermanentWidget(message_label, 1);
+    ingame_bar = new Spotlight::InGameBar(this);
+    setStatusBar(ingame_bar);
+    ingame_bar->hide();
+    loading_screen->SetCancelAction(ui->action_Stop);
+    ingame_menu_action =
+        ui->menu_Emulation->addAction(tr("In-game Menu"), this, &MainWindow::ToggleInGameMenu);
+    ingame_menu_action->setEnabled(false);
 
-    shader_building_label = new QLabel();
-    shader_building_label->setToolTip(tr("The amount of shaders currently being built"));
-    res_scale_label = new QLabel();
-    res_scale_label->setToolTip(tr("The current selected resolution scaling multiplier."));
-    emu_speed_label = new QLabel();
-    emu_speed_label->setToolTip(
-        tr("Current emulation speed. Values higher or lower than 100% "
-           "indicate emulation is running faster or slower than a Switch."));
-    game_fps_label = new QLabel();
-    game_fps_label->setToolTip(tr("How many frames per second the game is currently displaying. "
-                                  "This will vary from game to game and scene to scene."));
-    dlss_status_label = new QLabel();
-    dlss_status_label->setToolTip(
-        tr("NVIDIA DLSS is upscaling the game, in the mode shown. The window adapting filter "
-           "runs after it."));
-    emu_frametime_label = new QLabel();
-    emu_frametime_label->setToolTip(
-        tr("Time taken to emulate a Switch frame, not counting framelimiting or v-sync. For "
-           "full-speed emulation this should be at most 16.67 ms."));
+    quick_controls = ui->menu_View->addMenu(tr("Quick controls"));
+    quick_controls->setToolTipsVisible(true);
+    const auto make_submenu = [](QMenu* parent, const QString& name) {
+        auto* menu = parent->addMenu(name);
+        menu->setToolTipsVisible(true);
+        return menu;
+    };
+    const auto add_choices = [this](QMenu* menu, const auto& choices, auto& setting,
+                                    const auto& apply, const auto& available) {
+        auto* group = new QActionGroup(menu);
+        for (const auto& [value, text] : choices) {
+            if (!available(value)) {
+                continue;
+            }
+            auto* action = menu->addAction(ConfigurationShared::TranslateMapText(translator, text));
+            action->setCheckable(true);
+            group->addAction(action);
+            connect(action, &QAction::triggered, this, [apply, value] { apply(value); });
+            connect(menu, &QMenu::aboutToShow, action,
+                    [action, &setting, value] { action->setChecked(setting.GetValue() == value); });
+        }
+    };
+    const auto all = [](auto) { return true; };
+    auto* renderer = make_submenu(quick_controls, tr("Renderer"));
+    renderer_status_action = renderer->menuAction();
+    renderer->addAction(tr("Cycle renderer"), this, &MainWindow::OnToggleGraphicsAPI);
+    renderer->addSeparator();
+    add_choices(
+        renderer, ConfigurationShared::renderer_backend_texts_map,
+        Settings::values.renderer_backend,
+        [this](auto value) {
+            Settings::values.renderer_backend.SetValue(value);
+            UpdateAPIText();
+        },
+        [](auto value) {
+#ifndef HAS_OPENGL
+            return value == Settings::RendererBackend::Vulkan;
+#else
+            return value != Settings::RendererBackend::Null;
+#endif
+        });
 
-    for (auto& label : {shader_building_label, res_scale_label, emu_speed_label, game_fps_label,
-                        dlss_status_label, emu_frametime_label}) {
-        label->setVisible(false);
-        label->setFrameStyle(QFrame::NoFrame);
-        label->setContentsMargins(4, 0, 4, 0);
-        statusBar()->addPermanentWidget(label);
-    }
+    auto* console = make_submenu(quick_controls, tr("Console mode"));
+    dock_status_action = console->menuAction();
+    add_choices(
+        console, ConfigurationShared::use_docked_mode_texts_map, Settings::values.use_docked_mode,
+        [this](auto value) {
+            if (value != Settings::values.use_docked_mode.GetValue()) {
+                OnToggleDockedMode();
+            }
+        },
+        all);
 
-    firmware_label = new QLabel();
-    firmware_label->setObjectName(QStringLiteral("FirmwareLabel"));
-    firmware_label->setVisible(false);
-    firmware_label->setContentsMargins(4, 0, 4, 0);
-    firmware_label->setFocusPolicy(Qt::NoFocus);
-    statusBar()->addPermanentWidget(firmware_label);
+    auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"));
+    gpu_accuracy_action = accuracy->menuAction();
+    add_choices(
+        accuracy, ConfigurationShared::gpu_accuracy_texts_map, Settings::values.gpu_accuracy,
+        [this](auto value) {
+            Settings::values.gpu_accuracy.SetValue(value);
+            UpdateGPUAccuracyButton();
+        },
+        all);
 
-    statusBar()->addPermanentWidget(multiplayer_state->GetStatusText(), 0);
-    statusBar()->addPermanentWidget(multiplayer_state->GetStatusIcon(), 0);
+    auto* filter = make_submenu(quick_controls, tr("Scaling filter"));
+    filter_status_action = filter->menuAction();
+    add_choices(
+        filter, ConfigurationShared::scaling_filter_texts_map, Settings::values.scaling_filter,
+        [this](auto value) {
+            Settings::values.scaling_filter.SetValue(value);
+            UpdateFilterText();
+        },
+        all);
 
-    tas_label = new QLabel();
-    tas_label->setObjectName(QStringLiteral("TASlabel"));
-    tas_label->setFocusPolicy(Qt::NoFocus);
-    statusBar()->insertPermanentWidget(0, tas_label);
-
-    volume_popup = new QWidget(this);
-    volume_popup->setWindowFlags(Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint | Qt::Popup);
-    volume_popup->setLayout(new QVBoxLayout());
-    volume_popup->setMinimumWidth(200);
-
-    volume_slider = new QSlider(Qt::Horizontal);
-    volume_slider->setObjectName(QStringLiteral("volume_slider"));
-    volume_slider->setMaximum(200);
-    volume_slider->setPageStep(5);
-    volume_popup->layout()->addWidget(volume_slider);
-
-    volume_button = new VolumeButton();
-    volume_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
-    volume_button->setProperty("chip", QStringLiteral("volume"));
-    volume_button->setFocusPolicy(Qt::NoFocus);
-    volume_button->setCheckable(true);
-    UpdateVolumeUI();
-    connect(volume_slider, &QSlider::valueChanged, this, [this](int percentage) {
-        Settings::values.audio_muted = false;
-        const auto volume = static_cast<u8>(percentage);
-        Settings::values.volume.SetValue(volume);
-        UpdateVolumeUI();
+    auto* antialiasing = make_submenu(quick_controls, tr("Anti-aliasing"));
+    aa_status_action = antialiasing->menuAction();
+    antialiasing->addAction(tr("Cycle anti-aliasing"), this, [this] {
+        auto value = Settings::AntiAliasing(u32(Settings::values.anti_aliasing.GetValue()) + 1);
+        if (u32(value) > u32(Settings::EnumMetadata<Settings::AntiAliasing>::GetLast())) {
+            value = Settings::EnumMetadata<Settings::AntiAliasing>::GetFirst();
+        }
+        Settings::values.anti_aliasing.SetValue(value);
+        UpdateAAText();
     });
-    connect(volume_button, &QPushButton::clicked, this, [&] {
-        UpdateVolumeUI();
-        volume_popup->setVisible(!volume_popup->isVisible());
-        QRect rect = volume_button->geometry();
-        QPoint bottomLeft = statusBar()->mapToGlobal(rect.topLeft());
-        bottomLeft.setY(bottomLeft.y() - volume_popup->geometry().height());
-        volume_popup->setGeometry(QRect(bottomLeft, QSize(rect.width(), rect.height())));
-    });
-    volume_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(volume_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-                context_menu.addAction(
-                    Settings::values.audio_muted ? tr("Unmute") : tr("Mute"), [this] {
-                        Settings::values.audio_muted = !Settings::values.audio_muted;
-                        UpdateVolumeUI();
-                    });
+    antialiasing->addSeparator();
+    add_choices(
+        antialiasing, ConfigurationShared::anti_aliasing_texts_map, Settings::values.anti_aliasing,
+        [this](auto value) {
+            Settings::values.anti_aliasing.SetValue(value);
+            UpdateAAText();
+        },
+        all);
 
-                context_menu.addAction(tr("Reset Volume"), [this] {
-                    Settings::values.volume.SetValue(100);
-                    UpdateVolumeUI();
-                });
-
-                context_menu.exec(volume_button->mapToGlobal(menu_location));
-                volume_button->repaint();
-            });
-    connect(volume_button, &VolumeButton::VolumeChanged, this, &MainWindow::UpdateVolumeUI);
-
-    statusBar()->insertPermanentWidget(0, volume_button);
-
-    frame_gen_status_button = new QPushButton();
-    frame_gen_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
-    frame_gen_status_button->setProperty("chip", QStringLiteral("fg"));
-    frame_gen_status_button->setFocusPolicy(Qt::NoFocus);
-    frame_gen_status_button->setCheckable(true);
-    connect(frame_gen_status_button, &QPushButton::clicked, this, [this] {
+#ifdef HAS_FLYHIGH
+    auto* frame_gen = new FlyHighTypeMenu;
+    frame_gen->setParent(quick_controls, frame_gen->windowFlags());
+#else
+    auto* frame_gen = new QMenu(quick_controls);
+#endif
+    frame_gen->setTitle(tr("Frame generation"));
+    frame_gen->setToolTipsVisible(true);
+    quick_controls->addMenu(frame_gen);
+    frame_gen_status_action = frame_gen->addAction(tr("Enable frame generation"), this, [this] {
         Settings::values.frame_gen.SetValue(!Settings::values.frame_gen.GetValue());
 #ifdef HAS_FLYHIGH
         if (Settings::values.frame_gen.GetValue() &&
@@ -1316,250 +1360,190 @@ void MainWindow::InitializeWidgets() {
 #endif
         UpdateFrameGenButton();
     });
-    UpdateFrameGenButton();
-    frame_gen_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(frame_gen_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-#ifdef HAS_FLYHIGH
-                FlyHighTypeMenu context_menu;
-#else
-                QMenu context_menu;
-#endif
-                for (const auto& [type, text] : ConfigurationShared::frame_gen_type_texts_map) {
+    frame_gen_status_action->setCheckable(true);
+    frame_gen->addSeparator();
+    for (const auto& [type, text] : ConfigurationShared::frame_gen_type_texts_map) {
 #ifndef EGLANTINE_STREAMLINE
-                    // Only builds with NVIDIA Streamline (Windows) have DLSS Frame Generation.
-                    if (type == Settings::FrameGenType::NvidiaDlssG) {
-                        continue;
-                    }
+        if (type == Settings::FrameGenType::NvidiaDlssG) {
+            continue;
+        }
 #endif
 #ifndef HAS_FLYHIGH
-                    if (type == Settings::FrameGenType::FlyHigh) {
-                        continue;
-                    }
+        if (type == Settings::FrameGenType::FlyHigh) {
+            continue;
+        }
 #endif
-                    const QString label = ConfigurationShared::TranslateMapText(translator, text);
-                    QAction* action = context_menu.addAction(label, [this, type] {
-                        Settings::values.frame_gen_type.SetValue(type);
-                        Settings::values.frame_gen.SetValue(true);
+        const QString label = ConfigurationShared::TranslateMapText(translator, text);
+        auto* action = frame_gen->addAction(label, this, [this, type] {
+            Settings::values.frame_gen_type.SetValue(type);
+            Settings::values.frame_gen.SetValue(true);
 #ifdef HAS_FLYHIGH
-                        if (type == Settings::FrameGenType::FlyHigh) {
-                            OfferFlyHighModel(this);
-                        }
+            if (type == Settings::FrameGenType::FlyHigh) {
+                OfferFlyHighModel(this);
+            }
 #endif
-                        UpdateFrameGenButton();
-                    });
+            UpdateFrameGenButton();
+        });
+        action->setCheckable(true);
+        connect(frame_gen, &QMenu::aboutToShow, action, [this, action, type] {
+            action->setChecked(Settings::values.frame_gen.GetValue() &&
+                               Settings::values.frame_gen_type.GetValue() == type);
+            action->setEnabled(!emulation_running);
+        });
 #ifdef HAS_FLYHIGH
-                    if (type == Settings::FrameGenType::FlyHigh) {
-                        context_menu.SetGear(action, [this] {
-                            FlyHighDialog dialog(this);
-                            if (dialog.exec() == QDialog::Accepted) {
-                                dialog.Apply();
-                                config->SaveAllValues();
-                                UpdateFrameGenButton();
-                            }
-                        });
-                    }
-#else
-                    (void)action;
-#endif
+        if (type == Settings::FrameGenType::FlyHigh) {
+            frame_gen->SetGear(action, [this] {
+                FlyHighDialog dialog(this);
+                if (dialog.exec() == QDialog::Accepted) {
+                    dialog.Apply();
+                    config->SaveAllValues();
+                    UpdateFrameGenButton();
                 }
-                context_menu.exec(frame_gen_status_button->mapToGlobal(menu_location));
-                frame_gen_status_button->repaint();
             });
-    statusBar()->insertPermanentWidget(0, frame_gen_status_button);
+        }
+#endif
+    }
 
 #ifdef HAS_RESHADE
-    post_shader_status_button = new QPushButton();
-    post_shader_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
-    post_shader_status_button->setProperty("chip", QStringLiteral("fx"));
-    post_shader_status_button->setFocusPolicy(Qt::NoFocus);
-    post_shader_status_button->setCheckable(true);
-    connect(post_shader_status_button, &QPushButton::clicked, this, [this] {
-        const bool enabled = Settings::values.post_shader_enabled.GetValue();
-        Settings::values.post_shader_enabled.SetValue(!enabled);
+    auto* effects = make_submenu(quick_controls, tr("Post-processing"));
+    post_shader_status_action = effects->addAction(tr("Enable effects"), this, [this] {
+        Settings::values.post_shader_enabled.SetValue(
+            !Settings::values.post_shader_enabled.GetValue());
         UpdatePostShaderText();
     });
+    post_shader_status_action->setCheckable(true);
+    for (const auto& preset : VideoCore::GetFxPresetCatalog()) {
+        effects->addAction(QString::fromStdString(preset.name), this, [this, name = preset.name] {
+            VideoCore::ApplyFxPreset(name);
+            Settings::values.post_shader_enabled.SetValue(true);
+            UpdatePostShaderText();
+        });
+    }
+    effects->addSeparator();
+    effects->addAction(tr("Configure Effects…"), this, &MainWindow::OnPostProcessingShaders);
     UpdatePostShaderText();
-    post_shader_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(post_shader_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-
-                for (auto const& preset : VideoCore::GetFxPresetCatalog()) {
-                    context_menu.addAction(QString::fromStdString(preset.name),
-                                           [this, name = preset.name] {
-                                               VideoCore::ApplyFxPreset(name);
-                                               Settings::values.post_shader_enabled.SetValue(true);
-                                               UpdatePostShaderText();
-                                           });
-                }
-
-                context_menu.addSeparator();
-                context_menu.addAction(tr("Configure Effects..."), this,
-                                       &MainWindow::OnPostProcessingShaders);
-
-                context_menu.exec(post_shader_status_button->mapToGlobal(menu_location));
-                post_shader_status_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, post_shader_status_button);
 #endif
 
-    // setup AA button
-    aa_status_button = new QPushButton();
-    aa_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
-    aa_status_button->setProperty("chip", QStringLiteral("aa"));
-    aa_status_button->setFocusPolicy(Qt::NoFocus);
-    connect(aa_status_button, &QPushButton::clicked, [&] {
-        auto aa_mode = Settings::values.anti_aliasing.GetValue();
-        aa_mode = Settings::AntiAliasing(u32(aa_mode) + 1);
-        if (u32(aa_mode) > u32(Settings::EnumMetadata<Settings::AntiAliasing>::GetLast()))
-            aa_mode = Settings::EnumMetadata<Settings::AntiAliasing>::GetFirst();
-        Settings::values.anti_aliasing.SetValue(aa_mode);
-        aa_status_button->setChecked(true);
-        UpdateAAText();
+    auto* audio = make_submenu(quick_controls, tr("Audio"));
+    auto* slider_action = new QWidgetAction(audio);
+    volume_slider = new QSlider(Qt::Horizontal, audio);
+    volume_slider->setAccessibleName(tr("Volume"));
+    volume_slider->setMinimumWidth(190);
+    volume_slider->setMaximum(200);
+    volume_slider->setPageStep(5);
+    slider_action->setDefaultWidget(volume_slider);
+    audio->addAction(slider_action);
+    const auto set_volume = [this](int percentage) {
+        Settings::values.audio_muted = false;
+        Settings::values.volume.SetValue(static_cast<u8>(percentage));
+        UpdateVolumeUI();
+    };
+    connect(volume_slider, &QSlider::valueChanged, this, set_volume);
+    mute_action = audio->addAction(tr("Mute"), this, &MainWindow::OnMute);
+    mute_action->setCheckable(true);
+    auto* decrease_volume =
+        audio->addAction(tr("Volume down"), this, &MainWindow::OnDecreaseVolume);
+    auto* increase_volume = audio->addAction(tr("Volume up"), this, &MainWindow::OnIncreaseVolume);
+    audio->addAction(tr("Reset volume"), this, [this] {
+        Settings::values.volume.SetValue(100);
+        UpdateVolumeUI();
     });
-    UpdateAAText();
-    aa_status_button->setCheckable(true);
-    aa_status_button->setChecked(true);
-    aa_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(aa_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-                for (auto const& aa_text_pair : ConfigurationShared::anti_aliasing_texts_map) {
-                    const QString label =
-                        ConfigurationShared::TranslateMapText(translator, aa_text_pair.second);
-                    context_menu.addAction(label, [this, aa_text_pair] {
-                        Settings::values.anti_aliasing.SetValue(aa_text_pair.first);
-                        UpdateAAText();
-                    });
-                }
-                context_menu.exec(aa_status_button->mapToGlobal(menu_location));
-                aa_status_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, aa_status_button);
 
-    // Setup Filter button
-    filter_status_button = new QPushButton();
-    filter_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
-    filter_status_button->setProperty("chip", QStringLiteral("filter"));
-    filter_status_button->setFocusPolicy(Qt::NoFocus);
-    connect(filter_status_button, &QPushButton::clicked, this, &MainWindow::OnToggleAdaptingFilter);
-    UpdateFilterText();
-    filter_status_button->setCheckable(true);
-    filter_status_button->setChecked(true);
-    filter_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(filter_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-                for (auto const& filter_text_pair : ConfigurationShared::scaling_filter_texts_map) {
-                    const QString label =
-                        ConfigurationShared::TranslateMapText(translator, filter_text_pair.second);
-                    context_menu.addAction(label, [this, filter_text_pair] {
-                        Settings::values.scaling_filter.SetValue(filter_text_pair.first);
-                        UpdateFilterText();
-                    });
-                }
-                context_menu.exec(filter_status_button->mapToGlobal(menu_location));
-                filter_status_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, filter_status_button);
+    auto* speed = make_submenu(quick_controls, tr("Emulation speed"));
+    speed_limit_action = speed->addAction(tr("Toggle speed limit"), this, [this] {
+        RememberSpeedLimitBeforeHotkey();
+        Settings::ToggleStandardMode();
+        SetFPSSuffix();
+    });
+    speed_limit_action->setEnabled(false);
+    turbo_action = speed->addAction(tr("Turbo"), this, [this] {
+        RememberSpeedLimitBeforeHotkey();
+        Settings::ToggleTurboMode();
+        SetFPSSuffix();
+    });
+    turbo_action->setCheckable(true);
+    turbo_action->setEnabled(false);
+    slow_action = speed->addAction(tr("Slow"), this, [this] {
+        RememberSpeedLimitBeforeHotkey();
+        Settings::ToggleSlowMode();
+        SetFPSSuffix();
+    });
+    slow_action->setCheckable(true);
+    slow_action->setEnabled(false);
 
-    // Setup Dock button
-    dock_status_button = new QPushButton();
-    dock_status_button->setObjectName(QStringLiteral("DockingStatusBarButton"));
-    dock_status_button->setProperty("chip", QStringLiteral("dock"));
-    dock_status_button->setFocusPolicy(Qt::NoFocus);
-    connect(dock_status_button, &QPushButton::clicked, this, &MainWindow::OnToggleDockedMode);
-    dock_status_button->setCheckable(true);
-    UpdateDockedButton();
-    dock_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(dock_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
+    quick_controls->addSeparator();
+    refresh_action =
+        quick_controls->addAction(tr("Rescan library"), this, &MainWindow::OnGameListRefresh);
+    quick_controls->addAction(ui->action_Show_Performance_Overlay);
+    auto* session = make_submenu(quick_controls, tr("Session status"));
+    firmware_action = session->addAction(tr("Firmware not installed"));
+    firmware_action->setEnabled(false);
+    auto* multiplayer = session->addAction(tr("Multiplayer"), multiplayer_state,
+                                           &MultiplayerState::OnOpenNetworkRoom);
+    tas_action = session->addAction(QString{});
+    tas_action->setEnabled(false);
+    auto* message = session->addAction(tr("No recent messages"));
+    message->setEnabled(false);
+    auto* performance = session->addAction(QString{});
+    performance->setEnabled(false);
+    connect(ingame_bar, &QStatusBar::messageChanged, this, [message](const QString& text) {
+        if (!text.isEmpty()) {
+            message->setText(text);
+        }
+    });
+    connect(session, &QMenu::aboutToShow, this, [this, multiplayer, performance] {
+        const QString status = multiplayer_state->GetStatusText()->text();
+        multiplayer->setText(status.isEmpty() ? tr("Multiplayer") : status);
+        multiplayer->setIcon(QIcon(multiplayer_state->GetStatusIcon()->pixmap()));
+        tas_action->setVisible(emulation_running && Settings::values.tas_enable.GetValue());
+        performance->setText(session_status_text);
+        performance->setVisible(emulation_running && !session_status_text.isEmpty());
+    });
 
-                for (auto const& pair : ConfigurationShared::use_docked_mode_texts_map) {
-                    const QString label =
-                        ConfigurationShared::TranslateMapText(translator, pair.second);
-                    context_menu.addAction(label, [this, &pair] {
-                        if (pair.first != Settings::values.use_docked_mode.GetValue()) {
-                            OnToggleDockedMode();
-                        }
-                    });
-                }
-                context_menu.exec(dock_status_button->mapToGlobal(menu_location));
-                dock_status_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, dock_status_button);
+    ingame_menu = new Spotlight::InGameMenu({.pause = ui->action_Pause,
+                                             .restart = ui->action_Restart,
+                                             .stop = ui->action_Stop,
+                                             .capture = ui->action_Capture_Screenshot,
+                                             .fullscreen = ui->action_Fullscreen,
+                                             .settings = ui->action_Configure_Current_Game,
+                                             .frame_gen = frame_gen_status_action,
+                                             .frame_gen_options = frame_gen,
+                                             .quick_controls = quick_controls,
+                                             .turbo = turbo_action,
+                                             .effects = post_shader_status_action,
+                                             .decrease_volume = decrease_volume,
+                                             .increase_volume = increase_volume},
+                                            this);
+    connect(ingame_menu, &Spotlight::InGameMenu::Dismissed, this,
+            [this] { ingame_bar->SetMenuOpen(false); });
+    connect(ingame_menu, &Spotlight::InGameMenu::DockedChanged, this, [this](bool docked) {
+        if (Settings::IsDockedMode() != docked) {
+            OnToggleDockedMode();
+        }
+    });
+    connect(ingame_menu, &Spotlight::InGameMenu::VolumeChanged, this, set_volume);
+    connect(ingame_bar, &Spotlight::InGameBar::QuickControlsRequested, this,
+            [this] { ingame_bar->OpenQuickControls(quick_controls); });
+    connect(ingame_bar, &Spotlight::InGameBar::MenuRequested, this, &MainWindow::ToggleInGameMenu);
+    auto* shaders = ingame_bar->Shaders();
+    connect(shaders, &Spotlight::ShaderChip::AboutToOpen, this, [this, shaders] {
+        const u64 program = QtCommon::system->GetApplicationProcessProgramID();
+        shaders->SetPrecompile(program != 0, program != 0 && ShaderWarmRequested(program));
+    });
+    connect(shaders, &Spotlight::ShaderChip::PrecompileChanged, this, [this](bool checked) {
+        const u64 program = QtCommon::system->GetApplicationProcessProgramID();
+        if (program != 0) {
+            OnGameListPrecompileShaders(program, current_game_path.toStdString(), checked);
+        }
+    });
+    connect(shaders, &Spotlight::ShaderChip::ShaderSettingsRequested,
+            ui->action_Configure_Current_Game, &QAction::trigger);
 
-    // Setup GPU Accuracy button
-    gpu_accuracy_button = new QPushButton();
-    gpu_accuracy_button->setObjectName(QStringLiteral("GPUStatusBarButton"));
-    gpu_accuracy_button->setProperty("chip", QStringLiteral("gpu"));
-    gpu_accuracy_button->setCheckable(true);
-    gpu_accuracy_button->setFocusPolicy(Qt::NoFocus);
-    connect(gpu_accuracy_button, &QPushButton::clicked, this, &MainWindow::OnToggleGpuAccuracy);
-    UpdateGPUAccuracyButton();
-    gpu_accuracy_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(gpu_accuracy_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-
-                for (auto const& gpu_accuracy_pair : ConfigurationShared::gpu_accuracy_texts_map) {
-                    const QString label =
-                        ConfigurationShared::TranslateMapText(translator, gpu_accuracy_pair.second);
-                    context_menu.addAction(label, [this, gpu_accuracy_pair] {
-                        Settings::values.gpu_accuracy.SetValue(gpu_accuracy_pair.first);
-                        UpdateGPUAccuracyButton();
-                    });
-                }
-                context_menu.exec(gpu_accuracy_button->mapToGlobal(menu_location));
-                gpu_accuracy_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, gpu_accuracy_button);
-
-    // Setup Renderer API button
-    renderer_status_button = new QPushButton();
-    renderer_status_button->setObjectName(QStringLiteral("RendererStatusBarButton"));
-    renderer_status_button->setCheckable(true);
-    renderer_status_button->setFocusPolicy(Qt::NoFocus);
-    connect(renderer_status_button, &QPushButton::clicked, this, &MainWindow::OnToggleGraphicsAPI);
-    UpdateAPIText();
-    renderer_status_button->setCheckable(true);
-    renderer_status_button->setChecked(Settings::values.renderer_backend.GetValue() ==
-                                       Settings::RendererBackend::Vulkan);
-    renderer_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(renderer_status_button, &QPushButton::customContextMenuRequested,
-            [this](const QPoint& menu_location) {
-                QMenu context_menu;
-
-                for (auto const& renderer_backend_pair :
-                     ConfigurationShared::renderer_backend_texts_map) {
-                    if (renderer_backend_pair.first == Settings::RendererBackend::Null) {
-                        continue;
-                    }
-                    const QString label = ConfigurationShared::TranslateMapText(
-                        translator, renderer_backend_pair.second);
-                    context_menu.addAction(label, [this, renderer_backend_pair] {
-                        Settings::values.renderer_backend.SetValue(renderer_backend_pair.first);
-                        UpdateAPIText();
-                    });
-                }
-                context_menu.exec(renderer_status_button->mapToGlobal(menu_location));
-                renderer_status_button->repaint();
-            });
-    statusBar()->insertPermanentWidget(0, renderer_status_button);
-
-    // Setup Refresh Button
-    refresh_button = new QPushButton();
-    refresh_button->setIcon(QIcon::fromTheme(QStringLiteral("view-refresh")));
-    refresh_button->setObjectName(QStringLiteral("RefreshButton"));
-    refresh_button->setFocusPolicy(Qt::NoFocus);
-    connect(refresh_button, &QPushButton::clicked, this, &MainWindow::OnGameListRefresh);
-
-    statusBar()->insertPermanentWidget(0, refresh_button);
-
-    statusBar()->setVisible(true);
-    setStyleSheet(QStringLiteral("QStatusBar::item{border: none;}"));
+    fullscreen_hint =
+        new Spotlight::FullscreenHint(Spotlight::FullscreenHint::Kind::Controls, this);
+    fullscreen_shader_toast =
+        new Spotlight::FullscreenHint(Spotlight::FullscreenHint::Kind::Shaders, this);
+    UpdateStatusButtons();
 }
 
 void MainWindow::InitializeDebugWidgets() {
@@ -1642,6 +1626,8 @@ void MainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Leave_Room, QStringLiteral("Leave Room"));
     LinkActionShortcut(ui->action_Configure, QStringLiteral("Configure"));
     LinkActionShortcut(ui->action_Configure_Current_Game, QStringLiteral("Configure Current Game"));
+    LinkActionShortcut(ingame_menu_action, QStringLiteral("In-game Menu"), true);
+    ingame_bar->SetMenuShortcut(ingame_menu_action->shortcut());
 
     static const QString main_window = QStringLiteral("Main Window");
     const auto connect_shortcut = [&]<typename Fn>(const QString& action_name, const Fn& function) {
@@ -1655,7 +1641,6 @@ void MainWindow::InitializeHotkeys() {
         connect(controller_hotkey, &ControllerShortcut::Activated, this, function,
                 Qt::QueuedConnection);
     };
-
     connect_shortcut(QStringLiteral("Exit Fullscreen"), [&] {
         if (emulation_running && ui->action_Fullscreen->isChecked()) {
             ui->action_Fullscreen->setChecked(false);
@@ -1674,32 +1659,10 @@ void MainWindow::InitializeHotkeys() {
     connect_shortcut(QStringLiteral("Audio Volume Down"), &MainWindow::OnDecreaseVolume);
     connect_shortcut(QStringLiteral("Audio Volume Up"), &MainWindow::OnIncreaseVolume);
 
-    connect_shortcut(QStringLiteral("Toggle Framerate Limit"), [this] {
-        if (!emulation_running) {
-            return;
-        }
-        RememberSpeedLimitBeforeHotkey();
-        Settings::ToggleStandardMode();
-        SetFPSSuffix();
-    });
-
-    connect_shortcut(QStringLiteral("Toggle Turbo Speed"), [this] {
-        if (!emulation_running) {
-            return;
-        }
-        RememberSpeedLimitBeforeHotkey();
-        Settings::ToggleTurboMode();
-        SetFPSSuffix();
-    });
-
-    connect_shortcut(QStringLiteral("Toggle Slow Speed"), [this] {
-        if (!emulation_running) {
-            return;
-        }
-        RememberSpeedLimitBeforeHotkey();
-        Settings::ToggleSlowMode();
-        SetFPSSuffix();
-    });
+    connect_shortcut(QStringLiteral("Toggle Framerate Limit"),
+                     [this] { speed_limit_action->trigger(); });
+    connect_shortcut(QStringLiteral("Toggle Turbo Speed"), [this] { turbo_action->trigger(); });
+    connect_shortcut(QStringLiteral("Toggle Slow Speed"), [this] { slow_action->trigger(); });
 
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
@@ -1728,7 +1691,7 @@ void MainWindow::SetDefaultUIGeometry() {
 }
 
 void MainWindow::RestoreUIState() {
-    setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+    setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
     restoreGeometry(UISettings::values.geometry);
     // Work-around because the games list isn't supposed to be full screen
     if (isFullScreen()) {
@@ -1747,11 +1710,8 @@ void MainWindow::RestoreUIState() {
 
     ui->action_Enable_Overlay_Applet->setChecked(Settings::values.enable_overlay.GetValue());
 
-    ui->action_Show_Filter_Bar->setChecked(UISettings::values.show_filter_bar.GetValue());
-    game_list->SetFilterVisible(ui->action_Show_Filter_Bar->isChecked());
-
     ui->action_Show_Status_Bar->setChecked(UISettings::values.show_status_bar.GetValue());
-    statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+    OnToggleStatusBar();
 
     ui->action_Show_Performance_Overlay->setChecked(
         UISettings::values.show_perf_overlay.GetValue());
@@ -1902,7 +1862,7 @@ void MainWindow::ConnectMenuEvents() {
     // View
     connect_menu(ui->action_Fullscreen, &MainWindow::ToggleFullscreen);
     connect_menu(ui->action_Single_Window_Mode, &MainWindow::ToggleWindowMode);
-    connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnToggleFilterBar);
+    connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnFocusLibrarySearch);
     connect_menu(ui->action_Show_Status_Bar, &MainWindow::OnToggleStatusBar);
     connect_menu(ui->action_Show_Performance_Overlay, &MainWindow::OnTogglePerfOverlay);
 #ifdef HAS_RESHADE
@@ -2113,6 +2073,10 @@ void MainWindow::UpdateMenuState() {
     for (QAction* action : running_actions) {
         action->setEnabled(emulation_running);
     }
+    speed_limit_action->setEnabled(emulation_running);
+    turbo_action->setEnabled(emulation_running);
+    slow_action->setEnabled(emulation_running);
+    ingame_menu_action->setEnabled(emulation_running);
 
     ui->action_Firmware_From_Folder->setEnabled(!emulation_running);
     ui->action_Firmware_From_ZIP->setEnabled(!emulation_running);
@@ -2698,6 +2662,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             loading_screen->Prepare(QtCommon::system->GetAppLoader());
             loading_screen->show();
             render_window->hide();
+            OnToggleStatusBar();
         },
         Qt::QueuedConnection);
 
@@ -2711,18 +2676,17 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // Update the GUI
     UpdateStatusButtons();
     if (ui->action_Single_Window_Mode->isChecked()) {
-        game_list->hide();
-        game_list_placeholder->hide();
+        launcher->SetInlineEmulation(true);
     }
     status_bar_update_timer.start(500);
-    renderer_status_button->setDisabled(true);
-    frame_gen_status_button->setDisabled(true);
+    renderer_status_action->setDisabled(true);
+    frame_gen_status_action->setDisabled(true);
     frame_gen_state = VideoCore::FrameGenState::Pending;
     frame_gen_frames = 0;
     frame_gen_generating = false;
     frame_gen_fps = 0.0;
     frame_gen_fps_timer.invalidate();
-    refresh_button->setDisabled(true);
+    refresh_action->setDisabled(true);
     SetFPSSuffix();
 
     if (UISettings::values.hide_mouse || Settings::values.mouse_panning) {
@@ -2760,6 +2724,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (auto custom_title = QtCommon::Game::ReadCustomTitle(title_id); !custom_title.empty()) {
         title_name = std::move(custom_title);
     }
+    const QString display_title = QString::fromStdString(title_name);
     const bool is_64bit = QtCommon::system->Kernel().ApplicationProcess()->Is64Bit();
     const auto instruction_set_suffix = is_64bit ? tr("(64-bit)") : tr("(32-bit)");
     title_name = tr("%1 %2", "%1 is the title name. %2 indicates if the title is 64-bit or 32-bit")
@@ -2768,11 +2733,14 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     LOG_INFO(Frontend, "Booting game: {:016X} | {} | {}", title_id, title_name, title_version);
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
+    running_title_bar->SetGameTitle(display_title);
 
-    loading_screen->Prepare(QtCommon::system->GetAppLoader());
+    loading_screen->Prepare(QtCommon::system->GetAppLoader(), display_title,
+                            QString::fromStdString(title_version));
     loading_screen->show();
 
     emulation_running = true;
+    fullscreen_hint_shown = false;
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
     } else if (!(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
@@ -2825,6 +2793,8 @@ bool MainWindow::OnShutdownBegin() {
     if (ui->action_Fullscreen->isChecked()) {
         HideFullscreen();
     }
+    ingame_bar->hide();
+    ingame_menu->hide();
 
     AllowOSSleep();
 
@@ -3037,13 +3007,8 @@ void MainWindow::OnEmulationStopped() {
     render_window->hide();
     loading_screen->hide();
     loading_screen->Clear();
-    if (game_list->IsEmpty()) {
-        game_list_placeholder->show();
-    } else {
-        game_list->show();
-    }
-    game_list->SetFilterFocus();
-    tas_label->clear();
+    launcher->SetInlineEmulation(false);
+    tas_action->setText({});
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
     render_window->FinalizeCamera();
@@ -3060,19 +3025,14 @@ void MainWindow::OnEmulationStopped() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
-    shader_building_label->setVisible(false);
-    res_scale_label->setVisible(false);
-    emu_speed_label->setVisible(false);
-    game_fps_label->setVisible(false);
-    dlss_status_label->setVisible(false);
-    emu_frametime_label->setVisible(false);
-    renderer_status_button->setEnabled(!UISettings::values.has_broken_vulkan);
-    frame_gen_status_button->setEnabled(true);
-    refresh_button->setEnabled(true);
-
-    if (!firmware_label->text().isEmpty()) {
-        firmware_label->setVisible(true);
-    }
+    ingame_bar->hide();
+    ingame_menu->hide();
+    ingame_bar->Shaders()->SetProgress(0, 0);
+    ingame_bar->SetStats(0, 0, 0, false, {});
+    session_status_text.clear();
+    renderer_status_action->setEnabled(!UISettings::values.has_broken_vulkan);
+    frame_gen_status_action->setEnabled(true);
+    refresh_action->setEnabled(true);
 
     current_game_path.clear();
 
@@ -3140,6 +3100,7 @@ void MainWindow::StoreRecentFile(const QString& filename) {
 }
 
 void MainWindow::UpdateRecentFiles() {
+    game_list->RefreshLibraryOrder();
     const int num_recent_files =
         (std::min)(static_cast<int>(UISettings::values.recent_files.size()), max_recent_files_item);
 
@@ -3616,11 +3577,8 @@ void MainWindow::OnGameListAddDirectory() {
 }
 
 void MainWindow::OnGameListShowList(bool show) {
-    if (emulation_running && ui->action_Single_Window_Mode->isChecked())
-        return;
-    game_list->setVisible(show);
-    game_list_placeholder->setVisible(!show);
-};
+    launcher->SetLibraryAvailable(show);
+}
 
 void MainWindow::OnGameListOpenPerGameProperties(u64 title_id, const std::string& file) {
     {
@@ -4015,7 +3973,7 @@ bool MainWindow::ConfirmShutdownGame() {
 void MainWindow::OnLoadComplete() {
     loading_screen->OnLoadComplete();
 
-    perf_overlay = new PerformanceOverlay(this);
+    perf_overlay = new PerformanceOverlay(this, render_window);
     perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
 
     connect(perf_overlay, &PerformanceOverlay::closed, perf_overlay,
@@ -4212,6 +4170,9 @@ bool MainWindow::UsingExclusiveFullscreen() {
 }
 
 void MainWindow::ShowFullscreen() {
+    ingame_fullscreen = true;
+    ingame_bar->hide();
+    ingame_menu->hide();
     const auto show_fullscreen = [this](QWidget* window) {
         if (UsingExclusiveFullscreen()) {
             window->showFullScreen();
@@ -4232,43 +4193,60 @@ void MainWindow::ShowFullscreen() {
     if (ui->action_Single_Window_Mode->isChecked()) {
         UISettings::values.geometry = saveGeometry();
 
-        ui->menubar->hide();
-        statusBar()->hide();
+        launcher->SetInlineFullscreen(true);
+        if constexpr (!Spotlight::ClientFrame) {
+            ui->menubar->hide();
+        }
 
         show_fullscreen(this);
     } else {
         UISettings::values.renderwindow_geometry = render_window->saveGeometry();
         show_fullscreen(render_window);
     }
+    if (!fullscreen_hint_shown) {
+        fullscreen_hint_shown = true;
+        fullscreen_hint->ShowControls(
+            ui->action_Single_Window_Mode->isChecked() ? static_cast<QWidget*>(this)
+                                                       : render_window,
+            ingame_menu_action->shortcut(), ui->action_Fullscreen->shortcut());
+    }
 }
 
 void MainWindow::HideFullscreen() {
+    ingame_fullscreen = false;
+    fullscreen_shader_active = false;
+    ingame_menu->hide();
+    fullscreen_hint->hide();
+    fullscreen_shader_toast->hide();
     if (ui->action_Single_Window_Mode->isChecked()) {
         if (UsingExclusiveFullscreen()) {
             showNormal();
             restoreGeometry(UISettings::values.geometry);
         } else {
             hide();
-            setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+            setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
             restoreGeometry(UISettings::values.geometry);
             raise();
             show();
         }
 
-        statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
-        ui->menubar->show();
+        launcher->SetInlineFullscreen(false);
+        if constexpr (!Spotlight::ClientFrame) {
+            ui->menubar->show();
+        }
     } else {
         if (UsingExclusiveFullscreen()) {
             render_window->showNormal();
             render_window->restoreGeometry(UISettings::values.renderwindow_geometry);
         } else {
             render_window->hide();
-            render_window->setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+            render_window->setWindowFlag(Qt::FramelessWindowHint, false);
             render_window->restoreGeometry(UISettings::values.renderwindow_geometry);
             render_window->raise();
             render_window->show();
         }
     }
+    OnToggleStatusBar();
 }
 
 void MainWindow::ToggleWindowMode() {
@@ -4280,7 +4258,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->setFocus();
-            game_list->hide();
+            launcher->SetInlineEmulation(true);
         }
 
     } else {
@@ -4291,7 +4269,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->RestoreGeometry();
-            game_list->show();
+            launcher->SetInlineEmulation(false);
         }
     }
 }
@@ -4313,8 +4291,9 @@ void MainWindow::ResetWindowSize(u32 width, u32 height) {
     }
     const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
     const auto status_bar_height = (single_window && show_status_bar) ? statusBar()->height() : 0;
-    const auto menu_bar_height = single_window ? menuBar()->height() : 0;
-    const auto extra_height = menu_bar_height + status_bar_height;
+    const auto menu_bar_height = single_window && menuBar()->isVisible() ? menuBar()->height() : 0;
+    const auto title_bar_height = running_title_bar->isVisible() ? running_title_bar->height() : 0;
+    const auto extra_height = menu_bar_height + title_bar_height + status_bar_height;
 
     auto* current_screen = this->screen();
     if (!current_screen) {
@@ -4431,6 +4410,7 @@ void MainWindow::OnConfigure() {
     const u64 old_nextendo_pid = nextendo_pid();
 
     Settings::SetConfiguringGlobal(true);
+    UISettings::values.fullscreen = ui->action_Fullscreen->isChecked();
     ConfigureDialog configure_dialog(this, hotkey_registry, input_subsystem.get(),
                                      vk_device_records, *QtCommon::system,
                                      !multiplayer_state->IsHostingPublicRoom());
@@ -4438,6 +4418,10 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnLanguageChanged);
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
+    connect(&configure_dialog, &ConfigureDialog::OpenGameFolderRequested, this,
+            &MainWindow::OnGameListOpenDirectory);
+    connect(&configure_dialog, &ConfigureDialog::FullscreenOnStartChanged,
+            ui->action_Fullscreen, &QAction::setChecked);
 
     const auto result = configure_dialog.exec();
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
@@ -4547,12 +4531,16 @@ void MainWindow::OnConfigure() {
     }
 
     if (!UISettings::values.has_broken_vulkan) {
-        renderer_status_button->setEnabled(!emulation_running);
+        renderer_status_action->setEnabled(!emulation_running);
     }
 
     UpdateStatusButtons();
     controller_dialog->refreshConfiguration();
     QtCommon::system->ApplySettings();
+
+    if (configure_dialog.ReopenRequested()) {
+        QTimer::singleShot(0, this, &MainWindow::OnConfigure);
+    }
 }
 
 void MainWindow::OnConfigureTas() {
@@ -4692,7 +4680,6 @@ void MainWindow::OnToggleAdaptingFilter() {
     if (u32(filter) > u32(Settings::EnumMetadata<Settings::ScalingFilter>::GetLast()))
         filter = Settings::EnumMetadata<Settings::ScalingFilter>::GetFirst();
     Settings::values.scaling_filter.SetValue(filter);
-    filter_status_button->setChecked(true);
     UpdateFilterText();
 }
 
@@ -4724,7 +4711,6 @@ void MainWindow::OnToggleGraphicsAPI() {
         break;
     }
     Settings::values.renderer_backend.SetValue(api);
-    renderer_status_button->setChecked(api == Settings::RendererBackend::Vulkan);
     UpdateAPIText();
 }
 
@@ -4887,6 +4873,9 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     // Artwork saved here wins over a SteamGridDB lookup still running for the game.
     connect(&dialog, &ConfigurePerGame::CustomArtworkChanged, game_list,
             &GameList::OnCustomArtworkChanged);
+    connect(&dialog, &ConfigurePerGame::OpenSaveDataRequested, this, [this, title_id, file_name] {
+        OnGameListOpenFolder(title_id, GameListOpenTarget::SaveData, file_name);
+    });
     connect(&dialog, &ConfigurePerGame::BrowseModsRequested, this, [&] {
         QSet<QString> store_toggled;
         const bool changed = OpenModStore(&dialog, title_id, file_name, store_toggled);
@@ -5161,16 +5150,13 @@ void MainWindow::OnDataDialog() {
     OnGameListRefresh();
 }
 
-void MainWindow::OnToggleFilterBar() {
-    game_list->SetFilterVisible(ui->action_Show_Filter_Bar->isChecked());
-    if (ui->action_Show_Filter_Bar->isChecked())
-        game_list->SetFilterFocus();
-    else
-        game_list->ClearFilter();
+void MainWindow::OnFocusLibrarySearch() {
+    game_list->SetFilterFocus();
 }
 
 void MainWindow::OnToggleStatusBar() {
-    statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+    ingame_bar->setVisible(emulation_running && !ingame_fullscreen &&
+                           !loading_screen->isVisible() && ui->action_Show_Status_Bar->isChecked());
 }
 
 void MainWindow::OnTogglePerfOverlay() {
@@ -5430,7 +5416,9 @@ void MainWindow::OnGameListPrecompileShaders(u64 program_id, const std::string& 
     if (on) {
         Config::SaveGameValue(fmt::format("{:016X}", program_id), Settings::values.precache_shaders,
                               std::to_string(static_cast<u32>(Settings::PrecacheShaders::Always)));
-        OnGameListPrepareShaderWarm(program_id, game_path);
+        if (!emulation_running) {
+            OnGameListPrepareShaderWarm(program_id, game_path);
+        }
     }
 }
 
@@ -6085,6 +6073,7 @@ void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view
     if (title_name.empty()) {
         setWindowTitle(QString::fromStdString(window_title));
     } else {
+        running_title_bar->SetGameTitle(QString::fromUtf8(title_name.data(), title_name.size()));
         const auto run_title = [window_title, title_name, title_version, gpu_vendor]() {
             if (title_version.empty()) {
                 return fmt::format("{} | {} | {}", window_title, title_name, gpu_vendor);
@@ -6155,10 +6144,8 @@ void MainWindow::UpdateStatusBar() {
         return;
     }
 
-    if (Settings::values.tas_enable)
-        tas_label->setText(GetTasStateDescription());
-    else
-        tas_label->clear();
+    tas_action->setText(Settings::values.tas_enable.GetValue() ? GetTasStateDescription()
+                                                               : QString{});
 
     auto results = QtCommon::system->GetAndResetPerfStats();
     auto& shader_notify = QtCommon::system->GPU().ShaderNotify();
@@ -6208,37 +6195,23 @@ void MainWindow::UpdateStatusBar() {
         }
     }
     dlss_evaluations = dlss.evaluations;
-    dlss_status_label->setText(dlss_status_text);
-    dlss_status_label->setVisible(!dlss_status_text.isEmpty());
+    const int left = std::max(shader_notify.ShadersLeft(), 0);
+    ingame_bar->Shaders()->SetProgress(shaders_building, left);
+    if (ingame_fullscreen && left > 0) {
+        if (!fullscreen_shader_active) {
+            fullscreen_shader_active = true;
+            fullscreen_shader_toast->ShowShaders(ui->action_Single_Window_Mode->isChecked()
+                                                     ? static_cast<QWidget*>(this)
+                                                     : render_window,
+                                                 shaders_building);
+        } else {
+            fullscreen_shader_toast->SetShaderCount(shaders_building);
+        }
+    } else {
+        fullscreen_shader_active = false;
+    }
 
     emit statsUpdated(results, shader_notify);
-
-    if (shaders_building > 0) {
-        // The count is every build since the status was last idle: a background prebuild of
-        // thousands only showed its total, never how far along it was. "0 left" stays up for the
-        // moment the label lingers once all are done.
-        const int left = (std::max)(shader_notify.ShadersLeft(), 0);
-        shader_building_label->setText(
-            left != shaders_building
-                ? tr("Building: %n shader(s), %1 left", "", shaders_building).arg(left)
-                : tr("Building: %n shader(s)", "", shaders_building));
-        shader_building_label->setVisible(true);
-    } else {
-        shader_building_label->setVisible(false);
-    }
-
-    const auto res_info = Settings::values.resolution_info;
-    const auto res_scale = res_info.up_factor;
-    res_scale_label->setText(
-        tr("Scale: %1x", "%1 is the resolution scaling factor").arg(res_scale));
-
-    if (Settings::values.use_speed_limit.GetValue()) {
-        emu_speed_label->setText(tr("Speed: %1% / %2%")
-                                     .arg(results.emulation_speed * 100.0, 0, 'f', 0)
-                                     .arg(Settings::SpeedLimit()));
-    } else {
-        emu_speed_label->setText(tr("Speed: %1%").arg(results.emulation_speed * 100.0, 0, 'f', 0));
-    }
 
     QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
     QString fpsSuffix = m_fpsSuffix;
@@ -6258,83 +6231,129 @@ void MainWindow::UpdateStatusBar() {
     if (!fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(fpsSuffix);
 
-    game_fps_label->setText(fpsText);
-
-    emu_frametime_label->setText(tr("Frame: %1 ms").arg(results.frametime * 1000.0, 0, 'f', 2));
-
+    QStringList status{fpsText, tr("Frame: %1 ms").arg(results.frametime * 1000.0, 0, 'f', 2),
+                       tr("Scale: %1×").arg(Settings::values.resolution_info.up_factor)};
+    const bool limited = Settings::values.use_speed_limit.GetValue();
+    const auto speed_limit = Settings::SpeedLimit();
+    if (!Settings::values.use_multi_core.GetValue()) {
+        const double speed = results.emulation_speed * 100.0;
+        status << (limited
+                       ? tr("Speed: %1% / %2%").arg(speed, 0, 'f', 0).arg(speed_limit)
+                       : tr("Speed: %1%").arg(speed, 0, 'f', 0));
+    }
+    if (!dlss_status_text.isEmpty()) {
+        status << dlss_status_text;
+    }
+    session_status_text = status.join(QStringLiteral(" · "));
+    const bool at_target = limited && std::abs(results.emulation_speed * 100.0 - speed_limit) < 3.0;
+    ingame_bar->SetSpeedStatus(!limited           ? tr("Speed unlocked")
+                               : speed_limit != 100 ? tr("Speed %1%").arg(speed_limit)
+                                                    : QString{});
+    ingame_bar->SetStats(results.average_game_fps, frame_gen_fps, results.frametime * 1000.0,
+                         at_target, session_status_text);
     UpdateFrameGenButton();
+    UpdateInGameGraphicsSummary();
+}
 
-    res_scale_label->setVisible(true);
-    emu_speed_label->setVisible(!Settings::values.use_multi_core.GetValue());
-    game_fps_label->setVisible(true);
-    emu_frametime_label->setVisible(true);
-    firmware_label->setVisible(false);
+void MainWindow::ToggleInGameMenu() {
+    if (ingame_menu->isVisible()) {
+        ingame_menu->hide();
+        return;
+    }
+    if (!emulation_running || !QtCommon::system->IsPoweredOn() ||
+        QtCommon::system->IsShuttingDown() || !render_window->isVisible()) {
+        return;
+    }
+
+    const u64 program = QtCommon::system->GetApplicationProcessProgramID();
+    auto name = QtCommon::Game::ReadCustomTitle(program);
+    if (name.empty() && QtCommon::system->GetGameName(name) != Loader::ResultStatus::Success) {
+        name.clear();
+    }
+    const QString title = name.empty() ? QFileInfo(current_game_path).completeBaseName()
+                                       : QString::fromStdString(name);
+    auto& loader = QtCommon::system->GetAppLoader();
+    auto image = QtCommon::Game::ReadCustomArtwork(program);
+    QPixmap icon;
+    if (!image.empty()) {
+        icon.loadFromData(image.data(), static_cast<uint>(image.size()));
+    }
+    if (icon.isNull() && loader.ReadIcon(image) == Loader::ResultStatus::Success) {
+        icon.loadFromData(image.data(), static_cast<uint>(image.size()));
+    }
+    const u64 minutes = play_time_manager->GetPlayTime(program) / 60;
+    const QString play_time = minutes >= 60
+                                  ? tr("%1h %2m played").arg(minutes / 60).arg(minutes % 60)
+                                  : tr("%1m played").arg(minutes);
+    UpdateStatusButtons();
+    UpdateInGameGraphicsSummary();
+    ingame_menu->Open(render_window, ingame_menu_action->shortcut(), icon, title, play_time);
+    ingame_bar->SetMenuOpen(true);
+}
+
+void MainWindow::UpdateInGameGraphicsSummary() {
+    const auto filter = Settings::values.scaling_filter.GetValue();
+    const auto filter_text = ConfigurationShared::TranslateMapText(
+        translator, ConfigurationShared::scaling_filter_texts_map.at(filter));
+    ingame_menu->SetGraphicsSummary(
+        tr("%1× · %2").arg(Settings::values.resolution_info.up_factor).arg(filter_text),
+        frame_gen_status_text);
 }
 
 void MainWindow::UpdateGPUAccuracyButton() {
     const auto gpu_accuracy = Settings::values.gpu_accuracy.GetValue();
     const auto gpu_accuracy_text = ConfigurationShared::TranslateMapText(
         translator, ConfigurationShared::gpu_accuracy_texts_map.find(gpu_accuracy)->second);
-    gpu_accuracy_button->setText(gpu_accuracy_text.toUpper());
-    gpu_accuracy_button->setChecked(gpu_accuracy != Settings::GpuAccuracy::Low);
+    gpu_accuracy_action->setText(tr("GPU accuracy: %1").arg(gpu_accuracy_text));
 }
 
 void MainWindow::UpdateDockedButton() {
-    const auto console_mode = Settings::values.use_docked_mode.GetValue();
-    dock_status_button->setChecked(Settings::IsDockedMode());
-    const QString docked_text = ConfigurationShared::TranslateMapText(
-        translator, ConfigurationShared::use_docked_mode_texts_map.find(console_mode)->second);
-    dock_status_button->setText(docked_text.toUpper());
+    const bool docked = Settings::IsDockedMode();
+    const QString mode = docked ? tr("Docked") : tr("Handheld");
+    dock_status_action->setText(tr("Console mode: %1").arg(mode));
+    ingame_menu->SetConsoleMode(docked);
+    UpdateAPIText();
 }
 
 void MainWindow::UpdateAPIText() {
     const auto api = Settings::values.renderer_backend.GetValue();
     const auto renderer_status_text = ConfigurationShared::TranslateMapText(
         translator, ConfigurationShared::renderer_backend_texts_map.find(api)->second);
-    renderer_status_button->setText(renderer_status_text.toUpper());
+    renderer_status_action->setText(tr("Renderer: %1").arg(renderer_status_text));
+    ingame_bar->SetConfiguration(renderer_status_text,
+                                 Settings::IsDockedMode() ? tr("Docked") : tr("Handheld"));
 }
 
 void MainWindow::UpdateFilterText() {
     const auto filter = Settings::values.scaling_filter.GetValue();
     const auto filter_text = ConfigurationShared::TranslateMapText(
         translator, ConfigurationShared::scaling_filter_texts_map.find(filter)->second);
-    filter_status_button->setText(filter_text.toUpper());
+    filter_status_action->setText(tr("Scaling filter: %1").arg(filter_text));
 }
 
 void MainWindow::UpdateAAText() {
     const auto aa_mode = Settings::values.anti_aliasing.GetValue();
     const auto aa_text = ConfigurationShared::TranslateMapText(
         translator, ConfigurationShared::anti_aliasing_texts_map.find(aa_mode)->second);
-    aa_status_button->setText(aa_mode == Settings::AntiAliasing::None ? tr("NO AA")
-                                                                      : aa_text.toUpper());
+    aa_status_action->setText(tr("Anti-aliasing: %1").arg(aa_text));
 }
 
 #ifdef HAS_RESHADE
 void MainWindow::UpdatePostShaderText() {
     const bool enabled = Settings::values.post_shader_enabled.GetValue();
-    post_shader_status_button->setChecked(enabled);
-
-    if (!enabled) {
-        post_shader_status_button->setText(tr("NO FX"));
-        return;
-    }
-
-    const std::string preset = VideoCore::GetActiveFxPreset();
-    if (preset.empty()) {
-        post_shader_status_button->setText(tr("FX"));
-        return;
-    }
-
-    post_shader_status_button->setText(QString::fromStdString(preset).toUpper());
+    post_shader_status_action->setChecked(enabled);
+    const std::string preset = enabled ? VideoCore::GetActiveFxPreset() : std::string{};
+    post_shader_status_action->setToolTip(preset.empty() ? QString{}
+                                                         : QString::fromStdString(preset));
 }
 #endif
 
 void MainWindow::UpdateFrameGenButton() {
     const bool enabled = Settings::values.frame_gen.GetValue();
-    frame_gen_status_button->setChecked(enabled);
+    frame_gen_status_action->setChecked(enabled);
     if (!enabled) {
-        frame_gen_status_button->setText(tr("NO FG"));
-        frame_gen_status_button->setToolTip(tr("Frame generation is off."));
+        frame_gen_status_text = tr("Off");
+        frame_gen_status_action->setToolTip(tr("Frame generation is off."));
         return;
     }
 
@@ -6356,8 +6375,8 @@ void MainWindow::UpdateFrameGenButton() {
                              : ConfigurationShared::TranslateMapText(translator, type_text).toUpper();
     const u32 target_rate = Settings::values.frame_gen_target_rate.GetValue();
     const QString mode = target_rate == 0
-                             ? tr("FG %1 %2X").arg(type).arg(Settings::FrameGenMultiplier())
-                             : tr("FG %1 AUTO").arg(type);
+                             ? tr("%1 ×%2").arg(type).arg(Settings::FrameGenMultiplier())
+                             : tr("%1 Auto").arg(type);
     const QString target = target_rate == 0
                                ? QString()
                                : tr(" It adds up to %1 frames per game frame to reach %2 FPS.")
@@ -6365,8 +6384,8 @@ void MainWindow::UpdateFrameGenButton() {
                                      .arg(target_rate);
 
     if (!emulation_running) {
-        frame_gen_status_button->setText(mode);
-        frame_gen_status_button->setToolTip(
+        frame_gen_status_text = mode;
+        frame_gen_status_action->setToolTip(
             tr("Frame generation is on.%1 Whether it runs shows here once a game starts.")
                 .arg(target));
         return;
@@ -6402,9 +6421,9 @@ void MainWindow::UpdateFrameGenButton() {
     }
 
     if (!unavailable.isEmpty()) {
-        frame_gen_status_button->setChecked(false);
-        frame_gen_status_button->setText(tr("FG UNAVAILABLE"));
-        frame_gen_status_button->setToolTip(
+        frame_gen_status_action->setChecked(false);
+        frame_gen_status_text = tr("Unavailable");
+        frame_gen_status_action->setToolTip(
             tr("Frame generation is on but not running. %1").arg(unavailable));
         return;
     }
@@ -6414,11 +6433,12 @@ void MainWindow::UpdateFrameGenButton() {
                             "Lichii Optical Flow Frame Generation runs instead; the log says why.")
         : flyhigh_fallback
             ? tr(" FlyHigh can't run yet (its model is not downloaded, or the log says why), so "
-                 "Lichii Optical Flow runs instead. Right-click FlyHigh to open its settings.")
+                 "Lichii Optical Flow runs instead. Use the gear next to FlyHigh to open its "
+                 "settings.")
             : QString();
     if (frame_gen_generating) {
-        frame_gen_status_button->setText(mode);
-        frame_gen_status_button->setToolTip(
+        frame_gen_status_text = mode;
+        frame_gen_status_action->setToolTip(
             tr("Frame generation is running.%1%2").arg(target, fallback));
         return;
     }
@@ -6427,8 +6447,8 @@ void MainWindow::UpdateFrameGenButton() {
         target_rate == 0
             ? QString()
             : tr(" It also pauses while the game already reaches %1 FPS.").arg(target_rate);
-    frame_gen_status_button->setText(tr("%1 (IDLE)").arg(mode));
-    frame_gen_status_button->setToolTip(
+    frame_gen_status_text = tr("%1 (idle)").arg(mode);
+    frame_gen_status_action->setToolTip(
         tr("Frame generation is on but generated no frames in the last half second. It pauses "
            "while it warms up, for a second after a frame takes longer than 100 ms, and while "
            "frames arrive in bursts.%1%2")
@@ -6436,27 +6456,25 @@ void MainWindow::UpdateFrameGenButton() {
 }
 
 void MainWindow::UpdateVolumeUI() {
-    const auto volume_value = static_cast<int>(Settings::values.volume.GetValue());
-    volume_slider->setValue(volume_value);
-    if (Settings::values.audio_muted) {
-        volume_button->setChecked(false);
-        volume_button->setText(tr("VOLUME: MUTE"));
-    } else {
-        volume_button->setChecked(true);
-        volume_button->setText(tr("VOLUME: %1%", "Volume percentage (e.g. 50%)").arg(volume_value));
-    }
+    const int value = Settings::values.volume.GetValue();
+    const bool muted = Settings::values.audio_muted.GetValue();
+    const QSignalBlocker blocker(volume_slider);
+    volume_slider->setValue(value);
+    mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
+    mute_action->setChecked(muted);
+    ingame_menu->SetVolume(value, muted);
 }
 
 void MainWindow::UpdateStatusButtons() {
-    renderer_status_button->setChecked(Settings::values.renderer_backend.GetValue() ==
-                                       Settings::RendererBackend::Vulkan);
-    UpdateAPIText();
     UpdateGPUAccuracyButton();
     UpdateDockedButton();
     UpdateFilterText();
     UpdateAAText();
     UpdateFrameGenButton();
     UpdateVolumeUI();
+#ifdef HAS_RESHADE
+    UpdatePostShaderText();
+#endif
 }
 
 // TODO(crueter): Use this for game list stuff
@@ -6468,7 +6486,6 @@ void MainWindow::UpdateUISettings() {
     UISettings::values.state = saveState();
     UISettings::values.single_window_mode = ui->action_Single_Window_Mode->isChecked();
     UISettings::values.fullscreen = ui->action_Fullscreen->isChecked();
-    UISettings::values.show_filter_bar = ui->action_Show_Filter_Bar->isChecked();
     UISettings::values.show_status_bar = ui->action_Show_Status_Bar->isChecked();
     UISettings::values.show_perf_overlay = ui->action_Show_Performance_Overlay->isChecked();
 
@@ -6589,11 +6606,11 @@ void MainWindow::SetFirmwareVersion() {
         LOG_INFO(Frontend, "Installed firmware: No firmware available");
         ui->menu_Applets->setEnabled(false);
         ui->menu_Create_Shortcuts->setEnabled(false);
-        firmware_label->setVisible(false);
+        firmware_action->setText(tr("Firmware not installed"));
+        firmware_action->setToolTip({});
         return;
     }
 
-    firmware_label->setVisible(true);
     ui->menu_Applets->setEnabled(true);
     ui->menu_Create_Shortcuts->setEnabled(true);
 
@@ -6602,12 +6619,15 @@ void MainWindow::SetFirmwareVersion() {
 
     LOG_INFO(Frontend, "Installed firmware: {}", display_version);
 
-    firmware_label->setText(QString::fromStdString(display_version));
-    firmware_label->setToolTip(QString::fromStdString(display_title));
+    firmware_action->setText(tr("Firmware: %1").arg(QString::fromStdString(display_version)));
+    firmware_action->setToolTip(QString::fromStdString(display_title));
 }
 
 void MainWindow::SetFPSSuffix() {
-    switch (Settings::values.current_speed_mode.GetValue()) {
+    const auto mode = Settings::values.current_speed_mode.GetValue();
+    turbo_action->setChecked(mode == Settings::SpeedMode::Turbo);
+    slow_action->setChecked(mode == Settings::SpeedMode::Slow);
+    switch (mode) {
     case Settings::SpeedMode::Slow:
         m_fpsSuffix = tr("Slow");
         break;
@@ -6828,16 +6848,11 @@ void MainWindow::RequestGameExit() {
     QtCommon::system->GetAppletManager().RequestExit();
 }
 
-void MainWindow::filterBarSetChecked(bool state) {
-    ui->action_Show_Filter_Bar->setChecked(state);
-    emit(OnToggleFilterBar());
-}
-
 static void AdjustLinkColor() {
     QPalette new_pal(qApp->palette());
 
     if (UISettings::values.theme == "lichii")
-        new_pal.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
+        new_pal.setColor(QPalette::Link, Spotlight::Color::AccentLight());
     else if (UISettings::IsDarkTheme())
         new_pal.setColor(QPalette::Link, QColor(0, 190, 255, 255));
     else
@@ -6850,35 +6865,31 @@ static void AdjustLinkColor() {
 // Lichii Dark styles most widgets through its stylesheet; the palette covers what Qt draws
 // without one: item view text, disabled text, links and the native parts of dialogs.
 static QPalette LichiiPalette() {
+    using namespace Spotlight::Color;
     QPalette palette;
-    const QColor window(0x17, 0x18, 0x1b);
-    const QColor surface(0x20, 0x21, 0x25);
-    const QColor text(0xec, 0xec, 0xef);
-    const QColor disabled(0x55, 0x57, 0x5d);
-    const QColor accent(0xf0, 0x38, 0x6b);
-    palette.setColor(QPalette::Window, window);
-    palette.setColor(QPalette::WindowText, text);
-    palette.setColor(QPalette::Base, window);
-    palette.setColor(QPalette::AlternateBase, QColor(0x1b, 0x1c, 0x20));
-    palette.setColor(QPalette::ToolTipBase, QColor(0x23, 0x24, 0x29));
-    palette.setColor(QPalette::ToolTipText, text);
-    palette.setColor(QPalette::PlaceholderText, QColor(0x6f, 0x71, 0x78));
-    palette.setColor(QPalette::Text, text);
-    palette.setColor(QPalette::Button, surface);
-    palette.setColor(QPalette::ButtonText, text);
-    palette.setColor(QPalette::BrightText, Qt::white);
-    palette.setColor(QPalette::Light, QColor(0x34, 0x36, 0x3c));
-    palette.setColor(QPalette::Midlight, QColor(0x2a, 0x2c, 0x31));
-    palette.setColor(QPalette::Mid, QColor(0x23, 0x24, 0x29));
-    palette.setColor(QPalette::Dark, QColor(0x14, 0x15, 0x18));
+    palette.setColor(QPalette::Window, Window());
+    palette.setColor(QPalette::WindowText, Text());
+    palette.setColor(QPalette::Base, PanelDeep());
+    palette.setColor(QPalette::AlternateBase, Panel());
+    palette.setColor(QPalette::ToolTipBase, Panel());
+    palette.setColor(QPalette::ToolTipText, Text());
+    palette.setColor(QPalette::PlaceholderText, TextMuted());
+    palette.setColor(QPalette::Text, Text());
+    palette.setColor(QPalette::Button, Control());
+    palette.setColor(QPalette::ButtonText, Text());
+    palette.setColor(QPalette::BrightText, Text());
+    palette.setColor(QPalette::Light, Stroke());
+    palette.setColor(QPalette::Midlight, Fill());
+    palette.setColor(QPalette::Mid, Panel());
+    palette.setColor(QPalette::Dark, PanelDeep());
     palette.setColor(QPalette::Shadow, Qt::black);
-    palette.setColor(QPalette::Highlight, accent);
-    palette.setColor(QPalette::HighlightedText, Qt::white);
-    palette.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
-    palette.setColor(QPalette::LinkVisited, QColor(0xd4, 0x2c, 0x5a));
-    palette.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
-    palette.setColor(QPalette::Disabled, QPalette::Text, disabled);
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
+    palette.setColor(QPalette::Highlight, Accent());
+    palette.setColor(QPalette::HighlightedText, OnAccent());
+    palette.setColor(QPalette::Link, AccentLight());
+    palette.setColor(QPalette::LinkVisited, Accent());
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, TextFaint());
+    palette.setColor(QPalette::Disabled, QPalette::Text, TextFaint());
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, TextFaint());
     return palette;
 }
 
@@ -6954,12 +6965,15 @@ void MainWindow::UpdateUITheme() {
     if (current_theme.isEmpty())
         current_theme = default_theme;
 
+    static const QFont default_font = qApp->font();
     static bool lichii_palette = false;
     if (current_theme == QStringLiteral("lichii")) {
         qApp->setPalette(LichiiPalette());
+        qApp->setFont(Spotlight::Font(13));
         lichii_palette = true;
     } else if (lichii_palette) {
         qApp->setPalette(QPalette());
+        qApp->setFont(default_font);
         lichii_palette = false;
     }
 
@@ -7115,33 +7129,6 @@ Service::AM::FrontendAppletParameters MainWindow::LibraryAppletParameters(
         .applet_type = Service::AM::AppletType::LibraryApplet,
     };
 }
-
-void VolumeButton::wheelEvent(QWheelEvent* event) {
-
-    int num_degrees = event->angleDelta().y() / 8;
-    int num_steps = (num_degrees / 15) * scroll_multiplier;
-    // Stated in QT docs: Most mouse types work in steps of 15 degrees, in which case the delta
-    // value is a multiple of 120; i.e., 120 units * 1/8 = 15 degrees.
-
-    if (num_steps > 0) {
-        Settings::values.volume.SetValue(
-            (std::min)(200, Settings::values.volume.GetValue() + num_steps));
-    } else {
-        Settings::values.volume.SetValue(
-            (std::max)(0, Settings::values.volume.GetValue() + num_steps));
-    }
-
-    scroll_multiplier = (std::min)(MaxMultiplier, scroll_multiplier * 2);
-    scroll_timer.start(100); // reset the multiplier if no scroll event occurs within 100 ms
-
-    emit VolumeChanged();
-    event->accept();
-}
-
-void VolumeButton::ResetMultiplier() {
-    scroll_multiplier = 1;
-}
-
 #ifdef main
 #undef main
 #endif

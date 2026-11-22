@@ -1,237 +1,317 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-#include <QBuffer>
-#include <QByteArray>
-#include <QGraphicsOpacityEffect>
-#include <QIODevice>
-#include <QImage>
-#include <QPainter>
-#include <QPixmap>
-#include <QPropertyAnimation>
-#include <QPushButton>
-#include <QStyleOption>
-#include "common/container/unordered_map.h"
-#include "core/frontend/framebuffer_layout.h"
-#include "core/loader/loader.h"
-#include "ui_loading_screen.h"
-#include "video_core/rasterizer_interface.h"
-#include "video_core/shader_warm/shader_warm_builder.h"
 #include "lichii/loading_screen.h"
 
-// Mingw seems to not have QMovie at all. If QMovie is missing then use a single frame instead of an
-// showing the full animation
-#if !LICHII_QT_MOVIE_MISSING
-#include <QMovie>
-#endif
+#include <algorithm>
+#include <array>
+#include <QAction>
+#include <QGraphicsOpacityEffect>
+#include <QLinearGradient>
+#include <QLocale>
+#include <QPainter>
+#include <QPropertyAnimation>
 
-constexpr char PROGRESSBAR_STYLE_PREPARE[] = R"(
-QProgressBar {}
-QProgressBar::chunk {})";
+#include "common/settings.h"
+#include "core/frontend/framebuffer_layout.h"
+#include "core/loader/loader.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
+#include "qt_common/util/game.h"
+#include "video_core/rasterizer_interface.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 
-constexpr char PROGRESSBAR_STYLE_BUILD[] = R"(
-QProgressBar {
-  background-color: black;
-  border: 2px solid white;
-  border-radius: 4px;
-  padding: 2px;
-}
-QProgressBar::chunk {
-  background-color: #ff3c28;
-  width: 1px;
-})";
+namespace {
 
-constexpr char SKIP_BUTTON_STYLE[] = R"(
-QPushButton {
-  background-color: black;
-  color: white;
-  border: 2px solid white;
-  border-radius: 6px;
-  padding: 6px 24px;
-  font: 12pt "Arial";
-}
-QPushButton:disabled {
-  color: gray;
-  border-color: gray;
-})";
+using VideoCore::LoadCallbackStage;
+using namespace Spotlight;
 
-constexpr char PROGRESSBAR_STYLE_COMPLETE[] = R"(
-QProgressBar {
-  background-color: #0ab9e6;
-  border: 2px solid white;
-  border-radius: 4px;
-  padding: 2px;
-}
-QProgressBar::chunk {
-  background-color: #ff3c28;
-})";
+} // namespace
 
-LoadingScreen::LoadingScreen(QWidget* parent)
-    : QWidget(parent), ui(std::make_unique<Ui::LoadingScreen>()),
-      previous_stage(VideoCore::LoadCallbackStage::Complete) {
-    ui->setupUi(this);
+LoadingScreen::LoadingScreen(QWidget* parent) : QWidget(parent), stage(LoadCallbackStage::Prepare) {
     setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
 
-    // Create a fade out effect to hide this loading screen widget.
-    // When fading opacity, it will fade to the parent widgets background color, which is why we
-    // create an internal widget named fade_widget that we use the effect on, while keeping the
-    // loading screen widget's background color black. This way we can create a fade to black effect
-    opacity_effect = new QGraphicsOpacityEffect(this);
-    opacity_effect->setOpacity(1);
-    ui->fade_parent->setGraphicsEffect(opacity_effect);
-    fadeout_animation = std::make_unique<QPropertyAnimation>(opacity_effect, "opacity");
-    fadeout_animation->setDuration(500);
+    auto* opacity = new QGraphicsOpacityEffect(this);
+    opacity->setOpacity(1);
+    setGraphicsEffect(opacity);
+    fadeout_animation = std::make_unique<QPropertyAnimation>(opacity, "opacity");
+    fadeout_animation->setDuration(300);
     fadeout_animation->setStartValue(1);
     fadeout_animation->setEndValue(0);
-    fadeout_animation->setEasingCurve(QEasingCurve::OutBack);
-
-    // After the fade completes, hide the widget and reset the opacity
-    connect(fadeout_animation.get(), &QPropertyAnimation::finished, [this] {
+    connect(fadeout_animation.get(), &QPropertyAnimation::finished, this, [this, opacity] {
         hide();
-        opacity_effect->setOpacity(1);
+        opacity->setOpacity(1);
         emit Hidden();
     });
-    connect(this, &LoadingScreen::LoadProgress, this, &LoadingScreen::OnLoadProgress,
-            Qt::QueuedConnection);
 
-    // Shown while shaders are precached: starts the game without waiting for the rest.
-    skip_button = new QPushButton(tr("Skip"), this);
-    skip_button->setStyleSheet(QString::fromUtf8(SKIP_BUTTON_STYLE));
-    skip_button->setToolTip(tr("Start the game now. The shaders not precached yet are precached "
-                               "on a later launch."));
+    skip_button = new PillButton(tr("Start anyway"), QStringLiteral("play-fill"),
+                                 PillButton::Kind::Accent, 42, this);
+    skip_button->setToolTip(
+        tr("Starts the game now. The remaining shaders are precached on a later launch."));
     skip_button->hide();
-    ui->verticalLayout->insertWidget(2, skip_button, 0, Qt::AlignHCenter | Qt::AlignTop);
-    connect(skip_button, &QPushButton::clicked, this, [this] {
+    connect(skip_button, &QAbstractButton::clicked, this, [this] {
         VideoCommon::ShaderWarm::RequestSkipWarm();
         skip_button->setEnabled(false);
     });
-    qRegisterMetaType<VideoCore::LoadCallbackStage>();
 
-    stage_translations = {
-        {VideoCore::LoadCallbackStage::Prepare, tr("Loading...")},
-        {VideoCore::LoadCallbackStage::Build, tr("Loading Shaders %1 / %2")},
-        {VideoCore::LoadCallbackStage::Complete, tr("Launching...")},
-        {VideoCore::LoadCallbackStage::Warm, tr("Precaching shaders %1 / %2")},
-    };
-    progressbar_style = {
-        {VideoCore::LoadCallbackStage::Prepare, PROGRESSBAR_STYLE_PREPARE},
-        {VideoCore::LoadCallbackStage::Build, PROGRESSBAR_STYLE_BUILD},
-        {VideoCore::LoadCallbackStage::Complete, PROGRESSBAR_STYLE_COMPLETE},
-        {VideoCore::LoadCallbackStage::Warm, PROGRESSBAR_STYLE_BUILD},
-    };
+    cancel_button =
+        new PillButton(tr("Cancel"), QStringLiteral("x"), PillButton::Kind::Control, 42, this);
+    cancel_button->hide();
 }
 
 LoadingScreen::~LoadingScreen() = default;
 
-void LoadingScreen::Prepare(Loader::AppLoader& loader) {
-    std::vector<u8> buffer;
-    if (loader.ReadBanner(buffer) == Loader::ResultStatus::Success) {
-#ifdef LICHII_QT_MOVIE_MISSING
-        QPixmap map;
-        map.loadFromData(buffer.data(), buffer.size());
-        ui->banner->setPixmap(map);
-#else
-        backing_mem = std::make_unique<QByteArray>(reinterpret_cast<char*>(buffer.data()),
-                                                   static_cast<int>(buffer.size()));
-        backing_buf = std::make_unique<QBuffer>(backing_mem.get());
-        backing_buf->open(QIODevice::ReadOnly);
-        animation = std::make_unique<QMovie>(backing_buf.get(), QByteArray());
-        animation->start();
-        ui->banner->setMovie(animation.get());
-#endif
-        buffer.clear();
-    }
-    if (loader.ReadLogo(buffer) == Loader::ResultStatus::Success) {
-        QPixmap map;
-        map.loadFromData(buffer.data(), static_cast<uint>(buffer.size()));
-        ui->logo->setPixmap(map);
-    }
-
-    slow_shader_compile_start = false;
-    OnLoadProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
+void LoadingScreen::SetCancelAction(QAction* action) {
+    cancel_action = action;
+    const auto update_cancel = [this] {
+        const auto shortcut = cancel_action->shortcut().toString(QKeySequence::NativeText);
+        cancel_button->setText(shortcut.isEmpty() ? tr("Cancel") : tr("Cancel  %1").arg(shortcut));
+        cancel_button->setVisible(cancel_action->isEnabled());
+        LayoutButtons();
+    };
+    connect(action, &QAction::changed, this, update_cancel);
+    connect(cancel_button, &QAbstractButton::clicked, action, &QAction::trigger);
+    update_cancel();
 }
 
-void LoadingScreen::OnLoadComplete() {
-    fadeout_animation->start(QPropertyAnimation::KeepWhenStopped);
-}
-
-void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size_t value,
-                                   std::size_t total) {
-    using namespace std::chrono;
-    const auto now = steady_clock::now();
-    // reset the timer if the stage changes
-    if (stage != previous_stage) {
-        ui->progress_bar->setStyleSheet(QString::fromUtf8(progressbar_style[stage]));
-        // Hide the progress bar during the prepare stage
-        if (stage == VideoCore::LoadCallbackStage::Prepare) {
-            ui->progress_bar->hide();
-        } else {
-            ui->progress_bar->show();
+void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QString game_version) {
+    fadeout_animation->stop();
+    static_cast<QGraphicsOpacityEffect*>(graphicsEffect())->setOpacity(1);
+    icon = {};
+    u64 program_id = 0;
+    if (loader.ReadProgramId(program_id) == Loader::ResultStatus::Success && program_id != 0) {
+        const auto image = QtCommon::Game::ReadCustomArtwork(program_id);
+        if (!image.empty()) {
+            icon.loadFromData(image.data(), static_cast<uint>(image.size()));
         }
-        skip_button->setVisible(stage == VideoCore::LoadCallbackStage::Warm);
-        skip_button->setEnabled(true);
-        previous_stage = stage;
-        // reset back to fast shader compiling since the stage changed
-        slow_shader_compile_start = false;
-    }
-    // update the max of the progress bar if the number of shaders change
-    if (total != previous_total) {
-        ui->progress_bar->setMaximum(static_cast<int>(total));
-        previous_total = total;
-    }
-    // Reset the progress bar ranges if compilation is done
-    if (stage == VideoCore::LoadCallbackStage::Complete) {
-        ui->progress_bar->setRange(0, 0);
-    }
-
-    QString estimate;
-    // If there's a drastic slowdown in the rate, then display an estimate
-    if (now - previous_time > milliseconds{50} || slow_shader_compile_start) {
-        if (!slow_shader_compile_start) {
-            slow_shader_start = steady_clock::now();
-            slow_shader_compile_start = true;
-            slow_shader_first_value = value;
-        }
-        // only calculate an estimate time after a second has passed since stage change
-        const auto diff = duration_cast<milliseconds>(now - slow_shader_start);
-        if (diff > seconds{1} && value > slow_shader_first_value) {
-            const auto eta_mseconds =
-                static_cast<long>(static_cast<double>(total - slow_shader_first_value) /
-                                  (value - slow_shader_first_value) * diff.count());
-            estimate =
-                tr("Estimated Time %1")
-                    .arg(QTime(0, 0, 0, 0)
-                             .addMSecs(std::max<long>(eta_mseconds - diff.count() + 1000, 1000))
-                             .toString(QStringLiteral("mm:ss")));
+        if (game_title.isEmpty()) {
+            game_title = QString::fromStdString(QtCommon::Game::ReadCustomTitle(program_id));
         }
     }
-
-    // update labels and progress bar
-    if (stage == VideoCore::LoadCallbackStage::Build ||
-        stage == VideoCore::LoadCallbackStage::Warm) {
-        ui->stage->setText(stage_translations[stage].arg(value).arg(total));
-    } else {
-        ui->stage->setText(stage_translations[stage]);
+    std::vector<u8> image;
+    if (icon.isNull() && loader.ReadIcon(image) == Loader::ResultStatus::Success) {
+        icon.loadFromData(image.data(), static_cast<uint>(image.size()));
     }
-    ui->value->setText(estimate);
-    ui->progress_bar->setValue(static_cast<int>(value));
-    previous_time = now;
-}
-
-void LoadingScreen::paintEvent(QPaintEvent* event) {
-    QStyleOption opt;
-    opt.initFrom(this);
-    QPainter p(this);
-    style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
-    QWidget::paintEvent(event);
+    UpdateBackdrop();
+    if (game_title.isEmpty()) {
+        std::string metadata;
+        loader.ReadTitle(metadata);
+        game_title = QString::fromStdString(metadata);
+    }
+    if (game_version.isEmpty()) {
+        std::string metadata;
+        loader.ReadDisplayVersion(metadata);
+        game_version = QString::fromStdString(metadata);
+    }
+    title = game_title.isEmpty() ? tr("Starting game") : std::move(game_title);
+    version = game_version.isEmpty() ? QString{} : tr("v%1").arg(game_version);
+    switch2 = Settings::CurrentProgramIsSwitch2();
+    previous_time = {};
+    slow_shader_start = {};
+    OnLoadProgress(LoadCallbackStage::Prepare, 0, 0);
 }
 
 void LoadingScreen::Clear() {
-#ifndef LICHII_QT_MOVIE_MISSING
-    animation.reset();
-    backing_buf.reset();
-    backing_mem.reset();
-#endif
+    fadeout_animation->stop();
+    icon = {};
+    backdrop = {};
+    title.clear();
+    version.clear();
+}
+
+void LoadingScreen::OnLoadComplete() {
+    OnLoadProgress(LoadCallbackStage::Complete, 0, 0);
+    fadeout_animation->start();
+}
+
+void LoadingScreen::OnLoadProgress(LoadCallbackStage next, std::size_t value, std::size_t target) {
+    using namespace std::chrono;
+    const auto now = steady_clock::now();
+    if (next != stage) {
+        stage = next;
+        slow_shader_start = {};
+        skip_button->setVisible(stage == LoadCallbackStage::Warm);
+        skip_button->setEnabled(true);
+        LayoutButtons();
+    }
+    current = std::min(value, target);
+    total = target;
+    estimate.clear();
+    if (total != 0 && current < total) {
+        if (slow_shader_start == steady_clock::time_point{} &&
+            now - previous_time > milliseconds{50}) {
+            slow_shader_start = now;
+            slow_shader_first_value = current;
+        }
+        if (slow_shader_start != steady_clock::time_point{} && current > slow_shader_first_value) {
+            const auto elapsed = duration<double>(now - slow_shader_start).count();
+            if (elapsed > 1.0) {
+                const auto remaining = static_cast<qulonglong>(
+                    elapsed * static_cast<double>(total - current) /
+                        static_cast<double>(current - slow_shader_first_value) +
+                    1.0);
+                estimate = tr("Estimated Time %1:%2")
+                               .arg(remaining / 60, 2, 10, QLatin1Char('0'))
+                               .arg(remaining % 60, 2, 10, QLatin1Char('0'));
+            }
+        }
+    }
+    previous_time = now;
+    update();
+}
+
+QRect LoadingScreen::ContentRect() const {
+    const int margin = std::min(64, width() / 18);
+    const int art_size = std::min(200, width() / 4);
+    const int gap = std::min(40, width() / 24);
+    const int top = std::clamp(height() * 170 / 800, 18, std::max(18, height() - 345));
+    return QRect{margin + art_size + gap, top, width() - 2 * margin - art_size - gap, art_size};
+}
+
+void LoadingScreen::LayoutButtons() {
+    const QRect content = ContentRect();
+    int x = content.left();
+    const int y = content.top() + 245;
+    for (auto* button : {skip_button, cancel_button}) {
+        if (!button->isHidden()) {
+            const QSize size = button->sizeHint();
+            button->setGeometry(QRect{QPoint{x, y}, size});
+            x += size.width() + 10;
+        }
+    }
+}
+
+void LoadingScreen::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    UpdateBackdrop();
+    LayoutButtons();
+}
+
+void LoadingScreen::UpdateBackdrop() {
+    if (icon.isNull() || size().isEmpty()) {
+        backdrop = {};
+        return;
+    }
+
+    auto cover = icon.deviceIndependentSize();
+    cover.scale(size(), Qt::KeepAspectRatioByExpanding);
+    cover *= 2;
+    const QPointF center{width() * 0.65, height() * 0.5};
+    const QRectF art{center - QPointF{cover.width() / 2, cover.height() / 2}, cover};
+    backdrop = QPixmap(size().scaled(16, 16, Qt::KeepAspectRatio));
+    backdrop.fill(Color::Scrim());
+    QPainter painter(&backdrop);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    painter.scale(qreal(backdrop.width()) / width(), qreal(backdrop.height()) / height());
+    painter.drawPixmap(art, icon, QRectF(icon.rect()));
+}
+
+void LoadingScreen::paintEvent(QPaintEvent*) {
+    QPainter painter(this);
+    painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+    painter.fillRect(rect(), Color::Scrim());
+    if (!backdrop.isNull()) {
+        painter.drawPixmap(rect(), backdrop);
+
+        auto shade = Color::Scrim();
+        QLinearGradient horizontal(0, 0, width(), 0);
+        shade.setAlpha(245);
+        horizontal.setColorAt(0, shade);
+        shade.setAlpha(224);
+        horizontal.setColorAt(0.4, shade);
+        shade.setAlpha(115);
+        horizontal.setColorAt(0.75, shade);
+        shade.setAlpha(140);
+        horizontal.setColorAt(1, shade);
+        painter.fillRect(rect(), horizontal);
+
+        QLinearGradient vertical(0, 0, 0, height());
+        shade.setAlpha(0);
+        vertical.setColorAt(0.5, shade);
+        shade.setAlpha(242);
+        vertical.setColorAt(1, shade);
+        painter.fillRect(rect(), vertical);
+    }
+
+    const QRect content = ContentRect();
+    const int margin = std::min(64, width() / 18);
+    const int art = content.height();
+    PaintWholeIcon(painter, QRect{margin, content.top(), art, art}, icon, 22);
+
+    painter.translate(content.topLeft());
+    const int available = content.width();
+    const auto draw_line = [&](QRectF area, const QString& text, const QFont& font,
+                               const QColor& color, Qt::Alignment alignment = Qt::AlignLeft) {
+        painter.setPen(color);
+        painter.setFont(font);
+        painter.drawText(area, alignment | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(text, Qt::ElideRight, area.width()));
+    };
+
+    const QString platform = switch2 ? tr("Switch 2") : tr("Switch 1");
+    const auto badge_font = Font(12, 600);
+    const int badge = QFontMetrics(badge_font).horizontalAdvance(platform) + 20;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(switch2 ? Color::Accent() : Color::Control());
+    painter.drawRoundedRect(QRectF{0, 0, qreal(badge), 24}, 12, 12);
+    draw_line(QRectF{0, 0, qreal(badge), 24}, platform, badge_font,
+              switch2 ? Color::OnAccent() : Color::Text(), Qt::AlignHCenter);
+    draw_line(QRectF{qreal(badge + 8), 0, qreal(available - badge - 8), 24}, version, Font(13),
+              Color::TextSecondary());
+    draw_line(QRectF{0, 30, qreal(available), 48}, title, DisplayFont(40), Color::Text());
+
+    const bool warm = stage == LoadCallbackStage::Warm;
+    const int active = stage == LoadCallbackStage::Prepare    ? 0
+                       : stage == LoadCallbackStage::Complete ? 2
+                                                              : 1;
+    const std::array steps{tr("Loading…"), warm ? tr("Precaching shaders") : tr("Loading Shaders"),
+                           tr("Launching…")};
+    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+        const qreal y = 88 + 30 * i;
+        const QRectF marker{0, y + 4, 22, 22};
+        painter.setPen(i == active ? QPen(Color::Accent(), 2) : Qt::NoPen);
+        painter.setBrush(i < active    ? Color::Accent()
+                         : i == active ? Qt::NoBrush
+                                       : QBrush(Color::Control()));
+        painter.drawEllipse(marker.adjusted(1, 1, -1, -1));
+        if (i < active) {
+            painter.drawPixmap(QPointF{4, y + 8},
+                               IconPixmap(u"check", 14, Color::OnAccent(), devicePixelRatioF()));
+        } else if (i == active) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Color::Accent());
+            painter.drawEllipse(marker.center(), 4, 4);
+        }
+        QString step = steps[i];
+        if (i == 1 && total > 0) {
+            step = tr("%1  %2 / %3")
+                       .arg(step, locale().toString(static_cast<qulonglong>(current)),
+                            locale().toString(static_cast<qulonglong>(total)));
+        }
+        draw_line(QRectF{32, y, qreal(available - 32), 30}, step, Font(14, i == active ? 600 : 500),
+                  i <= active ? Color::Text() : Color::TextSecondary());
+    }
+
+    if (total > 0 || stage == LoadCallbackStage::Complete) {
+        const qreal track = std::min(440, available);
+        const qreal progress = total > 0 ? static_cast<qreal>(current) / total : 1.0;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Control());
+        painter.drawRoundedRect(QRectF{0, 196, track, 8}, 4, 4);
+        painter.setBrush(Color::Accent());
+        painter.drawRoundedRect(QRectF{0, 196, track * progress, 8}, 4, 4);
+        draw_line(QRectF{0, 211, 56, 20}, tr("%1%").arg(qRound(progress * 100)), Font(13, 700),
+                  Color::Text());
+        draw_line(QRectF{56, 211, track - 56, 20}, estimate, Font(13), Color::TextSecondary(),
+                  Qt::AlignRight);
+    }
+
+    painter.setFont(Font(12));
+    painter.setPen(Color::TextSecondary());
+    const QString note =
+        warm ? tr("Start anyway: the remaining shaders will be precached on a later launch.")
+             : tr("The first launch after a driver update may take longer.");
+    painter.drawPixmap(QPointF{0, 305},
+                       IconPixmap(u"info", 14, Color::TextSecondary(), devicePixelRatioF()));
+    painter.drawText(QRect{22, 304, available - 22, 40}, Qt::TextWordWrap, note);
 }

@@ -4,23 +4,31 @@
 #pragma once
 
 #include <QListView>
-#include <QString>
+#include <QPersistentModelIndex>
 
 class GameCard;
-class GameListModel;
 
 class GameGrid : public QListView {
     Q_OBJECT
 
 public:
-    explicit GameGrid(QWidget* parent = nullptr);
+    enum class Mode { Grid, Carousel };
 
-    void SetModel(GameListModel* model);
-    void ApplyFilter(const QString& edit_filter_text, GameListModel* model);
+    explicit GameGrid(QWidget* parent = nullptr, Mode mode = Mode::Grid);
+
     void UpdateIconSize();
 
     QModelIndex indexAt(const QPoint& point) const override;
 
+signals:
+    void PlayRequested(const QModelIndex& game);
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+
 private:
     GameCard* m_gameCard = nullptr;
+    QPersistentModelIndex pending_play;
+    Mode mode;
 };

@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <QBuffer>
+#include <QIcon>
 #include <QImageReader>
+#include <QPainter>
+#include <QPainterPath>
 
 namespace ArtworkImage {
 
@@ -44,6 +47,40 @@ QImage SquareIcon(const QImage& source) {
         image = image.scaled(IconSize, IconSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
     return image;
+}
+
+void PaintIcon(QPainter& painter, const QRectF& bounds, const QPixmap& source, qreal radius) {
+    if (source.isNull() || bounds.isEmpty()) {
+        return;
+    }
+    const QSizeF size = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
+    const QRectF target(bounds.center() - QPointF(size.width() / 2, size.height() / 2), size);
+    QPainterPath clip;
+    clip.addRoundedRect(target, radius, radius);
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setClipPath(clip, Qt::IntersectClip);
+    painter.drawPixmap(target, source, source.rect());
+    painter.restore();
+}
+
+QIcon Icon(const QPixmap& source, int size, qreal radius) {
+    if (source.isNull()) {
+        return {};
+    }
+    QIcon icon;
+    for (const qreal ratio : {1.0, 1.5, 2.0}) {
+        QPixmap pixmap(qRound(size * ratio), qRound(size * ratio));
+        pixmap.setDevicePixelRatio(ratio);
+        pixmap.fill(Qt::transparent);
+        {
+            QPainter painter(&pixmap);
+            PaintIcon(painter, QRectF(0, 0, size, size), source, radius);
+        }
+        icon.addPixmap(pixmap);
+    }
+    return icon;
 }
 
 } // namespace ArtworkImage

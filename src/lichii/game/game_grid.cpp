@@ -1,115 +1,62 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <QScroller>
-#include <QScrollerProperties>
+#include <QMouseEvent>
 
-#include "qt_common/config/uisettings.h"
-#include "qt_common/game_list/model.h"
-#include "lichii/game/common.h"
 #include "lichii/game/game_card.h"
 #include "lichii/game/game_grid.h"
+#include "qt_common/config/uisettings.h"
 
-GameGrid::GameGrid(QWidget* parent) : QListView{parent} {
-    m_gameCard = new GameCard(this);
+GameGrid::GameGrid(QWidget* parent, Mode mode_)
+    : QListView(parent), m_gameCard(new GameCard(this)), mode(mode_) {
     setItemDelegate(m_gameCard);
-
-    setViewMode(QListView::ListMode);
-    setResizeMode(QListView::Fixed);
+    setViewMode(QListView::IconMode);
+    setMovement(QListView::Static);
+    setResizeMode(QListView::Adjust);
     setUniformItemSizes(true);
     setSelectionMode(QAbstractItemView::SingleSelection);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
-
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-
+    setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    if (mode == Mode::Grid) {
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    }
     setEditTriggers(QAbstractItemView::NoEditTriggers);
     setContextMenuPolicy(Qt::CustomContextMenu);
-
-    setSpacing(10);
-    setWordWrap(true);
-    setTextElideMode(Qt::ElideRight);
     setFlow(QListView::LeftToRight);
-    setWrapping(true);
-}
-
-void GameGrid::SetModel(GameListModel* model) {
-    QListView::setModel(model);
+    setWrapping(mode == Mode::Grid);
+    setViewportMargins(32, 0, 19, 0);
+    setObjectName(mode == Mode::Grid ? QStringLiteral("spotlightGrid")
+                                     : QStringLiteral("spotlightCarousel"));
     UpdateIconSize();
 }
 
-void GameGrid::ApplyFilter(const QString& edit_filter_text, GameListModel* model) {
-    int row_count = model->rowCount();
-
-    for (int i = 0; i < row_count; ++i) {
-        QStandardItem* item = model->item(i, 0);
-        if (!item)
-            continue;
-
-        if (Lichii::FilterMatches(edit_filter_text, item)) {
-            setRowHidden(i, false);
-        } else {
-            setRowHidden(i, true);
-        }
-    }
-}
-
 void GameGrid::UpdateIconSize() {
-    const u32 icon_size = UISettings::values.game_cover_size.GetValue();
-
-    int heightMargin = 0;
-    // The card hugs the icon; the title wraps to the icon's width, so extra width is only
-    // needed for the "no icon" case. Leftover row space becomes the gap between cards.
-    int widthMargin = 24;
-
-    if (UISettings::values.show_game_name) {
-        switch (icon_size) {
-        case 128:
-        case 160:
-            heightMargin = 65;
-            break;
-        case 0:
-            widthMargin = 120;
-            heightMargin = 120;
-            break;
-        case 44:
-        case 64:
-            heightMargin = 77;
-            break;
-        case 32:
-        case 256:
-            heightMargin = 81;
-            break;
-        }
-    } else {
-        widthMargin = 24;
-        heightMargin = 24;
-    }
-
-    const int view_width = viewport()->width();
-
-    const double spacing = 0.01;
-    const int min_item_width = icon_size + widthMargin;
-
-    int columns = std::max(1, (view_width - 16) / min_item_width);
-    int stretched_width = ((view_width) - (spacing * (columns - 1))) / columns;
-
-    QSize grid_size(stretched_width, icon_size + heightMargin);
-    if (gridSize() != grid_size) {
-        setUpdatesEnabled(false);
-
-        setGridSize(grid_size);
-        m_gameCard->setSize(grid_size, grid_size, stretched_width - min_item_width, columns);
-
-        setUpdatesEnabled(true);
-    }
+    setGridSize(m_gameCard->UpdateSize(mode == Mode::Carousel ? viewport()->height() : 0));
+    viewport()->update();
 }
 
 QModelIndex GameGrid::indexAt(const QPoint& point) const {
-    QModelIndex index = QListView::indexAt(point);
-    if (!index.isValid())
-        return {};
-    if (m_gameCard && !m_gameCard->hitTest(point, index, this, visualRect(index)))
-        return {};
-    return index;
+    const QModelIndex index = QListView::indexAt(point);
+    return index.isValid() && m_gameCard->HitTest(point, visualRect(index)) ? index : QModelIndex{};
+}
+
+void GameGrid::mousePressEvent(QMouseEvent* event) {
+    const auto index = indexAt(event->pos());
+    if (event->button() == Qt::LeftButton && index.isValid() &&
+        UISettings::values.game_cover_size.GetValue() >= 64 &&
+        m_gameCard->PlayRect(visualRect(index)).contains(event->pos())) {
+        pending_play = index;
+    }
+    QListView::mousePressEvent(event);
+}
+
+void GameGrid::mouseReleaseEvent(QMouseEvent* event) {
+    const QModelIndex index = pending_play;
+    pending_play = QModelIndex{};
+    QListView::mouseReleaseEvent(event);
+    if (event->button() == Qt::LeftButton && index.isValid() && index == indexAt(event->pos()) &&
+        m_gameCard->PlayRect(visualRect(index)).contains(event->pos())) {
+        emit PlayRequested(index);
+    }
 }

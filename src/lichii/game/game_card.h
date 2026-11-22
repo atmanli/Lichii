@@ -5,10 +5,6 @@
 
 #include <QStyledItemDelegate>
 
-/**
- * A stylized "card"-like delegate for the game grid view.
- * Adapted from QML
- */
 class GameCard : public QStyledItemDelegate {
     Q_OBJECT
 public:
@@ -17,19 +13,15 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
 
-    QRect getCardRect(const QStyleOptionViewItem &option, const QModelIndex &index) const;
-
-    bool hitTest(const QPoint& point, const QModelIndex& index,
-                 const QWidget* widget, const QRect& cellRect) const;
-
+    QRect CardRect(const QRect& cell) const;
+    QRect PlayRect(const QRect& cell) const;
+    bool HitTest(const QPoint& point, const QRect& cell) const;
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
-    void setSize(const QSize& newSize, const QSize& contentSize, const int padding, const int columns);
+    QSize UpdateSize(int viewport_height = 0);
 
 private:
-    static constexpr int cardMargin = 8;
-
-    QSize m_size;
-    QSize m_contentSize;
-    int m_padding;
-    int m_columns;
+    QSize cell_size;
+    int tile_size = 132;
+    int icon_size = 124;
+    bool show_name = false;
 };

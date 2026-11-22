@@ -1,124 +1,121 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "game/game_list.h"
-#include "game/search_field.h"
-
 #include <QKeyEvent>
+#include <QPainter>
 #include <QToolButton>
 
-// TODO: Remove GameList dependence?
-GameListSearchField::KeyReleaseEater::KeyReleaseEater(GameList* gamelist_, QObject* parent)
-    : QObject(parent), gamelist{gamelist_} {}
+#include "lichii/game/search_field.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
-// EventFilter in order to process systemkeys while editing the searchfield
-bool GameListSearchField::KeyReleaseEater::eventFilter(QObject* obj, QEvent* event) {
-    // If it isn't a KeyRelease event then continue with standard event processing
-    if (event->type() != QEvent::KeyRelease)
-        return QObject::eventFilter(obj, event);
-
-    QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
-    QString edit_filter_text = gamelist->search_field->edit_filter->text().toLower();
-
-    // If the searchfield's text hasn't changed special function keys get checked
-    // If no function key changes the searchfield's text the filter doesn't need to get reloaded
-    if (edit_filter_text == edit_filter_text_old) {
-        switch (keyEvent->key()) {
-        // Escape: Resets the searchfield
-        case Qt::Key_Escape: {
-            if (edit_filter_text_old.isEmpty()) {
-                return QObject::eventFilter(obj, event);
-            } else {
-                gamelist->search_field->edit_filter->clear();
-                edit_filter_text.clear();
-            }
-            break;
-        }
-        // Return and Enter
-        // If the enter key gets pressed first checks how many and which entry is visible
-        // If there is only one result launch this game
-        case Qt::Key_Return:
-        case Qt::Key_Enter: {
-            if (gamelist->search_field->visible == 1) {
-                const QString file_path = gamelist->GetLastFilterResultItem();
-
-                // To avoid loading error dialog loops while confirming them using enter
-                // Also users usually want to run a different game after closing one
-                gamelist->search_field->edit_filter->clear();
-                edit_filter_text.clear();
-                emit gamelist->GameChosen(file_path);
-            } else {
-                return QObject::eventFilter(obj, event);
-            }
-            break;
-        }
-        default:
-            return QObject::eventFilter(obj, event);
-        }
-    }
-    edit_filter_text_old = edit_filter_text;
-    return QObject::eventFilter(obj, event);
-}
-
-void GameListSearchField::setFilterResult(int visible_, int total_) {
-    visible = visible_;
-    total = total_;
-
-    label_filter_result->setText(tr("%1 of %n result(s)", "", total).arg(visible));
-}
-
-QString GameListSearchField::filterText() const {
-    return edit_filter->text();
-}
-
-void GameListSearchField::clear() {
-    edit_filter->clear();
-}
-
-void GameListSearchField::setFocus() {
-    if (edit_filter->isVisible()) {
-        edit_filter->setFocus();
-    }
-}
-
-GameListSearchField::GameListSearchField(GameList* parent) : QWidget{parent} {
-    auto* const key_release_eater = new KeyReleaseEater(parent, this);
-    layout_filter = new QHBoxLayout;
-    layout_filter->setContentsMargins(8, 8, 8, 8);
-    label_filter = new QLabel;
-    edit_filter = new QLineEdit;
-    edit_filter->clear();
-    edit_filter->installEventFilter(key_release_eater);
-    edit_filter->setClearButtonEnabled(true);
-    connect(edit_filter, &QLineEdit::textChanged, parent, &GameList::OnTextChanged);
-    label_filter_result = new QLabel;
-    button_filter_close = new QToolButton(this);
-    button_filter_close->setText(QStringLiteral("X"));
-    button_filter_close->setCursor(Qt::ArrowCursor);
-    button_filter_close->setStyleSheet(
-        QStringLiteral("QToolButton{ border: none; padding: 0px; color: "
-                       "#000000; font-weight: bold; background: #F0F0F0; }"
-                       "QToolButton:hover{ border: none; padding: 0px; color: "
-                       "#EEEEEE; font-weight: bold; background: #E81123}"));
-    connect(button_filter_close, &QToolButton::clicked, parent, &GameList::OnFilterCloseClicked);
-    layout_filter->setSpacing(10);
-    layout_filter->addWidget(label_filter);
-    layout_filter->addWidget(edit_filter);
-    layout_filter->addWidget(label_filter_result);
-    layout_filter->addWidget(button_filter_close);
-    setLayout(layout_filter);
+GameListSearchField::GameListSearchField(QWidget* parent)
+    : QLineEdit(parent), keycap(new Spotlight::KeyCap(QStringLiteral("Ctrl F"), this)),
+      clear_button(new QToolButton(this)) {
+    setFixedHeight(40);
+    setMinimumWidth(145);
+    setMaximumWidth(300);
+    setFont(Spotlight::Font(14));
+    auto colors = palette();
+    colors.setColor(QPalette::Text, Spotlight::Color::Text());
+    colors.setColor(QPalette::PlaceholderText, Spotlight::Color::TextSecondary());
+    setPalette(colors);
+    setStyleSheet(QStringLiteral("QLineEdit { background: transparent; border: none; padding: 0; "
+                                 "color: white; } QToolButton { background: transparent; "
+                                 "border: none; padding: 0; }"));
+    keycap->setAttribute(Qt::WA_TransparentForMouseEvents);
+    clear_button->setFixedSize(26, 26);
+    clear_button->setFocusPolicy(Qt::NoFocus);
+    clear_button->setIcon(Spotlight::Icon(u"x", Spotlight::Color::TextSecondary(), 16));
+    clear_button->setIconSize({16, 16});
+    clear_button->setCursor(Qt::PointingHandCursor);
+    connect(clear_button, &QToolButton::clicked, this, &QLineEdit::clear);
+    connect(this, &QLineEdit::textChanged, this, &GameListSearchField::UpdateAffordances);
+    connect(this, &QLineEdit::returnPressed, this, &GameListSearchField::Submitted);
     RetranslateUI();
+    UpdateAffordances();
+}
+
+QSize GameListSearchField::sizeHint() const {
+    return {300, 40};
+}
+
+void GameListSearchField::SetShortcutLabel(const QString& label) {
+    has_shortcut = !label.isEmpty();
+    keycap->SetText(label);
+    UpdateAffordances();
+}
+
+void GameListSearchField::UpdateAffordances() {
+    keycap->adjustSize();
+    keycap->move(width() - keycap->width() - 8, (height() - keycap->height()) / 2);
+    clear_button->move(width() - clear_button->width() - 8,
+                       (height() - clear_button->height()) / 2);
+    const bool show_hint = has_shortcut && !hasFocus() && text().isEmpty() && width() >= 170;
+    keycap->setVisible(show_hint);
+    clear_button->setVisible(!text().isEmpty());
+    setTextMargins(38, 0, (show_hint ? keycap->width() : !text().isEmpty() ? 26 : 0) + 10, 0);
+    update();
+}
+
+bool GameListSearchField::event(QEvent* event) {
+    if (event->type() == QEvent::ShortcutOverride &&
+        static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape && !text().isEmpty()) {
+        event->accept();
+        return true;
+    }
+    return QLineEdit::event(event);
 }
 
 void GameListSearchField::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange) {
         RetranslateUI();
     }
+    QLineEdit::changeEvent(event);
+}
 
-    QWidget::changeEvent(event);
+void GameListSearchField::focusInEvent(QFocusEvent* event) {
+    QLineEdit::focusInEvent(event);
+    UpdateAffordances();
+}
+
+void GameListSearchField::focusOutEvent(QFocusEvent* event) {
+    QLineEdit::focusOutEvent(event);
+    UpdateAffordances();
+}
+
+void GameListSearchField::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape && !text().isEmpty()) {
+        clear();
+        event->accept();
+        return;
+    }
+    QLineEdit::keyPressEvent(event);
+}
+
+void GameListSearchField::paintEvent(QPaintEvent* event) {
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(hasFocus() ? Spotlight::Color::Accent() : Spotlight::Color::Stroke());
+        painter.setBrush(Spotlight::Color::Control());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
+        auto ink = Spotlight::Color::Text();
+        ink.setAlphaF(0.72f);
+        painter.drawPixmap(
+            14, 12, Spotlight::IconPixmap(u"magnifying-glass", 16, ink, devicePixelRatioF()));
+    }
+    QLineEdit::paintEvent(event);
+}
+
+void GameListSearchField::resizeEvent(QResizeEvent* event) {
+    QLineEdit::resizeEvent(event);
+    UpdateAffordances();
 }
 
 void GameListSearchField::RetranslateUI() {
-    label_filter->setText(tr("Filter:"));
-    edit_filter->setPlaceholderText(tr("Enter pattern to filter"));
+    setPlaceholderText(tr("Search"));
+    setAccessibleName(tr("Search games"));
+    clear_button->setToolTip(tr("Clear search"));
+    clear_button->setAccessibleName(tr("Clear search"));
 }

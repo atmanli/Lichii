@@ -12,10 +12,8 @@
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/internal_network/network_interface.h"
-#include "network/network.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_lobby.h"
-#include "qt_common/game_list/game_list_p.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/game/common.h"
 #include "lichii/main_window.h"
 #include "lichii/multiplayer/client_room.h"
 #include "lichii/multiplayer/lobby.h"
@@ -23,6 +21,10 @@
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/multiplayer/validation.h"
+#include "network/network.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/game_list_p.h"
+#include "ui_lobby.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/web_backend.h"
 #endif
@@ -48,6 +50,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
     proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     proxy->setSortLocaleAware(true);
     ui->room_list->setModel(proxy);
+    ui->room_list->setIconSize({32, 32});
     ui->room_list->header()->setSectionResizeMode(QHeaderView::Interactive);
     ui->room_list->header()->stretchLastSection();
     ui->room_list->setAlternatingRowColors(true);
@@ -100,13 +103,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
 Lobby::~Lobby() = default;
 
 void Lobby::UpdateGameList(QStandardItemModel* list) {
-    game_list->clear();
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
-    }
+    Lichii::CopyLibraryGames(*game_list, *list);
     if (proxy)
         proxy->UpdateGameList(game_list);
     ui->room_list->sortByColumn(Column::GAME_NAME, Qt::AscendingOrder);
@@ -248,13 +245,15 @@ void Lobby::OnRefreshLobby() {
     AnnounceMultiplayerRoom::RoomList new_room_list = room_list_watcher.result();
     for (auto room : new_room_list) {
         // find the icon for the game if this person owns that game.
-        QPixmap smdh_icon;
+        QIcon game_icon;
         for (int r = 0; r < game_list->rowCount(); ++r) {
             auto index = game_list->index(r, 0);
             auto game_id = game_list->data(index, GameListItemPath::ProgramIdRole).toULongLong();
 
             if (game_id != 0 && room.information.preferred_game.id == game_id) {
-                smdh_icon = game_list->data(index, Qt::DecorationRole).value<QPixmap>();
+                game_icon =
+                    ArtworkImage::Icon(index.data(Qt::DecorationRole).value<QPixmap>(), 32, 6);
+                break;
             }
         }
 
@@ -269,7 +268,7 @@ void Lobby::OnRefreshLobby() {
 
         auto first_item = new LobbyItemGame(
             room.information.preferred_game.id,
-            QString::fromStdString(room.information.preferred_game.name), smdh_icon);
+            QString::fromStdString(room.information.preferred_game.name), game_icon);
         auto row = QList<QStandardItem*>({
             first_item,
             new LobbyItemName(room.has_password, QString::fromStdString(room.information.name)),

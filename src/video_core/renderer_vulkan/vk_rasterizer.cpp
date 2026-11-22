@@ -3768,8 +3768,8 @@ bool RasterizerVulkan::PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryProp
     if (!GpuSplit::Get().Posts(GpuSplit::PostedOp::FenceReport)) {
         return false;
     }
-    const auto device = gpu_memory->GpuToCpuAddress(gpu_addr);
-    if (!device || !FencePostable(GpuSplit::PostedOp::FenceReport)) {
+    const auto cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (!cpu_addr || !FencePostable(GpuSplit::PostedOp::FenceReport)) {
         return false;
     }
     // As the posted Z-pass reports: the buffer note, page mark and pending count at the report's
@@ -3777,18 +3777,18 @@ bool RasterizerVulkan::PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryProp
     // GPURender, and query flushes wait for it to land.
     const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
     const QueryCache::PostedReport posted{
-        .device = *device,
-        .noted = NoteReportPending(*device, wide ? 16 : 4),
+        .device = *cpu_addr,
+        .noted = NoteReportPending(*cpu_addr, wide ? 16 : 4),
         .by_value = true,
     };
-    query_cache.page_filter.Mark(*device, 16);
+    query_cache.page_filter.Mark(*cpu_addr, 16);
     if (GpuSplit::TracksPendingReports()) {
-        query_cache.NotePendingReport(*device);
+        query_cache.NotePendingReport(*cpu_addr);
     }
     VideoCommon::Nx2FastDraw::NoteSync();
     // Its own fence's NotifyWFI synced the value to the host: PostCheckedFence collects that
     // sync and GPURender plays it before the fence, so nothing is owed after it.
-    back_payload_sync.push_back({*device, payload, wide ? u64{8} : u64{4}});
+    back_payload_sync.push_back({*cpu_addr, payload, wide ? u64{8} : u64{4}});
     PostCheckedFence(GpuSplit::PostedOp::FenceReport,
                      [this, gpu_addr, flags, payload, subreport, posted] {
                          query_cache.CounterReport(gpu_addr, VideoCommon::QueryType::Payload, flags,
@@ -3815,8 +3815,8 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         // back writes it at its place in the stream. Its later writes follow on this thread; an
         // unplayed draw reading the pools there is waited for. The host sync waits in
         // back_payload_sync for the next lent call, and fence_query_owed lends the next sync.
-        const auto device = gpu_memory->GpuToCpuAddress(gpu_addr);
-        if (!device) {
+        const auto cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+        if (!cpu_addr) {
             return;
         }
         const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
@@ -3824,18 +3824,18 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         const u64 size = wide ? 16 : 4;
         auto& split = GpuSplit::Get();
         split.GuardStreamWrite(gpu_addr, size);
-        split.StampWrite(*device, size, GpuSplit::Writer::Payload);
+        split.StampWrite(*cpu_addr, size, GpuSplit::Writer::Payload);
         VideoCommon::Nx2FastDraw::NoteSync();
         // A read download still to land there is finished on GPURender.
-        const bool lent = VideoCore::ReadDownloadsMayCover(*device, size);
+        const bool lent = VideoCore::ReadDownloadsMayCover(*cpu_addr, size);
         split.NotePayloadOnBack(lent);
         if (lent) {
             split.LendRender(
-                [&] { query_cache.WriteImmediate(gpu_addr, *device, payload, wide, mirrored); });
+                [&] { query_cache.WriteImmediate(gpu_addr, *cpu_addr, payload, wide, mirrored); });
         } else {
-            query_cache.WriteImmediate(gpu_addr, *device, payload, wide, mirrored);
+            query_cache.WriteImmediate(gpu_addr, *cpu_addr, payload, wide, mirrored);
         }
-        back_payload_sync.push_back({*device, payload, wide ? u64{8} : u64{4}});
+        back_payload_sync.push_back({*cpu_addr, payload, wide ? u64{8} : u64{4}});
         return;
     }
     if (type == VideoCommon::QueryType::ZPassPixelCount64 &&
@@ -3844,15 +3844,15 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         // EDEN_NX2_RENDER_POST_QUERY: the back takes the report's buffer cache note and marks
         // its page at the report's place in the stream, so its later invalidations and flushes
         // there reach GPURender behind it. GPURender records and registers the report.
-        if (const auto device = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+        if (const auto cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr)) {
             const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
             const QueryCache::PostedReport posted{
-                .device = *device,
-                .noted = NoteReportPending(*device, wide ? 16 : 4),
+                .device = *cpu_addr,
+                .noted = NoteReportPending(*cpu_addr, wide ? 16 : 4),
             };
-            query_cache.page_filter.Mark(*device, 16);
+            query_cache.page_filter.Mark(*cpu_addr, 16);
             if (GpuSplit::TracksPendingReports()) {
-                query_cache.NotePendingReport(*device);
+                query_cache.NotePendingReport(*cpu_addr);
             }
             VideoCommon::Nx2FastDraw::NoteSync();
             if (PostRenderOp(GpuSplit::PostedOp::QueryReport, [this, gpu_addr, type, flags, payload,
@@ -3861,7 +3861,7 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                 })) {
                 GpuSplit::Get().MarkGuestWrite();
                 if (GpuSplit::QuerySyncOnBack()) {
-                    samples_slots.push_back(*device);
+                    samples_slots.push_back(*cpu_addr);
                 }
                 return;
             }
@@ -5843,17 +5843,17 @@ bool RasterizerVulkan::PostInlineToMemory(GPUVAddr address, size_t copy_size,
     commands.Swap(inline_commands);
     const u64 stamp = commands.Empty() ? 0 : buffer_cache_runtime.Arena().CloseCollected();
     PostRenderOp(GpuSplit::PostedOp::Inline, [this, commands = std::move(commands), stamp,
-                                              device = *cpu_addr, copy_size, query, uploaded] {
+                                              addr = *cpu_addr, copy_size, query, uploaded] {
         if (!commands.Empty()) {
             buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
         }
         // Pending query results must not land over the new words later.
         if (query) {
-            query_cache.InvalidateRegion(device, copy_size);
+            query_cache.InvalidateRegion(addr, copy_size);
         }
         if (uploaded) {
             std::scoped_lock lock{texture_cache.mutex};
-            texture_cache.WriteMemory(device, copy_size);
+            texture_cache.WriteMemory(addr, copy_size);
         }
     });
     return true;

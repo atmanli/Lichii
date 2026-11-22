@@ -75,6 +75,15 @@ struct ImageViewInOut {
     ImageViewId id{};
 };
 
+/// A compute dispatch's texture and sampler pools, as its engine held them.
+struct ComputePools {
+    GPUVAddr tic{};
+    u32 tic_limit{};
+    GPUVAddr tsc{};
+    u32 tsc_limit{};
+    bool linked_tsc{};
+};
+
 /// A texture handle word a draw read, and where.
 struct TextureHandleRead {
     GPUVAddr address{};
@@ -376,6 +385,8 @@ public:
 
     /// Refresh the state for graphics/compute image view and sampler descriptors
     void SynchronizeDescriptors(bool compute);
+    /// The compute half from pools given by value (GPURender playing an unlent dispatch).
+    void SynchronizeComputeDescriptors(const ComputePools& pools);
 
     /// Updates the Render Targets if they can be rescaled
     /// @retval True if the Render Targets have been rescaled.

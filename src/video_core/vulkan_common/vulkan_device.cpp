@@ -1243,14 +1243,31 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
     return wanted_format;
 }
 
-void Device::ReportLoss() const {
+namespace {
+// The first thread to report a lost or unresponsive device ends the process; the others park.
+void ClaimDeviceReport() {
     static std::atomic_flag reported;
     if (reported.test_and_set()) {
-        // The first thread to see the loss reports it and ends the process.
         for (;;) {
             std::this_thread::sleep_for(std::chrono::hours{1});
         }
     }
+}
+} // Anonymous namespace
+
+void Device::ReportUnresponsive() const {
+    ClaimDeviceReport();
+    LOG_CRITICAL(Render_Vulkan,
+                 "Closing Lichii: the GPU stopped making progress (EDEN_NX2_GPU_WATCHDOG)");
+    Common::Log::Flush();
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), EXIT_FAILURE);
+#endif
+    std::_Exit(EXIT_FAILURE);
+}
+
+void Device::ReportLoss() const {
+    ClaimDeviceReport();
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     ReportDeviceFault();
     if (nsight_aftermath_tracker) {

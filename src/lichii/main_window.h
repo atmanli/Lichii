@@ -18,6 +18,7 @@
 #include <QMessageBox>
 #include <QFutureWatcher>
 #include <QPushButton>
+#include <QSet>
 #include <QTimer>
 #include <QTranslator>
 #include <qaction.h>
@@ -414,6 +415,7 @@ private slots:
     void OnToggleGpuAccuracy();
     void OnToggleAdaptingFilter();
     void OnConfigurePerGame();
+    void OnOpenModStore();
     void OnLoadAmiibo();
     void OnOpenRootDataFolder();
     void OnOpenNANDFolder();
@@ -511,6 +513,7 @@ private:
     void UpdateAAText();
     void UpdatePostShaderText();
     void UpdateFrameGenButton();
+
     void UpdateVolumeUI();
     void UpdateStatusBar();
     void UpdateGPUAccuracyButton();
@@ -523,6 +526,8 @@ private:
     void OpenURL(const QUrl& url);
     void LoadTranslation();
     void OpenPerGameConfiguration(u64 title_id, const std::string& file_name);
+    bool OpenModStore(QWidget* parent, u64 initial_title_id, const std::string& file_name,
+                      QSet<QString>& store_toggled);
     bool CheckFirmwarePresence();
     void SetFirmwareVersion();
     void SetFPSSuffix();
@@ -620,6 +625,7 @@ private:
     QPushButton* aa_status_button = nullptr;
     QPushButton* post_shader_status_button = nullptr;
     QPushButton* frame_gen_status_button = nullptr;
+
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;
     u64 dlss_evaluations = 0;
@@ -642,6 +648,7 @@ private:
     bool emulation_running = false;
     std::optional<CompatibilityReporting::Session> report_session;
     bool boot_in_progress = false;
+    bool mod_store_open = false;
     QMetaObject::Connection startup_qlaunch_connection;
     bool close_pending = false;
     // The path to the game currently running

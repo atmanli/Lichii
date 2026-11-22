@@ -31,6 +31,10 @@ constexpr s64 RefreshAheadSeconds = 5 * 60;
 // Sends the OAuth requests to base instead of oauth2.googleapis.com. For tests.
 void SetOAuthBaseForTests(std::string base);
 
+// Forgets the token kept in memory, a stale token.json and the sign-in snapshot, without revoking
+// anything. For tests.
+void ResetSignInForTests();
+
 // Timeouts, redirects and the CA store for Google's servers.
 void ConfigureClient(httplib::Client& client);
 
@@ -94,14 +98,29 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
 
 // The access token, refreshed first when it expires within RefreshAheadSeconds or force_refresh
 // is set (after a 401). nullopt when signed out or the refresh failed. Google refusing the refresh
-// token (invalid_grant) signs out, as SignOut does. stop ends the wait for another caller's
-// refresh and aborts this one's request in flight. A refreshed token the file can't take is kept
-// in memory.
+// token (invalid_grant) signs out, as SignOut does. A token from another client than the current
+// one (an imported client_secret.json) isn't refreshed: that needs a new sign-in. stop ends the
+// wait for another caller's refresh and aborts this one's request in flight. A refreshed token
+// the file can't take is kept in memory.
 std::optional<std::string> AccessToken(bool force_refresh = false, std::stop_token stop = {});
+
+struct SessionToken {
+    // nullopt when there is none: error says why, for the user.
+    std::optional<std::string> access_token;
+    // The sign-in it is from: each sign-in and sign-out starts another.
+    u64 session{};
+    std::string error;
+};
+
+// AccessToken, also saying why there is none. With session set, none when the current sign-in is
+// another, so that a request isn't retried under another account.
+SessionToken SessionAccessToken(bool force_refresh, std::optional<u64> session,
+                                std::stop_token stop = {});
 
 // Forgets the token and revokes it on Google. Blocks on the request. Signed out even when
 // token.json can't be removed: it is then ignored, and removed when possible, until the next
-// sign-in. False in that case, for the user to know a copy is left on disk.
+// sign-in, but read again after a restart (unless revoked). False in that case, for the user to
+// know a copy is left on disk.
 bool SignOut();
 
 } // namespace FrontendCommon::CloudSync

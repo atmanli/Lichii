@@ -1395,7 +1395,7 @@
     <string name="cloud_sync_denied">You refused access to Google Drive.</string>
     <string name="cloud_sync_code_expired">The sign-in code expired. Sign in again.</string>
     <string name="cloud_sync_sign_in_failed">Sign-in failed: %1$s</string>
-    <string name="cloud_sync_sign_out_file_left">Signed out, but the sign-in file in the cloud_sync folder of the configuration folder could not be deleted.</string>
+    <string name="cloud_sync_sign_out_file_left">Signed out, but the sign-in file in the cloud_sync folder of the configuration folder could not be deleted. Delete it, or Lichii may be signed in again after a restart.</string>
     <string name="cloud_sync_import_client">Import client_secret.json</string>
     <string name="cloud_sync_import_client_description">Use your own Google Cloud OAuth client (TVs and Limited Input devices) instead of Lichii\'s</string>
     <string name="cloud_sync_client_imported_status">Using the imported client_secret.json (%1$s)</string>

@@ -155,6 +155,41 @@ TEST_CASE("CloudSync: a refused refresh token signs out", "[cloud_sync]") {
     }
 }
 
+TEST_CASE("CloudSync: a token isn't refreshed with another client", "[cloud_sync]") {
+    FakeGoogle google;
+    std::vector<DeviceCode> shown;
+    google.Answer(DeviceCodeEndpoint, 200, Code);
+    google.Answer(TokenEndpoint, 200, Granted);
+    REQUIRE(SignInWith(google, shown).status == SignInStatus::SignedIn);
+
+    REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("other.id", "other.secret")));
+    const auto refused = SessionAccessToken(true, std::nullopt);
+    REQUIRE_FALSE(refused.access_token.has_value());
+    REQUIRE(refused.error == "The sign-in is from another OAuth client; sign in again to use this "
+                             "one");
+    REQUIRE(google.Hits(TokenEndpoint) == 1);
+    REQUIRE(SignedIn());
+
+    REQUIRE(ImportClientSecret(FakeGoogle::ClientSecret("client.id", "client.secret")));
+    REQUIRE(AccessToken(true) == "access.new");
+    REQUIRE(Param(google.Requests(TokenEndpoint).at(1), "client_id") == "client.id");
+}
+
+TEST_CASE("CloudSync: a code that arrives after sign-out isn't shown", "[cloud_sync]") {
+    FakeGoogle google;
+    google.Answer(DeviceCodeEndpoint, 200, Code, {}, std::chrono::milliseconds{500});
+    std::vector<DeviceCode> shown;
+    std::jthread signer_out{[&google] {
+        while (google.Hits(DeviceCodeEndpoint) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        SignOut();
+    }};
+    REQUIRE(SignInWith(google, shown).status == SignInStatus::Cancelled);
+    REQUIRE(shown.empty());
+    REQUIRE(google.Hits(TokenEndpoint) == 0);
+}
+
 TEST_CASE("CloudSync: sign-out revokes the refresh token", "[cloud_sync]") {
     FakeGoogle google;
     google.Answer(RevokeEndpoint, 200, "{}");

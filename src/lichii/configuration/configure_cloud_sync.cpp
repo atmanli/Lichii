@@ -281,12 +281,13 @@ void ConfigureCloudSync::SignIn() {
     const QPointer<ConfigureCloudSync> self{this};
     watcher->setFuture(QtConcurrent::run([self, stop = sign_in_stop.get_token()] {
         return CloudSync::SignIn(
-            [self](const CloudSync::DeviceCode& code) {
+            [self, stop](const CloudSync::DeviceCode& code) {
                 QMetaObject::invokeMethod(
                     QCoreApplication::instance(),
-                    [self, url = QString::fromStdString(code.verification_url),
+                    [self, stop, url = QString::fromStdString(code.verification_url),
                      code_text = QString::fromStdString(code.user_code)] {
-                        if (!self) {
+                        // Cancelled since: the code is no longer wanted.
+                        if (!self || stop.stop_requested()) {
                             return;
                         }
                         self->user_code = code_text;
@@ -312,7 +313,8 @@ void ConfigureCloudSync::SignOut() {
         if (!removed) {
             QMessageBox::warning(this, tr("Cloud Sync"),
                                  tr("Signed out, but the sign-in file in the cloud_sync folder of "
-                                    "the configuration folder could not be deleted."));
+                                    "the configuration folder could not be deleted. Delete it, or "
+                                    "Lichii may be signed in again after a restart."));
         }
     });
     watcher->setFuture(QtConcurrent::run([] { return CloudSync::SignOut(); }));

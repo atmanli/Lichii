@@ -1,13 +1,21 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+// Before windows.h, which otherwise brings in winsock.h and clashes with httplib's winsock2.h.
+#include <winsock2.h>
+#include <windows.h>
+
+#include <sddl.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -41,10 +49,13 @@ struct Token {
     std::string refresh_token;
     // Unix time.
     s64 expires_at{};
+    // The client it was issued to. Empty in a token saved before it was kept.
+    std::string client_id;
 };
 
 // Bumped by each sign-in and sign-out, so a sign-in that a newer one or a sign-out overtook
-// doesn't save its token.
+// doesn't save its token, and again when a sign-in saves it, so a request made with the old token
+// isn't retried with the new one.
 u64 session_generation = 0;
 // A refreshed token the file couldn't take. Kept so a new refresh token isn't lost.
 std::optional<Token> unsaved_token;
@@ -92,6 +103,36 @@ std::string ServerError(const nlohmann::json& reply) {
     return description.empty() ? StringField(reply, "error") : description;
 }
 
+#ifdef _WIN32
+// A security descriptor whose DACL lets in the current user alone, without the folder's inherited
+// entries. nullptr when it can't be made; else freed with LocalFree.
+PSECURITY_DESCRIPTOR OwnerOnlyDescriptor() {
+    HANDLE process_token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)) {
+        return nullptr;
+    }
+    DWORD size = 0;
+    GetTokenInformation(process_token, TokenUser, nullptr, 0, &size);
+    std::vector<u8> user(size);
+    LPWSTR sid = nullptr;
+    const bool found =
+        size > 0 && GetTokenInformation(process_token, TokenUser, user.data(), size, &size) &&
+        ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, &sid);
+    CloseHandle(process_token);
+    if (!found) {
+        return nullptr;
+    }
+    const std::wstring sddl = std::wstring{L"D:P(A;;FA;;;"} + sid + L")";
+    LocalFree(sid);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
+                                                              &descriptor, nullptr)) {
+        return nullptr;
+    }
+    return descriptor;
+}
+#endif
+
 // The file holds a refresh token or the client secret, so only its owner may read it. It is
 // written beside the old one and renamed over it, so a crash mid-write keeps the previous one.
 bool WritePrivateFile(const std::filesystem::path& path, std::string_view text) {
@@ -100,12 +141,24 @@ bool WritePrivateFile(const std::filesystem::path& path, std::string_view text) 
     void(Common::FS::CreateParentDirs(path));
     void(Common::FS::RemoveFile(temp));
 #ifdef _WIN32
-    // The file gets the config folder's ACL: the user's profile, or wherever the executable is in
-    // portable mode. No owner-only ACL is set.
-    Common::FS::IOFile file{temp, Common::FS::FileAccessMode::Write,
-                            Common::FS::FileType::BinaryFile};
-    const bool written = file.WriteString(text) == text.size();
-    const bool closed = file.Close();
+    // Created owner-only rather than narrowed afterwards, so it is never readable by others, even
+    // in a portable config folder others can read. The rename keeps the DACL.
+    const PSECURITY_DESCRIPTOR descriptor = OwnerOnlyDescriptor();
+    if (descriptor == nullptr) {
+        return false;
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
+    const HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    LocalFree(descriptor);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD done = 0;
+    const bool written =
+        ::WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &done, nullptr) &&
+        done == text.size();
+    const bool closed = CloseHandle(file) != 0;
 #else
     // Created owner-only rather than narrowed afterwards, so it is never readable by others.
     const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -141,6 +194,7 @@ std::optional<Token> ReadTokenFile() {
         .access_token = StringField(json, "access_token"),
         .refresh_token = StringField(json, "refresh_token"),
         .expires_at = IntField(json, "expires_at"),
+        .client_id = StringField(json, "client_id"),
     };
     if (token.refresh_token.empty()) {
         return std::nullopt;
@@ -166,6 +220,7 @@ bool SaveTokenLocked(const Token& token) {
         {"access_token", token.access_token},
         {"refresh_token", token.refresh_token},
         {"expires_at", token.expires_at},
+        {"client_id", token.client_id},
     }.dump();
     if (!WritePrivateFile(TokenFile(), text)) {
         LOG_ERROR(Frontend, "Could not save the Google Drive sign-in");
@@ -184,7 +239,7 @@ bool ClearTokenLocked() {
     token_file_stale = !Common::FS::RemoveFile(TokenFile());
     if (token_file_stale) {
         LOG_ERROR(Frontend, "Could not remove the Google Drive sign-in; it is ignored until the "
-                            "next sign-in");
+                            "next sign-in, but read again after a restart");
     }
     return !token_file_stale;
 }
@@ -227,6 +282,13 @@ std::optional<ClientCredentials> LoadImportedClient() {
 void SetOAuthBaseForTests(std::string base) {
     std::scoped_lock lock{base_mutex};
     oauth_base = std::move(base);
+}
+
+void ResetSignInForTests() {
+    std::scoped_lock lock{token_mutex};
+    unsaved_token.reset();
+    token_file_stale = false;
+    signed_in_snapshot = -1;
 }
 
 void ConfigureClient(httplib::Client& client) {
@@ -309,7 +371,8 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
     const auto code_result =
         PostForm(DeviceCodePath,
                  {{"client_id", client->client_id}, {"scope", std::string{DriveScope}}}, stop);
-    if (stop.stop_requested()) {
+    // Also when signed out or in again meanwhile: the code is then no one's to show.
+    if (stop.stop_requested() || !CurrentSession(generation)) {
         return {SignInStatus::Cancelled, {}};
     }
     if (!code_result) {
@@ -325,29 +388,36 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
                             ServerError(code))};
     }
     const s64 expires_in = IntField(code, "expires_in");
+    // From before show_code, which may take a while: the code expires meanwhile too.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{expires_in};
     show_code({.user_code = StringField(code, "user_code"),
                .verification_url = StringField(code, "verification_url"),
                .expires_in = expires_in});
+    if (std::chrono::steady_clock::now() >= deadline) {
+        return {SignInStatus::Expired, {}};
+    }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{expires_in};
     auto interval = std::chrono::seconds{IntField(code, "interval", 5)};
     const httplib::Params poll_form{{"client_id", client->client_id},
                                     {"client_secret", client->client_secret},
                                     {"device_code", device_code},
                                     {"grant_type", std::string{DeviceCodeGrant}}};
     while (true) {
-        if (!WaitForPoll(interval, stop) || !CurrentSession(generation)) {
+        const auto left =
+            std::chrono::ceil<std::chrono::seconds>(deadline - std::chrono::steady_clock::now());
+        if (!WaitForPoll(std::min(interval, left), stop) || !CurrentSession(generation)) {
             return {SignInStatus::Cancelled, {}};
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             return {SignInStatus::Expired, {}};
         }
         const auto poll = PostForm(TokenPath, poll_form, stop);
-        if (stop.stop_requested()) {
+        if (stop.stop_requested() || !CurrentSession(generation)) {
             return {SignInStatus::Cancelled, {}};
         }
         if (!poll) {
-            // Try again at the next interval: the code is still good until the deadline.
+            // Try again, less often (RFC 8628): the code is still good until the deadline.
+            interval *= 2;
             continue;
         }
         const auto reply = ParseObject(poll->body);
@@ -356,6 +426,7 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
                 .access_token = StringField(reply, "access_token"),
                 .refresh_token = StringField(reply, "refresh_token"),
                 .expires_at = Now() + IntField(reply, "expires_in"),
+                .client_id = client->client_id,
             };
             if (token.refresh_token.empty()) {
                 return {SignInStatus::Failed, "Google sent no refresh token."};
@@ -368,6 +439,7 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
             if (!SaveTokenLocked(token)) {
                 return {SignInStatus::Failed, "Could not save the sign-in."};
             }
+            ++session_generation;
             return {SignInStatus::SignedIn, {}};
         }
         const std::string error = StringField(reply, "error");
@@ -390,23 +462,45 @@ SignInResult SignIn(const std::function<void(const DeviceCode&)>& show_code, std
 }
 
 std::optional<std::string> AccessToken(bool force_refresh, std::stop_token stop) {
+    return SessionAccessToken(force_refresh, std::nullopt, stop).access_token;
+}
+
+SessionToken SessionAccessToken(bool force_refresh, std::optional<u64> session,
+                                std::stop_token stop) {
     std::unique_lock lock{token_mutex, std::defer_lock};
     while (!lock.try_lock_for(std::chrono::milliseconds{50})) {
         if (stop.stop_requested()) {
-            return std::nullopt;
+            return {.error = "Cancelled"};
         }
     }
+    if (stop.stop_requested()) {
+        return {.error = "Cancelled"};
+    }
+    if (session && *session != session_generation) {
+        return {.error = "The Google Drive sign-in changed during the request"};
+    }
+    SessionToken reply{.session = session_generation};
     auto token = LoadTokenLocked();
     if (!token) {
-        return std::nullopt;
+        reply.error = "Not signed in to Google Drive";
+        return reply;
     }
     if (!force_refresh && !token->access_token.empty() &&
         token->expires_at - RefreshAheadSeconds > Now()) {
-        return token->access_token;
+        reply.access_token = token->access_token;
+        return reply;
     }
     const auto client = LoadClientCredentials();
     if (!client) {
-        return std::nullopt;
+        reply.error = "No Google OAuth client to refresh the sign-in with";
+        return reply;
+    }
+    // Google refuses another client's refresh token, and may take that as invalid_grant.
+    if (!token->client_id.empty() && token->client_id != client->client_id) {
+        LOG_WARNING(Frontend,
+                    "The Google sign-in is from another OAuth client than the one in use");
+        reply.error = "The sign-in is from another OAuth client; sign in again to use this one";
+        return reply;
     }
     const auto result = PostForm(TokenPath,
                                  {{"client_id", client->client_id},
@@ -415,35 +509,43 @@ std::optional<std::string> AccessToken(bool force_refresh, std::stop_token stop)
                                   {"grant_type", "refresh_token"}},
                                  stop);
     if (!result) {
-        LOG_WARNING(Frontend, "Could not refresh the Google access token: {}",
-                    httplib::to_string(result.error()));
-        return std::nullopt;
+        const std::string error = httplib::to_string(result.error());
+        LOG_WARNING(Frontend, "Could not refresh the Google access token: {}", error);
+        reply.error = fmt::format("Could not refresh the Google sign-in ({}); try again", error);
+        return reply;
     }
-    const auto reply = ParseObject(result->body);
+    const auto json = ParseObject(result->body);
     if (result->status != 200) {
-        if (StringField(reply, "error") == "invalid_grant") {
+        if (StringField(json, "error") == "invalid_grant") {
             LOG_WARNING(Frontend, "Google refused the refresh token; signing out of Drive sync");
             ClearTokenLocked();
+            reply.error = "Google refused the sign-in; sign in again";
         } else {
             LOG_WARNING(Frontend, "Google refused the access token refresh (HTTP {}): {}",
-                        result->status, ServerError(reply));
+                        result->status, ServerError(json));
+            reply.error = fmt::format("Could not refresh the Google sign-in (HTTP {}); try again",
+                                      result->status);
         }
-        return std::nullopt;
+        return reply;
     }
-    token->access_token = StringField(reply, "access_token");
+    token->access_token = StringField(json, "access_token");
     if (token->access_token.empty()) {
         LOG_WARNING(Frontend, "Google sent no access token");
-        return std::nullopt;
+        reply.error = "Google sent no access token; try again";
+        return reply;
     }
-    token->expires_at = Now() + IntField(reply, "expires_in");
+    token->expires_at = Now() + IntField(json, "expires_in");
     // Google keeps the refresh token unless it sends a new one.
-    if (auto refresh_token = StringField(reply, "refresh_token"); !refresh_token.empty()) {
+    if (auto refresh_token = StringField(json, "refresh_token"); !refresh_token.empty()) {
         token->refresh_token = std::move(refresh_token);
     }
+    // A token saved before the client was kept is now known to be this client's.
+    token->client_id = client->client_id;
     if (!SaveTokenLocked(*token)) {
         unsaved_token = token;
     }
-    return token->access_token;
+    reply.access_token = token->access_token;
+    return reply;
 }
 
 bool SignOut() {

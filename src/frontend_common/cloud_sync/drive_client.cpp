@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -97,6 +98,7 @@ std::optional<File> ParseFileReply(const std::optional<httplib::Response>& reply
     const auto json = nlohmann::json::parse(reply->body, nullptr, false);
     if (!json.is_object() || StringField(json, "id").empty()) {
         LOG_ERROR(Frontend, "Drive sent a file without an id");
+        last_error = "Drive sent a file without an id";
         return std::nullopt;
     }
     return ParseFile(json);
@@ -112,6 +114,29 @@ std::string DriveError(const std::string& body) {
     return {};
 }
 
+// A 403 for a rate limit, which passes like a 429.
+bool RateLimited(const std::string& body) {
+    const auto json = nlohmann::json::parse(body, nullptr, false);
+    if (!json.is_object()) {
+        return false;
+    }
+    const auto error = json.find("error");
+    if (error == json.end() || !error->is_object()) {
+        return false;
+    }
+    const auto errors = error->find("errors");
+    if (errors == error->end() || !errors->is_array()) {
+        return false;
+    }
+    return std::ranges::any_of(*errors, [](const nlohmann::json& entry) {
+        if (!entry.is_object()) {
+            return false;
+        }
+        const std::string reason = StringField(entry, "reason");
+        return reason == "userRateLimitExceeded" || reason == "rateLimitExceeded";
+    });
+}
+
 using Request = std::function<httplib::Result(httplib::Client&, const httplib::Headers&)>;
 
 // Waits for the retry. False when stop was requested.
@@ -123,18 +148,21 @@ bool WaitForRetry(std::chrono::seconds delay, std::stop_token stop) {
     return !stop.stop_requested();
 }
 
+// Made in the sign-in session when it is set, else in the current one, which it is then set to:
+// a retry or the next page of a list never goes to another account.
 std::optional<httplib::Response> Send(std::string_view what, const Request& request,
-                                      std::stop_token stop) {
+                                      std::stop_token stop, std::optional<u64>& session) {
     last_error.clear();
     const auto fail = [what](std::string error) -> std::optional<httplib::Response> {
         LOG_ERROR(Frontend, "Drive {} failed: {}", what, error);
         last_error = std::move(error);
         return std::nullopt;
     };
-    auto token = AccessToken(false, stop);
-    if (!token) {
-        return fail(stop.stop_requested() ? "Cancelled" : "Not signed in to Google Drive");
+    auto token = SessionAccessToken(false, session, stop);
+    if (!token.access_token) {
+        return fail(stop.stop_requested() ? "Cancelled" : token.error);
     }
+    session = token.session;
     bool refreshed = false;
     auto delay = std::chrono::seconds{1};
     for (int retry = 0;;) {
@@ -145,8 +173,8 @@ std::optional<httplib::Response> Send(std::string_view what, const Request& requ
         ConfigureClient(client);
         // Aborts a request in flight. A connection still being made isn't interrupted.
         const std::stop_callback abort{stop, [&client] { client.stop(); }};
-        const auto result =
-            request(client, {{"Authorization", "Bearer " + *token}, {"User-Agent", "Lichii"}});
+        const auto result = request(
+            client, {{"Authorization", "Bearer " + *token.access_token}, {"User-Agent", "Lichii"}});
         if (stop.stop_requested()) {
             return fail("Cancelled");
         }
@@ -155,18 +183,25 @@ std::optional<httplib::Response> Send(std::string_view what, const Request& requ
         }
         if (result->status == 401 && !refreshed) {
             refreshed = true;
-            token = AccessToken(true, stop);
-            if (!token) {
-                return fail(stop.stop_requested() ? "Cancelled" : "Google refused the sign-in");
+            token = SessionAccessToken(true, session, stop);
+            if (!token.access_token) {
+                return fail(stop.stop_requested() ? "Cancelled" : token.error);
             }
             continue;
         }
-        if ((result->status == 429 || result->status >= 500) && retry < Retries) {
+        if ((result->status == 429 || result->status >= 500 ||
+             (result->status == 403 && RateLimited(result->body))) &&
+            retry < Retries) {
             ++retry;
             if (!WaitForRetry(delay, stop)) {
                 return fail("Cancelled");
             }
             delay *= 2;
+            // A sign-out during the wait ends the retry.
+            token = SessionAccessToken(false, session, stop);
+            if (!token.access_token) {
+                return fail(stop.stop_requested() ? "Cancelled" : token.error);
+            }
             continue;
         }
         if (result->status < 200 || result->status >= 300) {
@@ -176,6 +211,12 @@ std::optional<httplib::Response> Send(std::string_view what, const Request& requ
         }
         return *result;
     }
+}
+
+std::optional<httplib::Response> Send(std::string_view what, const Request& request,
+                                      std::stop_token stop) {
+    std::optional<u64> session;
+    return Send(what, request, stop, session);
 }
 
 // A resumable upload, sent in one request after the one that starts it. Unlike a multipart
@@ -210,6 +251,16 @@ httplib::Result UploadMedia(httplib::Client& client, const httplib::Headers& hea
                        std::string{mime_type});
 }
 
+std::optional<File> LookUpFile(std::string_view id, std::stop_token stop,
+                               std::optional<u64>& session) {
+    return ParseFileReply(Send(
+        "file lookup",
+        [&](auto& client, const auto& headers) {
+            return client.Get(fmt::format("/drive/v3/files/{}?fields={}", id, FileFields), headers);
+        },
+        stop, session));
+}
+
 nlohmann::json PropertiesJson(const AppProperties& properties) {
     nlohmann::json json = nlohmann::json::object();
     for (const auto& [key, value] : properties) {
@@ -234,6 +285,7 @@ std::optional<std::vector<File>> FindFiles(const AppProperties& properties, std:
     const std::string query = Query(properties, parent);
     std::vector<File> files;
     std::string page_token;
+    std::optional<u64> session;
     do {
         httplib::Params params{{"q", query},
                                {"fields", fmt::format("nextPageToken,files({})", FileFields)},
@@ -246,13 +298,14 @@ std::optional<std::vector<File>> FindFiles(const AppProperties& properties, std:
             [&](auto& client, const auto& headers) {
                 return client.Get("/drive/v3/files", params, headers);
             },
-            stop);
+            stop, session);
         if (!reply) {
             return std::nullopt;
         }
         const auto json = nlohmann::json::parse(reply->body, nullptr, false);
         if (!json.is_object()) {
             LOG_ERROR(Frontend, "Drive sent an unreadable file list");
+            last_error = "Drive sent an unreadable file list";
             return std::nullopt;
         }
         if (const auto list = json.find("files"); list != json.end() && list->is_array()) {
@@ -267,19 +320,51 @@ std::optional<std::vector<File>> FindFiles(const AppProperties& properties, std:
 
 std::optional<File> CreateFolder(std::string_view name, std::string_view parent,
                                  const AppProperties& properties, std::stop_token stop) {
-    nlohmann::json metadata{{"name", name},
+    // With an id of its own, so that a retry after a 5xx Drive made it anyway can't make another.
+    std::optional<u64> session;
+    const auto ids = Send(
+        "folder id",
+        [&](auto& client, const auto& headers) {
+            return client.Get("/drive/v3/files/generateIds",
+                              httplib::Params{{"count", "1"}, {"space", "drive"}}, headers);
+        },
+        stop, session);
+    if (!ids) {
+        return std::nullopt;
+    }
+    const auto ids_json = nlohmann::json::parse(ids->body, nullptr, false);
+    const auto id_list = ids_json.is_object() ? ids_json.find("ids") : ids_json.end();
+    if (id_list == ids_json.end() || !id_list->is_array() || id_list->empty() ||
+        !id_list->front().is_string()) {
+        LOG_ERROR(Frontend, "Drive sent no file id");
+        last_error = "Drive sent no file id";
+        return std::nullopt;
+    }
+    const std::string id = id_list->front().get<std::string>();
+    nlohmann::json metadata{{"id", id},
+                            {"name", name},
                             {"mimeType", FolderMimeType},
                             {"appProperties", PropertiesJson(properties)}};
     if (!parent.empty()) {
         metadata["parents"] = {parent};
     }
-    return ParseFileReply(Send(
+    auto folder = ParseFileReply(Send(
         "folder creation",
         [&](auto& client, const auto& headers) {
             return client.Post(fmt::format("/drive/v3/files?fields={}", FileFields), headers,
                                metadata.dump(), std::string{JsonType});
         },
-        stop));
+        stop, session));
+    if (folder || stop.stop_requested()) {
+        return folder;
+    }
+    // A retry is refused when an attempt Drive answered with a 5xx made the folder: it is there.
+    const std::string error = last_error;
+    if (auto made = LookUpFile(id, stop, session); made && !made->trashed) {
+        return made;
+    }
+    last_error = error;
+    return std::nullopt;
 }
 
 std::optional<File> UploadFile(std::string_view name, std::string_view parent,
@@ -318,12 +403,8 @@ std::optional<File> UpdateFile(std::string_view id, const AppProperties& propert
 }
 
 std::optional<File> GetFile(std::string_view id, std::stop_token stop) {
-    return ParseFileReply(Send(
-        "file lookup",
-        [&](auto& client, const auto& headers) {
-            return client.Get(fmt::format("/drive/v3/files/{}?fields={}", id, FileFields), headers);
-        },
-        stop));
+    std::optional<u64> session;
+    return LookUpFile(id, stop, session);
 }
 
 std::optional<std::vector<u8>> DownloadFile(std::string_view id, std::stop_token stop) {

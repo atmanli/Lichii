@@ -62,9 +62,18 @@ public:
             }
             Reply(response, {{"files", list}});
         });
+        server.Get("/drive/v3/files/generateIds", [this](const auto&, auto& response) {
+            std::scoped_lock lock{mutex};
+            Reply(response, {{"ids", {fmt::format("generated.{}", ++generated)}}});
+        });
         server.Post("/drive/v3/files", [this](const auto& request, auto& response) {
             std::scoped_lock lock{mutex};
-            Reply(response, Json(Create(nlohmann::json::parse(request.body), {})));
+            const auto metadata = nlohmann::json::parse(request.body);
+            if (files.contains(metadata.value("id", ""))) {
+                response.status = 409;
+                return;
+            }
+            Reply(response, Json(Create(metadata, {})));
         });
         server.Post("/upload/drive/v3/files", [this](const auto& request, auto& response) {
             std::scoped_lock lock{mutex};
@@ -254,7 +263,7 @@ private:
 
     const File& Create(const nlohmann::json& metadata, std::string data) {
         File file{
-            .id = fmt::format("file.{}", files.size() + 1),
+            .id = metadata.value("id", fmt::format("file.{}", files.size() + 1)),
             .name = metadata.at("name"),
             .mime_type = metadata.at("mimeType"),
             .data = std::move(data),
@@ -283,6 +292,8 @@ private:
     std::map<std::string, File> files;
     std::vector<Session> sessions;
     int clock{};
+    // File ids handed out by generateIds.
+    int generated{};
 };
 
 } // namespace Tests

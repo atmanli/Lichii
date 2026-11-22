@@ -90,18 +90,36 @@ TEST_CASE("CloudSync: Drive file search pages through the results", "[cloud_sync
 
 TEST_CASE("CloudSync: Drive folders are created with their properties", "[cloud_sync]") {
     FakeDrive drive;
+    drive.Answer("GET /drive/v3/files/generateIds", 200, R"({"ids":["folder.1"]})");
     drive.Answer("POST /drive/v3/files", 200, R"({"id":"folder.1","name":"Lichii"})");
 
     const auto folder = Drive::CreateFolder("Lichii", "", {{"lichii", "root"}});
     REQUIRE(folder->id == "folder.1");
+    REQUIRE(drive.Param("GET /drive/v3/files/generateIds", "count") == "1");
     REQUIRE(drive.Param("POST /drive/v3/files", "fields") == FileFields);
     REQUIRE(drive.Body("POST /drive/v3/files") ==
-            nlohmann::json{{"name", "Lichii"},
+            nlohmann::json{{"id", "folder.1"},
+                           {"name", "Lichii"},
                            {"mimeType", Drive::FolderMimeType},
                            {"appProperties", {{"lichii", "root"}}}});
 
     REQUIRE(Drive::CreateFolder("Saves", "folder.1", {})->id == "folder.1");
     REQUIRE(drive.Body("POST /drive/v3/files", 1)["parents"] == nlohmann::json{"folder.1"});
+}
+
+TEST_CASE("CloudSync: a Drive folder made by a failed attempt isn't made again", "[cloud_sync]") {
+    FakeDrive drive;
+    drive.Answer("GET /drive/v3/files/generateIds", 200, R"({"ids":["folder.1"]})");
+    // Made, but answered with a 503: the retry finds the id taken.
+    drive.Answer("POST /drive/v3/files", 503, "{}");
+    drive.Answer("POST /drive/v3/files", 409, R"({"error":{"code":409,"message":"Taken"}})");
+    drive.Answer("GET /drive/v3/files/folder.1", 200, R"({"id":"folder.1","name":"Lichii"})");
+
+    const auto folder = Drive::CreateFolder("Lichii", "", {{"lichii", "root"}});
+    REQUIRE(folder.has_value());
+    REQUIRE(folder->id == "folder.1");
+    REQUIRE(drive.Hits("POST /drive/v3/files") == 2);
+    REQUIRE(drive.Body("POST /drive/v3/files", 1)["id"] == "folder.1");
 }
 
 TEST_CASE("CloudSync: Drive uploads go through a resumable session", "[cloud_sync]") {
@@ -194,6 +212,44 @@ TEST_CASE("CloudSync: a 401 from Drive refreshes the token once", "[cloud_sync]"
         REQUIRE(drive.Hits("POST /token") == 1);
         REQUIRE(drive.Hits(List) == 2);
     }
+}
+
+TEST_CASE("CloudSync: a Drive call isn't retried under another sign-in", "[cloud_sync]") {
+    FakeDrive drive;
+    drive.Answer("POST /token", 200, R"({"access_token":"access.new","expires_in":3599})");
+    drive.Answer("POST /revoke", 200, "{}");
+    drive.Answer(List, 401, "{}", {}, std::chrono::milliseconds{500});
+    // Signed out and in again while the 401 is on its way.
+    std::jthread switcher{[&drive] {
+        while (drive.Hits(List) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        FrontendCommon::CloudSync::SignOut();
+        drive.SignIn(3600);
+    }};
+    REQUIRE_FALSE(Drive::FindFiles({{"lichii", "root"}}).has_value());
+    REQUIRE(Drive::LastError() == "The Google Drive sign-in changed during the request");
+    REQUIRE(drive.Hits("POST /token") == 0);
+    REQUIRE(drive.Hits(List) == 1);
+}
+
+TEST_CASE("CloudSync: a failed token refresh isn't reported as a sign-out", "[cloud_sync]") {
+    FakeDrive drive;
+    drive.SignIn(0);
+    drive.Answer("POST /token", 503, "{}");
+    REQUIRE_FALSE(Drive::FindFiles({{"lichii", "root"}}).has_value());
+    REQUIRE(Drive::LastError() == "Could not refresh the Google sign-in (HTTP 503); try again");
+    REQUIRE(drive.Hits(List) == 0);
+}
+
+TEST_CASE("CloudSync: an unreadable Drive reply says why it failed", "[cloud_sync]") {
+    FakeDrive drive;
+    drive.Answer(List, 200, "not json");
+    drive.Answer("GET /drive/v3/files/file.1", 200, R"({"name":"Player.zip"})");
+    REQUIRE_FALSE(Drive::FindFiles({{"lichii", "root"}}).has_value());
+    REQUIRE(Drive::LastError() == "Drive sent an unreadable file list");
+    REQUIRE_FALSE(Drive::GetFile("file.1").has_value());
+    REQUIRE(Drive::LastError() == "Drive sent a file without an id");
 }
 
 TEST_CASE("CloudSync: Drive calls back off on 429 and 5xx", "[cloud_sync]") {

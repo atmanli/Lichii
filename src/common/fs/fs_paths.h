@@ -31,6 +31,7 @@
 #define STREAMLINE_DIR "streamline"
 #define FIDELITYFX_DIR "fidelityfx"
 #define XESS_DIR "xess"
+#define FLYHIGH_DIR "flyhigh"
 #define TAS_DIR "tas"
 #define ICONS_DIR "icons"
 

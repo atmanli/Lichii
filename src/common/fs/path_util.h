@@ -36,6 +36,7 @@ enum class EdenPath {
     StreamlineDir,  // Where the user-supplied NVIDIA Streamline loader is stored.
     FidelityFxDir,  // Where AMD's FidelityFX runtime (FSR 4) is downloaded.
     XeSSDir,        // Where the user-supplied Intel XeSS runtime is stored.
+    FlyHighDir,     // Where FlyHigh frame generation keeps its model and kernel timings.
 };
 
 // migration/compat dirs

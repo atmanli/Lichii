@@ -261,11 +261,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                           "EDEN_NX2_RENDER_POST_WFI",         "EDEN_NX2_RENDER_POST_FENCE_REPORT",
                           "EDEN_NX2_RENDER_LIST_WORDS_E"};
         for (size_t op = 0; op < posts.size(); ++op) {
-            const bool wanted = RenderSwitch(post_switches[op]);
-            posts[op] = wanted && render_unlend;
+            const bool post_wanted = RenderSwitch(post_switches[op]);
+            posts[op] = post_wanted && render_unlend;
             posted[op] = 0;
             fences_lent = {};
-            if (wanted && !render_unlend) {
+            if (post_wanted && !render_unlend) {
                 LOG_WARNING(HW_GPU, "{} needs EDEN_NX2_RENDER_UNLEND=1: ignored",
                             post_switches[op]);
             }

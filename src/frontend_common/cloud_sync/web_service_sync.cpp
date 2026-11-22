@@ -131,7 +131,7 @@ struct LoginSync {
             bool changed = false;
             remote_login = Download(*remote, changed);
             if (!remote_login) {
-                return changed ? Refresh(remote) : true;
+                return changed ? Refresh(found) : true;
             }
         }
         if (action == SyncAction::Conflict) {
@@ -165,6 +165,7 @@ struct LoginSync {
                 if (current->trashed || FileHash(*current) != *remote_hash ||
                     current->head_revision_id != remote->head_revision_id) {
                     remote = current->trashed ? std::nullopt : current;
+                    found.same_contents.clear();
                     return false;
                 }
             }
@@ -179,13 +180,14 @@ struct LoginSync {
 
     // Reads Drive's file again after it changed under a download. False, to decide again, unless
     // that fails.
-    bool Refresh(std::optional<Drive::File>& remote) {
-        const auto current = Drive::GetFile(remote->id, stop);
+    bool Refresh(RemoteFile& found) {
+        const auto current = Drive::GetFile(found.file->id, stop);
         if (!current) {
             DriveError("Could not download the web service login");
             return true;
         }
-        remote = current->trashed ? std::nullopt : current;
+        found.file = current->trashed ? std::nullopt : current;
+        found.same_contents.clear();
         return false;
     }
 };

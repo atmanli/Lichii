@@ -89,6 +89,8 @@ private:
     std::stop_source stop;
     bool closing{};
     int running{};
+    // PrepareBoot's BeginGuest, for GuestStopped to end.
+    u64 guest_registration{};
     std::function<std::vector<FrontendCommon::CloudSync::Title>()> title_source;
     // The background syncs, for Shutdown to wait for.
     std::vector<QFuture<FrontendCommon::CloudSync::SyncResult>> futures;

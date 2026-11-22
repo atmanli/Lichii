@@ -62,7 +62,8 @@ bool DistinctDestinations(std::span<const ZipEntry> entries) {
     return std::ranges::adjacent_find(paths) == paths.end();
 }
 
-// Creates the file, failing when anything is already at path.
+// Creates the file, failing when anything is already at path. A file it can't fully write is
+// removed.
 bool WriteNewFile(const std::filesystem::path& path, std::span<const u8> data) {
 #ifdef _WIN32
     std::FILE* const file = _wfopen(path.c_str(), L"wbx");
@@ -73,7 +74,12 @@ bool WriteNewFile(const std::filesystem::path& path, std::span<const u8> data) {
         return false;
     }
     const bool written = std::fwrite(data.data(), 1, data.size(), file) == data.size();
-    return std::fclose(file) == 0 && written;
+    if (std::fclose(file) != 0 || !written) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        return false;
+    }
+    return true;
 }
 
 std::optional<std::vector<ZipEntry>> ReadFolder(const std::filesystem::path& folder) {
@@ -86,9 +92,16 @@ std::optional<std::vector<ZipEntry>> ReadFolder(const std::filesystem::path& fol
          !ec && it != std::filesystem::recursive_directory_iterator{}; it.increment(ec)) {
         const auto relative = it->path().lexically_relative(folder).generic_u8string();
         ZipEntry entry{.name{relative.begin(), relative.end()}};
-        if (it->is_directory(ec)) {
+        // The iterator doesn't enter a linked folder, which would be packed empty.
+        const auto status = it->symlink_status(ec);
+        if (std::filesystem::is_symlink(status)) {
+            LOG_ERROR(Frontend, "Not packing the save with the symlink {}",
+                      Common::FS::PathToUTF8String(it->path()));
+            return std::nullopt;
+        }
+        if (std::filesystem::is_directory(status)) {
             entry.name += '/';
-        } else if (it->is_regular_file(ec)) {
+        } else if (std::filesystem::is_regular_file(status)) {
             std::ifstream file{it->path(), std::ios::binary};
             entry.data.assign(std::istreambuf_iterator<char>{file}, {});
             if (!file.is_open() || file.bad()) {
@@ -173,11 +186,33 @@ bool BackUp(const std::filesystem::path& folder, const std::filesystem::path& ba
 
 std::filesystem::path LocalSavePath(const SaveId& save) {
     const auto save_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::SaveDir);
+    const auto type = save.user ? FileSys::SaveDataType::Account : FileSys::SaveDataType::Device;
+    const u128 user_id = save.user ? save.user->AsU128() : u128{};
+    // GetFullPath takes the future layout only when its folder is there. A restore into it cut
+    // short mid-swap left the save at its .previous (as in RestoreSave): put it back first.
+    const u64 future_title = save.title_id & ~0xFFULL;
+    const auto future = Common::FS::ConcatPathSafe(
+        save_dir,
+        save.user ? fmt::format("{}/{:016X}/0",
+                                FileSys::SaveDataFactory::GetUserGameSaveDataRoot(user_id, true),
+                                future_title)
+                  : fmt::format("/user/save/device/{:016X}/0", future_title));
+    auto future_previous = future;
+    future_previous += ".previous";
+    std::error_code ec;
+    if (!std::filesystem::exists(future, ec) && std::filesystem::exists(future_previous, ec)) {
+        std::filesystem::rename(future_previous, future, ec);
+        if (ec) {
+            LOG_ERROR(Frontend,
+                      "Could not move back the save an interrupted restore moved aside: {}",
+                      ec.message());
+        } else {
+            LOG_WARNING(Frontend, "Moved back the save an interrupted restore had moved aside");
+        }
+    }
     FileSys::RealVfsFilesystem vfs;
     const auto root =
         vfs.OpenDirectory(Common::FS::PathToUTF8String(save_dir), FileSys::OpenMode::Read);
-    const auto type = save.user ? FileSys::SaveDataType::Account : FileSys::SaveDataType::Device;
-    const u128 user_id = save.user ? save.user->AsU128() : u128{};
     const auto relative = FileSys::SaveDataFactory::GetFullPath(
         {}, root, FileSys::SaveDataSpaceId::User, type, save.title_id, user_id, 0);
     return Common::FS::ConcatPathSafe(save_dir, relative);
@@ -223,6 +258,11 @@ std::string ContentHash(std::span<const ZipEntry> entries) {
 std::optional<PackedSave> PackSave(const std::filesystem::path& folder) {
     const auto entries = ReadFolder(folder);
     if (!entries) {
+        return std::nullopt;
+    }
+    // RestoreSave refuses such a zip, so it couldn't be restored.
+    if (!DistinctDestinations(*entries)) {
+        LOG_ERROR(Frontend, "Not packing the save with two entries for the same path");
         return std::nullopt;
     }
     auto zip = WriteZip(*entries);

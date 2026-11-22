@@ -101,16 +101,23 @@ bool ProfileManager::RemoveProfileAtIndex(std::size_t index) {
         return false;
     }
 
-    if (!IsScratch()) {
-        Common::Nextendo::ClearAccount(profiles[index].user_uuid);
-    }
+    // Put back when profiles.dat can't take the removal, which then keeps the profile.
+    const auto previous_profiles = profiles;
+    const auto previous_count = user_count;
     profiles[index] = ProfileInfo{};
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
     --user_count;
 
     is_save_needed = true;
-    WriteUserSaveFile();
+    if (!WriteUserSaveFile()) {
+        profiles = previous_profiles;
+        user_count = previous_count;
+        return false;
+    }
+    if (!IsScratch()) {
+        Common::Nextendo::ClearAccount(previous_profiles[index].user_uuid);
+    }
 
     return true;
 }
@@ -377,6 +384,17 @@ bool ProfileManager::RemoveUser(UUID uuid) {
     return RemoveProfileAtIndex(*index);
 }
 
+void ProfileManager::RemoveUnsavedUser(UUID uuid) {
+    const auto index = GetUserIndex(uuid);
+    if (!index) {
+        return;
+    }
+    profiles[*index] = ProfileInfo{};
+    std::stable_partition(profiles.begin(), profiles.end(),
+                          [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
+    --user_count;
+}
+
 bool ProfileManager::SetProfileBase(UUID uuid, const ProfileBase& profile_new) {
     const auto index = GetUserIndex(uuid);
     if (!index || profile_new.user_uuid.IsInvalid()) {
@@ -473,13 +491,7 @@ bool ProfileManager::WriteUserSaveFile() {
     const auto save_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / ACC_SAVE_AVATORS_BASE_PATH /
                          "profiles.dat");
 
-    if (FS::IsFile(save_path) && !FS::RemoveFile(save_path)) {
-        LOG_WARNING(Service_ACC, "Could not remove existing profiles.dat");
-        return false;
-    } else {
-        LOG_INFO(Service_ACC, "Writing profiles.dat to {}",
-                 Common::FS::PathToUTF8String(save_path));
-    }
+    LOG_INFO(Service_ACC, "Writing profiles.dat to {}", Common::FS::PathToUTF8String(save_path));
 
     if (!FS::CreateParentDirs(save_path)) {
         LOG_WARNING(Service_ACC, "Failed to create full path of profiles.dat. Create the directory "
@@ -488,11 +500,22 @@ bool ProfileManager::WriteUserSaveFile() {
         return false;
     }
 
-    FS::IOFile save(save_path, FS::FileAccessMode::Write, FS::FileType::BinaryFile);
-
-    // Closed here, as a failed flush shows only then.
-    if (!save.IsOpen() || !save.SetSize(sizeof(ProfileDataRaw)) || !save.WriteObject(raw) ||
-        !save.Close()) {
+    // Written beside profiles.dat and renamed over it, so a failed write keeps the old one.
+    auto temp_path = save_path;
+    temp_path += ".tmp";
+    bool written;
+    {
+        FS::IOFile save(temp_path, FS::FileAccessMode::Write, FS::FileType::BinaryFile);
+        // Closed here, as a failed flush shows only then.
+        written = save.IsOpen() && save.SetSize(sizeof(ProfileDataRaw)) && save.WriteObject(raw) &&
+                  save.Close();
+    }
+    std::error_code ec;
+    if (written) {
+        std::filesystem::rename(temp_path, save_path, ec);
+    }
+    if (!written || ec) {
+        std::filesystem::remove(temp_path, ec);
         LOG_WARNING(Service_ACC, "Failed to write save data to file... No changes to user data "
                                  "made in current session will be saved.");
         return false;

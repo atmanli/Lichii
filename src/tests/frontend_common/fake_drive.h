@@ -72,6 +72,10 @@ public:
         });
         server.Patch(
             R"(/upload/drive/v3/files/([^/]+))", [this](const auto& request, auto& response) {
+                if (const int status = update_status.load()) {
+                    response.status = status;
+                    return;
+                }
                 std::scoped_lock lock{mutex};
                 StartSession(response, {request.matches[1], nlohmann::json::parse(request.body)});
             });
@@ -183,6 +187,8 @@ public:
     FakeGoogle google;
     // How long file searches take to answer.
     std::atomic<std::chrono::milliseconds> list_delay{};
+    // When not 0, the status every update (UpdateFile) is refused with.
+    std::atomic<int> update_status{};
     // Called with the id before a metadata lookup (GetFile) is answered.
     std::function<void(const std::string&)> before_get;
 

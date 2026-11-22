@@ -178,6 +178,8 @@ QMessageBox* CloudSyncController::AskConflict(const CloudSync::Conflict& conflic
 
 QMessageBox* CloudSyncController::ShowConflict(QMessageBox* box, Answer answer) {
     box->setAttribute(Qt::WA_DeleteOnClose);
+    // Names from profiles and Drive, not markup.
+    box->setTextFormat(Qt::PlainText);
     // Over the progress dialog of a pull before boot, which is application modal too.
     box->setWindowModality(Qt::ApplicationModal);
     auto* const keep_local = box->addButton(tr("Keep This Device's"), QMessageBox::AcceptRole);
@@ -232,7 +234,7 @@ void CloudSyncController::PrepareBoot(const CloudSync::Title& title) {
     watcher.setFuture(QtConcurrent::run([this, title, pull, label, callbacks = Callbacks(),
                                          token = pull_stop.get_token()] {
         // Not cut short by Cancel: nothing may touch the title once it boots.
-        CloudSync::BeginGuest(title.id);
+        guest_registration = CloudSync::BeginGuest(title.id);
         if (!pull || token.stop_requested()) {
             return CloudSync::SyncResult{.cancelled = token.stop_requested()};
         }
@@ -267,7 +269,7 @@ void CloudSyncController::PrepareBoot(const CloudSync::Title& title) {
 }
 
 void CloudSyncController::GuestStopped(const CloudSync::Title& title, bool ran) {
-    CloudSync::EndGuest();
+    CloudSync::EndGuest(guest_registration);
     if (!ran || closing || !Enabled()) {
         return;
     }
@@ -281,6 +283,9 @@ void CloudSyncController::GuestStopped(const CloudSync::Title& title, bool ran) 
 }
 
 void CloudSyncController::SyncTitle(const CloudSync::Title& title) {
+    if (Busy()) {
+        return;
+    }
     RunInBackground(
         tr("Syncing the saves of %1").arg(QString::fromStdString(title.name)),
         [title, callbacks = Callbacks()](std::stop_token token) {

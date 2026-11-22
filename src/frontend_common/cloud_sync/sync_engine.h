@@ -85,9 +85,10 @@ ConflictChoice WaitForAnswer(std::stop_token stop,
 
 // A guest is about to boot title_id: stops the syncs that touch it and waits until they have let
 // go of it (a connection being made or a save being restored can take a while). Until EndGuest,
-// syncs other than PullTitle skip the title.
-void BeginGuest(u64 title_id);
-void EndGuest();
+// syncs other than PullTitle skip the title. Returns the registration EndGuest takes: ending one
+// that a later BeginGuest replaced leaves the later one in place.
+u64 BeginGuest(u64 title_id);
+void EndGuest(u64 registration);
 
 // A sync runs, and may read or change the profiles: frontends leave them alone meanwhile.
 bool SyncRunning();

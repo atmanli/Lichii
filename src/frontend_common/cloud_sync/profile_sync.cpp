@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -39,9 +40,15 @@ std::filesystem::path ProfilesFilePath() {
 }
 
 std::optional<Common::UUID> ParseUuid(std::string_view text) {
-    // FormattedString's length; the UUID constructor asserts on other lengths.
+    // FormattedString's shape; the UUID constructor asserts on other lengths and on non-hex digits.
     if (text.size() != 36) {
         return std::nullopt;
+    }
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? text[i] != '-' : !std::isxdigit(static_cast<unsigned char>(text[i]))) {
+            return std::nullopt;
+        }
     }
     const Common::UUID uuid{text};
     return uuid.IsValid() ? std::optional{uuid} : std::nullopt;
@@ -190,6 +197,8 @@ struct ProfilesSync {
     std::stop_token stop;
     // Of each local profile, captured before this sync changes any.
     std::map<std::string, std::chrono::system_clock::time_point> local_times{};
+    // The avatar Push uploaded for the profile being synced, taken again by a retry.
+    std::optional<Drive::File> uploaded_avatar{};
 
     void Error(std::string message) {
         result.errors.push_back(std::move(message));
@@ -211,11 +220,14 @@ struct ProfilesSync {
         }
     }
 
-    void Push(const std::string& drive_user, const Common::UUID& user, const ProfileFiles& files,
-              const Drive::File* json, const std::vector<const Drive::File*>& avatars) {
+    // False, as SyncOnce, when Drive's profile.json changed since it was read: json is then the
+    // current one.
+    bool Push(const std::string& drive_user, const Common::UUID& user, const ProfileFiles& files,
+              std::optional<Drive::File>& json, const std::vector<const Drive::File*>& avatars) {
         const std::string nickname = ProfileNickname(profiles, user);
         const auto fail = [&] {
             DriveError(fmt::format("Could not upload the profile {}", nickname));
+            return true;
         };
         std::optional<std::string> folder;
         if (json && !json->parents.empty()) {
@@ -229,22 +241,37 @@ struct ProfilesSync {
         }
         // The avatar first: profile.json, written last, publishes the profile. A pull checks the
         // avatar against the hash in it, so an upload cut short between the two is never taken.
-        // Without a local avatar, Drive's is left as it is (sync deletes no avatar), and
-        // profile.json says there is none.
+        // A changed avatar is a new file, so the one the published profile.json names stays
+        // readable until it is replaced. Without a local avatar, Drive's is left as it is (sync
+        // deletes no avatar), and profile.json says there is none.
         if (files.avatar) {
             const std::string avatar_hash = AvatarHash(*files.avatar);
             const auto inside = AvatarsIn(avatars, *folder, avatar_hash);
-            if (inside.empty() || FileHash(*inside.front()) != avatar_hash) {
-                const Drive::AppProperties properties{
-                    {KindKey, "avatar"}, {UserKey, drive_user}, {HashKey, avatar_hash}};
-                const auto uploaded = !inside.empty()
-                                          ? Drive::UpdateFile(inside.front()->id, properties,
-                                                              JpegMimeType, *files.avatar, stop)
-                                          : Drive::UploadFile("avatar.jpg", *folder, properties,
-                                                              JpegMimeType, *files.avatar, stop);
-                if (!uploaded) {
+            const bool already_uploaded = uploaded_avatar &&
+                                          FileHash(*uploaded_avatar) == avatar_hash &&
+                                          std::ranges::find(uploaded_avatar->parents, *folder) !=
+                                              uploaded_avatar->parents.end();
+            if (!already_uploaded && (inside.empty() || FileHash(*inside.front()) != avatar_hash)) {
+                uploaded_avatar = Drive::UploadFile(
+                    "avatar.jpg", *folder,
+                    {{KindKey, "avatar"}, {UserKey, drive_user}, {HashKey, avatar_hash}},
+                    JpegMimeType, *files.avatar, stop);
+                if (!uploaded_avatar) {
                     return fail();
                 }
+            }
+        }
+        // As for saves (sync_engine.cpp): read again just before replacing, as Drive v3 has no
+        // conditional update. After the avatar, whose upload another device can outlast.
+        if (json) {
+            const auto current = Drive::GetFile(json->id, stop);
+            if (!current) {
+                return fail();
+            }
+            if (current->trashed || FileHash(*current) != FileHash(*json) ||
+                current->head_revision_id != json->head_revision_id) {
+                json = current->trashed ? std::nullopt : current;
+                return false;
             }
         }
         const Drive::AppProperties properties{
@@ -258,6 +285,7 @@ struct ProfilesSync {
         }
         Record(drive_user, {uploaded->id, files.content_hash, uploaded->modified_time});
         ++result.pushed;
+        return true;
     }
 
     // Sets the local profile (made with the Drive uuid when user is nullopt) to Drive's. The
@@ -299,16 +327,27 @@ struct ProfilesSync {
             const auto inside = json.parents.empty()
                                     ? std::vector<const Drive::File*>{}
                                     : AvatarsIn(avatars, json.parents.front(), avatar_hash);
+            // One that can't be downloaded (deleted since it was listed) leaves the others.
+            std::string download_error;
             for (const Drive::File* avatar : inside) {
                 auto data = Drive::DownloadFile(avatar->id, stop);
                 if (!data) {
-                    DriveError(fmt::format("Could not download the avatar of {}", nickname));
-                    return true;
+                    if (stop.stop_requested()) {
+                        result.cancelled = true;
+                        return true;
+                    }
+                    download_error = Drive::LastError();
+                    continue;
                 }
                 if (AvatarHash(*data) == avatar_hash) {
                     avatar_data = std::move(data);
                     break;
                 }
+            }
+            if (!avatar_data && !download_error.empty()) {
+                Error(fmt::format("Could not download the avatar of {}: {}", nickname,
+                                  download_error));
+                return true;
             }
             if (!avatar_data) {
                 Error(fmt::format("The avatar of {} on Google Drive isn't the one its profile was "
@@ -348,9 +387,12 @@ struct ProfilesSync {
         }
         profiles.GetProfileBaseAndData(*user, old_base, old_data);
         // Puts back the profile as it was in memory and in profiles.dat, as far as it can.
+        bool saved = false;
         const auto undo = [&] {
-            if (create) {
+            if (create && saved) {
                 profiles.RemoveUser(*user);
+            } else if (create) {
+                profiles.RemoveUnsavedUser(*user);
             } else {
                 profiles.SetProfileBaseAndData(*user, old_base, old_data);
             }
@@ -371,6 +413,7 @@ struct ProfilesSync {
             Error(fmt::format("Could not save the profile {}", nickname));
             return true;
         }
+        saved = true;
         if (avatar_data) {
             std::filesystem::rename(staged_avatar, avatar_path, ec);
             if (ec) {
@@ -433,23 +476,11 @@ struct ProfilesSync {
             }
         }
         if (action == SyncAction::Push) {
-            // As for saves (sync_engine.cpp): read again just before replacing, as Drive v3 has
-            // no conditional update.
-            if (json) {
-                const auto current = Drive::GetFile(json->id, stop);
-                if (!current) {
-                    DriveError(fmt::format("Could not upload the profile {}",
-                                           ProfileNickname(profiles, *user)));
-                    return true;
-                }
-                if (current->trashed || FileHash(*current) != *remote_hash ||
-                    current->head_revision_id != json->head_revision_id) {
-                    json = current->trashed ? std::nullopt : current;
-                    return false;
-                }
+            if (Push(drive_user, *user, *local, json, avatars)) {
+                return true;
             }
-            Push(drive_user, *user, *local, json ? &*json : nullptr, avatars);
-            return true;
+            found.same_contents.clear();
+            return false;
         }
         if (Pull(drive_user, user, local, *json, avatars)) {
             return true;
@@ -460,11 +491,13 @@ struct ProfilesSync {
             return true;
         }
         json = current->trashed ? std::nullopt : current;
+        found.same_contents.clear();
         return false;
     }
 
     void Sync(const std::string& drive_user, std::optional<Common::UUID> user, RemoteFile found,
               const std::vector<const Drive::File*>& avatars) {
+        uploaded_avatar.reset();
         for (int attempt = 0; attempt < 3; ++attempt) {
             if (SyncOnce(drive_user, user, found, avatars)) {
                 return;
@@ -559,6 +592,15 @@ std::string ProfileNickname(const Service::Account::ProfileManager& profiles,
 bool SyncProfiles(Service::Account::ProfileManager& profiles, const SyncCallbacks& callbacks,
                   SyncState& state, SyncResult& result, std::stop_token stop) {
     ProfilesSync sync{profiles, callbacks, state, result, stop};
+    // The links of profiles removed here (by anything, not only this frontend), which would pair
+    // a profile imported later with that uuid to the old Drive profile.
+    const auto stale_links = std::erase_if(state.links, [&](const auto& link) {
+        const auto uuid = ParseUuid(link.first);
+        return !uuid || !profiles.UserExists(*uuid);
+    });
+    if (stale_links != 0 && !SaveSyncState(state)) {
+        sync.Error("Could not save the cloud sync state");
+    }
     std::map<std::string, Common::UUID> local;
     for (const Common::UUID& user : profiles.GetAllUsers()) {
         if (user.IsValid()) {
@@ -601,6 +643,12 @@ bool SyncProfiles(Service::Account::ProfileManager& profiles, const SyncCallback
             result.cancelled = true;
             return true;
         }
+        const auto user = local.find(drive_user);
+        // Drive's profile with the id of a local one that syncs as another: left as it is.
+        if (const auto uuid = ParseUuid(drive_user);
+            user == local.end() && uuid && profiles.UserExists(*uuid)) {
+            continue;
+        }
         const auto synced = state.profiles.find(drive_user);
         auto found = FindRemoteFile(remote_json[drive_user],
                                     synced != state.profiles.end() ? &synced->second : nullptr,
@@ -615,7 +663,6 @@ bool SyncProfiles(Service::Account::ProfileManager& profiles, const SyncCallback
                                    "Remove the one you don't want.",
                                    drive_user, found.file->id, found.differing_id));
         }
-        const auto user = local.find(drive_user);
         sync.Sync(drive_user, user != local.end() ? std::optional{user->second} : std::nullopt,
                   std::move(found), remote_avatars[drive_user]);
     }

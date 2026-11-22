@@ -229,6 +229,7 @@ struct TitleSync {
                 if (current->trashed || FileHash(*current) != *remote_hash ||
                     current->head_revision_id != remote->head_revision_id) {
                     remote = current->trashed ? std::nullopt : current;
+                    found.same_contents.clear();
                     return false;
                 }
             }
@@ -244,6 +245,7 @@ struct TitleSync {
             return true;
         }
         remote = current->trashed ? std::nullopt : current;
+        found.same_contents.clear();
         return false;
     }
 
@@ -258,14 +260,14 @@ struct TitleSync {
 
     // False when Drive couldn't be reached for the title's saves.
     bool Run(Service::Account::ProfileManager& profiles, bool save_steps) {
-        const auto found = Drive::FindFiles(
+        const auto files = Drive::FindFiles(
             {{KindKey, "save"}, {TitleIdKey, fmt::format("{:016X}", title.id)}}, {}, stop);
-        if (!found) {
+        if (!files) {
             DriveError(fmt::format("Could not reach Google Drive for the saves of {}", title.name));
             return false;
         }
         std::map<std::string, std::vector<const Drive::File*>> remote;
-        for (const Drive::File& file : *found) {
+        for (const Drive::File& file : *files) {
             if (const auto user = file.app_properties.find(UserKey);
                 user != file.app_properties.end()) {
                 remote[user->second].push_back(&file);
@@ -322,13 +324,18 @@ struct Job {
     // Syncs the profiles, which every guest uses.
     bool profiles{};
     std::stop_source stop;
+    // Counts up from 1 in the order the jobs start.
+    u64 id{};
 };
 
 std::mutex jobs_mutex;
 std::condition_variable jobs_changed;
 std::vector<Job*> jobs;
+u64 last_job_id = 0;
 bool guest_running = false;
 u64 guest_title = 0;
+// The last BeginGuest's, counting up from 1.
+u64 guest_registration = 0;
 
 bool Touches(const Job& job, u64 title_id) {
     return job.profiles || std::ranges::any_of(job.titles, [title_id](const Title& title) {
@@ -349,6 +356,7 @@ public:
         : job{titles, false, {}}, forward{caller, [this] { job.stop.request_stop(); }} {
         std::scoped_lock lock{jobs_mutex};
         job.profiles = profiles && !guest_running;
+        job.id = ++last_job_id;
         jobs.push_back(&job);
     }
     ~JobScope() {
@@ -425,14 +433,20 @@ SyncResult SyncTitles(Service::Account::ProfileManager& profiles, std::span<cons
             return result;
         }
     }
-    if (sync_all && callbacks.progress) {
+    if (!stop.stop_requested() && sync_all && callbacks.progress) {
         callbacks.progress(steps, steps);
+    }
+    if (stop.stop_requested()) {
+        result.cancelled = true;
+        return result;
     }
     if (result.errors.empty()) {
         state.last_sync = std::chrono::duration_cast<std::chrono::seconds>(
                               std::chrono::system_clock::now().time_since_epoch())
                               .count();
-        void(SaveSyncState(state));
+        if (!SaveSyncState(state)) {
+            result.errors.emplace_back("Could not save the cloud sync state");
+        }
     }
     return result;
 }
@@ -446,6 +460,9 @@ ConflictChoice WaitForAnswer(std::stop_token stop,
         std::condition_variable_any given;
         std::optional<ConflictChoice> choice;
     };
+    if (stop.stop_requested()) {
+        return ConflictChoice::Skip;
+    }
     const auto answer = std::make_shared<Answer>();
     post([answer](ConflictChoice choice) {
         std::scoped_lock lock{answer->mutex};
@@ -456,24 +473,37 @@ ConflictChoice WaitForAnswer(std::stop_token stop,
     });
     std::unique_lock lock{answer->mutex};
     answer->given.wait(lock, stop, [&answer] { return answer->choice.has_value(); });
+    if (stop.stop_requested()) {
+        return ConflictChoice::Skip;
+    }
     return answer->choice.value_or(ConflictChoice::Skip);
 }
 
-void BeginGuest(u64 title_id) {
+u64 BeginGuest(u64 title_id) {
     std::unique_lock lock{jobs_mutex};
     guest_running = true;
     guest_title = title_id;
-    const auto touching = [title_id](const Job* job) { return Touches(*job, title_id); };
+    const u64 registration = ++guest_registration;
+    // Only the jobs already running: those that start now skip the title (or, PullTitle, are
+    // the guest's own).
+    const u64 started = last_job_id;
+    const auto touching = [title_id, started](const Job* job) {
+        return job->id <= started && Touches(*job, title_id);
+    };
     for (Job* job : jobs) {
         if (touching(job)) {
             job->stop.request_stop();
         }
     }
     jobs_changed.wait(lock, [&] { return std::ranges::none_of(jobs, touching); });
+    return registration;
 }
 
-void EndGuest() {
+void EndGuest(u64 registration) {
     std::scoped_lock lock{jobs_mutex};
+    if (registration != guest_registration) {
+        return;
+    }
     guest_running = false;
     guest_title = 0;
 }

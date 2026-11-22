@@ -186,6 +186,33 @@ TEST_CASE("CloudSync: a profile linked to a Drive profile syncs as it", "[cloud_
     REQUIRE(!LinkedProfile(local).has_value());
 }
 
+TEST_CASE("CloudSync: a linked profile's own Drive profile isn't imported", "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    const auto user = machine.FirstUser();
+    const auto second = Common::UUID::MakeRandomWithSeed(5);
+    REQUIRE(machine.profiles->CreateNewUser(second, "Second").IsSuccess());
+    REQUIRE(SyncAll(*machine.profiles, {}, FailOnConflict(), {}).pushed == 2);
+    REQUIRE(machine.profiles->RemoveUser(second));
+
+    // Drive still has the profile as itself.
+    REQUIRE(LinkProfile(*machine.profiles, user, second));
+    std::vector<Conflict> asked;
+    const SyncCallbacks keep_remote{
+        .resolve_conflict = [&asked](const Conflict& conflict, std::stop_token) {
+            asked.push_back(conflict);
+            return ConflictChoice::KeepRemote;
+        }};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto result = SyncAll(*machine.profiles, {}, keep_remote, {});
+        REQUIRE(result.errors.empty());
+        REQUIRE(machine.profiles->GetUserCount() == 1);
+    }
+    REQUIRE(asked.size() == 1);
+    REQUIRE(ProfileNickname(*machine.profiles, user) == "Second");
+    REQUIRE(drive.Find({{"lichii", "profileJson"}}).size() == 2);
+}
+
 TEST_CASE("CloudSync: pulling profiles changes them but deletes nothing", "[cloud_sync]") {
     FakeDriveServer drive;
     CloudSyncMachine machine;
@@ -251,6 +278,35 @@ TEST_CASE("CloudSync: profile.json names the avatar it was published with", "[cl
     REQUIRE(result.pushed == 1);
     REQUIRE(nlohmann::json::parse(ProfileJson(drive, user).data).at("avatarHash") ==
             AvatarHash("second avatar"));
+}
+
+TEST_CASE("CloudSync: a changed avatar leaves the published one until profile.json names it",
+          "[cloud_sync]") {
+    FakeDriveServer drive;
+    Common::UUID user;
+    {
+        CloudSyncMachine machine;
+        user = machine.FirstUser();
+        std::filesystem::create_directories(AvatarPath(machine, user).parent_path());
+        std::ofstream{AvatarPath(machine, user), std::ios::binary} << "first avatar";
+        REQUIRE(SyncAll(*machine.profiles, {}, FailOnConflict(), {}).pushed == 1);
+
+        // The new avatar goes up, profile.json doesn't.
+        std::ofstream{AvatarPath(machine, user), std::ios::binary} << "second avatar";
+        drive.update_status = 403;
+        const auto result = SyncAll(*machine.profiles, {}, FailOnConflict(), {});
+        drive.update_status = 0;
+        REQUIRE(result.errors.size() == 1);
+        REQUIRE(result.pushed == 0);
+        REQUIRE(drive.Find({{"lichii", "avatar"}}).size() == 2);
+    }
+
+    ForgetSyncState(drive);
+    CloudSyncMachine other;
+    const auto result = SyncAll(*other.profiles, {}, FailOnConflict(), {});
+    REQUIRE(result.errors.empty());
+    REQUIRE(result.pulled == 1);
+    REQUIRE(ReadText(AvatarPath(other, user)) == "first avatar");
 }
 
 TEST_CASE("CloudSync: keeping Drive's profile backs up the local one", "[cloud_sync]") {

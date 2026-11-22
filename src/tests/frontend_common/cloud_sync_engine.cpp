@@ -347,6 +347,17 @@ TEST_CASE("CloudSync: a sync without errors records when it finished", "[cloud_s
     REQUIRE(LastSyncTime() == synced);
 }
 
+TEST_CASE("CloudSync: a sync stopped before it finished records no time", "[cloud_sync]") {
+    FakeDriveServer drive;
+    CloudSyncMachine machine;
+    std::stop_source stop;
+    const SyncCallbacks stop_at_start{
+        .progress = [&stop](std::size_t, std::size_t) { stop.request_stop(); }};
+    const auto result = SyncSaves(*machine.profiles, {}, stop_at_start, stop.get_token());
+    REQUIRE(result.cancelled);
+    REQUIRE_FALSE(LastSyncTime());
+}
+
 TEST_CASE("CloudSync: a save Drive changed since the decision is decided again", "[cloud_sync]") {
     FakeDriveServer drive;
     CloudSyncMachine machine;

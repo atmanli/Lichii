@@ -85,6 +85,19 @@ TEST_CASE("CloudSync: a packed save restores to the same files", "[cloud_sync]")
     REQUIRE_FALSE(PackSave(temp.path / "missing").has_value());
 }
 
+TEST_CASE("CloudSync: a save with a symlink isn't packed", "[cloud_sync]") {
+    TempDir temp;
+    MakeSave(temp.path / "elsewhere", "a");
+    MakeSave(temp.path / "save", "b");
+    std::error_code ec;
+    std::filesystem::create_directory_symlink(temp.path / "elsewhere",
+                                              temp.path / "save" / "linked", ec);
+    if (ec) {
+        SKIP("Can't make a symlink here: " << ec.message());
+    }
+    REQUIRE_FALSE(PackSave(temp.path / "save").has_value());
+}
+
 TEST_CASE("CloudSync: the content hash ignores mtimes", "[cloud_sync]") {
     TempDir temp;
     MakeSave(temp.path / "one", "a");

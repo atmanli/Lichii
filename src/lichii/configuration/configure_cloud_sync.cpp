@@ -100,8 +100,9 @@ ConfigureCloudSync::ConfigureCloudSync(Core::System& system_, QWidget* parent)
     link_description = new QLabel;
     link_description->setWordWrap(true);
     link_layout->addRow(link_description);
-    link_layout->addRow(QString{}, local_profile);
-    link_layout->addRow(QString{}, remote_row);
+    // Labels of their own: an empty label text makes none, for RetranslateUI to name.
+    link_layout->addRow(new QLabel, local_profile);
+    link_layout->addRow(new QLabel, remote_row);
     link_layout->addRow(link_status);
 
     sync_now = new QPushButton;
@@ -238,6 +239,8 @@ void ConfigureCloudSync::ShowLocalProfiles() {
             local_profile->setCurrentIndex(local_profile->count() - 1);
         }
     }
+    // The blocker kept the selection change from filling the Drive profiles for it.
+    ShowRemoteProfiles();
 }
 
 void ConfigureCloudSync::SignIn() {

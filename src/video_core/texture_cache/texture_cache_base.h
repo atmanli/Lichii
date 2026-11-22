@@ -19,6 +19,7 @@
 #include <utility>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
+#include <unordered_set>
 #include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -504,6 +505,11 @@ public:
 
     [[nodiscard]] bool IsRescaling(const ImageViewBase& image_view) const noexcept;
 
+    /// A shader reads this view in texels (textureSize, texel fetches, rect sampling). An image
+    /// the backend keeps at another size than the guest's (Vulkan's RescalesUnevenBc) is made
+    /// again at its guest size from the next frame on (ApplyGuestSizeRequests).
+    void NoteTexelSizeUse(const ImageViewBase& image_view);
+
     /// Counts InvalidateScale calls: an image changed its scale and lost its views.
     [[nodiscard]] u64 ScaleEpoch() const noexcept {
         return scale_epoch;
@@ -518,6 +524,13 @@ public:
     Common::SpinRecursiveMutex mutex;
 
 private:
+    /// Images NoteTexelSizeUse found re-compressed at another size, deleted at the next
+    /// TickFrame; the shapes they had are made at their guest size from then on.
+    void ApplyGuestSizeRequests();
+    [[nodiscard]] static u64 GuestSizeKey(GPUVAddr gpu_addr, const ImageInfo& info) noexcept;
+    std::vector<ImageId> guest_size_requests;
+    std::unordered_set<u64> guest_size_shapes;
+
     /// Iterate over all page indices in a range
     template <typename Func>
     static void ForEachCPUPage(DAddr addr, size_t size, Func&& func) {
@@ -894,6 +907,10 @@ private:
     /// The bound depth target is wider than tall by padding only (see FindDepthBuffer).
     bool depth_target_padded = false;
     u64 total_used_memory = 0;
+    /// Registered images the backend re-compressed at a rounded-up size (IsRescaledBc), which
+    /// the collector keeps up to MaxKeptRescaledBytes.
+    u64 rescaled_bc_bytes = 0;
+    static constexpr u64 MaxKeptRescaledBytes = u64{1} << 30;
     u64 minimum_memory;
     u64 expected_memory;
     u64 critical_memory;

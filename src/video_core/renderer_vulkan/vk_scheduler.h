@@ -88,10 +88,8 @@ public:
     bool DeferFlush();
     /// Submits deferred work (the split's back, from its idle hook).
     void FlushDeferred();
-    /// Whether the GPU has finished everything submitted while the work recorded since the last
-    /// submission is older than a bound: then it should be submitted now instead of at the draw
-    /// budget, so the GPU runs it while more is recorded. Checked between draws, where a submit
-    /// is safe.
+    /// Whether the last submit is old enough, the GPU has completed it, and work is waiting
+    /// outside a render pass. Called by the recording thread before starting a draw or dispatch.
     bool IdleGpuAwaitsWork();
     /// Threads other than the split's back: waits until tick is submitted, asking the back to
     /// submit deferred work (logged every 2 s while it waits). False only when the back thread

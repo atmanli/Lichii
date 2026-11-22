@@ -255,16 +255,16 @@ bool Scheduler::IdleGpuAwaitsWork() {
     // release) waits for the GPU to run all of it. 100 us left the least of that wait among 50,
     // 100 and 200 us.
     static constexpr auto age = std::chrono::microseconds{100};
-    // Not inside a render pass: ending passes early tripled the submissions and cost the back
-    // about as much as the wait saved.
-    if (state.renderpass || !RecordedSinceSubmit()) {
+    // Don't wait for a follower packet just to probe. A deferred clear belongs to the next pass.
+    if ((render_recorders && VideoCommon::GpuSplit::BackHasPendingRender()) || state.renderpass ||
+        deferred_clear.framebuffer || !RecordedSinceSubmit()) {
         return false;
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - last_flush < age || now < next_idle_gpu_check) {
         return false;
     }
-    // At most one semaphore read per bound while the GPU stays busy.
+    // Rate-limit refresh attempts while the GPU stays busy.
     next_idle_gpu_check = now + age;
     const u64 last_submitted = CurrentTick() - 1;
     if (!IsFree(last_submitted)) {

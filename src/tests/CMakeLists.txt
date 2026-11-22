@@ -98,6 +98,7 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/vfs_real.cpp
     core/kip_ini.cpp
     core/add_on_application_id.cpp
     core/ncz_cache.cpp
@@ -156,6 +157,8 @@ add_executable(tests
     video_core/command_fetch_order.cpp
     video_core/gpu_trace.cpp
     video_core/nx2_render_follower.cpp
+    video_core/buffer_arena.cpp
+    video_core/nx2_render_view.cpp
     video_core/gpu_written_pages.cpp
     video_core/nx2_semaphore_mirror.cpp
     video_core/command_writer.cpp
@@ -210,6 +213,7 @@ add_executable(tests
     video_core/spirv_software_matrix.cpp
     video_core/spirv_program_name.cpp
     video_core/spirv_builtin_capabilities.cpp
+    video_core/spirv_frag_depth_d24.cpp
     video_core/spirv_min_max_denorms.cpp
     video_core/spirv_nan_safe_min_max.cpp
     video_core/spirv_scalar_constants.cpp

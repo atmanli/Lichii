@@ -114,18 +114,31 @@ std::size_t ConcatenatedVfsFile::GetSize() const {
     return concatenation_map.back().offset + concatenation_map.back().file->GetSize();
 }
 
-// The parts lie end to end, so what they hold adds up; a part that holds less than its size, or a
-// filler that holds nothing, adds only what it holds. The sum saturates and never exceeds the
-// file's size, should parts overlap.
-std::size_t ConcatenatedVfsFile::GetHeldSize() const {
+// Each part is asked about the bytes of the range that fall in it, so a part that holds less than
+// its size, or a filler that holds nothing, adds only what it holds there, wherever in the file it
+// lies. The sum saturates and never exceeds the range, should parts overlap.
+std::size_t ConcatenatedVfsFile::GetHeldSizeInRange(std::size_t offset, std::size_t length) const {
+    static constexpr std::size_t Max = std::numeric_limits<std::size_t>::max();
+    const std::size_t size = GetSize();
+    if (offset >= size) {
+        return 0;
+    }
+    length = std::min(length, size - offset);
+    const std::size_t end = offset + length;
     std::size_t held = 0;
     for (const auto& entry : concatenation_map) {
-        const std::size_t part = entry.file->GetHeldSize();
-        held = part > std::numeric_limits<std::size_t>::max() - held
-                   ? std::numeric_limits<std::size_t>::max()
-                   : held + part;
+        const std::size_t part_begin = entry.offset;
+        const std::size_t part_size = entry.file->GetSize();
+        const std::size_t part_end = part_size > Max - part_begin ? Max : part_begin + part_size;
+        const std::size_t from = std::max(offset, part_begin);
+        const std::size_t to = std::min(end, part_end);
+        if (from >= to) {
+            continue;
+        }
+        const std::size_t part = entry.file->GetHeldSizeInRange(from - part_begin, to - from);
+        held = part > Max - held ? Max : held + part;
     }
-    return std::min(held, GetSize());
+    return std::min(held, length);
 }
 
 bool ConcatenatedVfsFile::Resize(std::size_t new_size) {

@@ -172,6 +172,35 @@ TEST_CASE("A range of a file holds only what its base holds from its offset", "[
     REQUIRE(OffsetVfsFile{outer, size_t{1} << 39, 0x200}.GetHeldSize() == 0xD00);
 }
 
+TEST_CASE("A range of a concatenation holds the stored bytes it covers, wherever they lie",
+          "[core][file_sys]") {
+    // Stored bytes need not be a file's first bytes: a concatenation can begin with filler, or
+    // have filler between its parts.
+    const auto stored = [] { return MakeFile(std::vector<u8>(4, 1)); };
+    const auto filler = [] { return std::make_shared<StaticVfsFile>(u8{0}, 4); };
+    const auto mixed = ConcatenatedVfsFile::MakeConcatenatedFile(
+        "mixed", std::vector<VirtualFile>{stored(), filler(), stored()});
+    REQUIRE(mixed->GetHeldSize() == 8);
+    // OffsetVfsFile{file, size, offset}: the first stored part, the filler, the last stored part.
+    REQUIRE(OffsetVfsFile{mixed, 4, 0}.GetHeldSize() == 4);
+    REQUIRE(OffsetVfsFile{mixed, 4, 4}.GetHeldSize() == 0);
+    REQUIRE(OffsetVfsFile{mixed, 4, 8}.GetHeldSize() == 4);
+    // Ranges across parts: bytes 2..7 hold the 2 stored ones, bytes 6..11 the 4 stored ones.
+    REQUIRE(OffsetVfsFile{mixed, 6, 2}.GetHeldSize() == 2);
+    REQUIRE(OffsetVfsFile{mixed, 6, 6}.GetHeldSize() == 4);
+    // A range that claims more than the concatenation has holds what there is from its offset.
+    REQUIRE(OffsetVfsFile{mixed, size_t{1} << 40, 6}.GetHeldSize() == 4);
+    REQUIRE(OffsetVfsFile{mixed, size_t{1} << 40, 2}.GetHeldSize() == 6);
+    REQUIRE(mixed->GetHeldSizeInRange(12, 4) == 0);
+
+    const auto led = ConcatenatedVfsFile::MakeConcatenatedFile(
+        "led", std::vector<VirtualFile>{std::make_shared<StaticVfsFile>(u8{0}, 0x20000),
+                                        MakeFile(std::vector<u8>(0x10000, 1))});
+    REQUIRE(led->GetHeldSize() == 0x10000);
+    REQUIRE(OffsetVfsFile{led, 0x10000, 0x20000}.GetHeldSize() == 0x10000);
+    REQUIRE(OffsetVfsFile{led, 0x20000, 0}.GetHeldSize() == 0);
+}
+
 TEST_CASE("Held size passes through concatenations, encryption layers and storages, and made-up "
           "bytes hold nothing",
           "[core][file_sys]") {
@@ -372,8 +401,8 @@ public:
     size_t GetSize() const override {
         return base->GetSize();
     }
-    size_t GetHeldSize() const override {
-        return base->GetHeldSize();
+    size_t GetHeldSizeInRange(size_t offset, size_t length) const override {
+        return base->GetHeldSizeInRange(offset, length);
     }
     bool Resize(size_t) override {
         return false;
@@ -882,6 +911,30 @@ TEST_CASE("NCA with a valid indirect table opens", "[core][file_sys]") {
 TEST_CASE("NCA with a valid indirect table opens in a container that claims more than it holds",
           "[core][file_sys]") {
     REQUIRE(MakeIndirectNca(0x8000).Open(size_t{1} << 41) == ResultSuccess);
+}
+
+TEST_CASE("NCA that follows filler in a concatenation opens its indirect table through a range, "
+          "and still rejects one it does not hold",
+          "[core][file_sys]") {
+    const auto behind_filler = [](const PlaintextNca& nca, size_t claimed_size,
+                                  ReadCounter& reads) {
+        auto bytes = nca.Bytes();
+        const size_t size = bytes.size();
+        const auto concat = ConcatenatedVfsFile::MakeConcatenatedFile(
+            "led", std::vector<VirtualFile>{std::make_shared<StaticVfsFile>(u8{0}, 0x20000),
+                                            MakeFile(std::move(bytes))});
+        return PlaintextNca::OpenFile(std::make_shared<CountingFile>(
+            std::make_shared<OffsetVfsFile>(concat, std::max(claimed_size, size), 0x20000), reads));
+    };
+    ReadCounter valid_reads;
+    REQUIRE(behind_filler(MakeIndirectNca(0x8000), 0, valid_reads) == ResultSuccess);
+
+    auto nca = MakeIndirectNca(0x8000);
+    nca.header.fs_info[0].end_sector = 0xFFFFFF06;
+    nca.fs.patch_info.indirect_size = s64{1} << 40;
+    ReadCounter reads;
+    REQUIRE(behind_filler(nca, size_t{1} << 41, reads) == ResultNcaBaseStorageOutOfRangeE);
+    RequireFewReads(reads);
 }
 
 TEST_CASE("NCA rejects an indirect table its container claims but does not hold, without "

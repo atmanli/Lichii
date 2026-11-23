@@ -28,7 +28,7 @@ public:
     }
 
     // Every byte is made up: none comes from stored data.
-    std::size_t GetHeldSize() const override {
+    std::size_t GetHeldSizeInRange(std::size_t, std::size_t) const override {
         return 0;
     }
 

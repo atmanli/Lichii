@@ -160,7 +160,12 @@ bool VfsFilesystem::DeleteDirectory(std::string_view path_) {
 VfsFile::~VfsFile() = default;
 
 std::size_t VfsFile::GetHeldSize() const {
-    return GetSize();
+    return GetHeldSizeInRange(0, GetSize());
+}
+
+std::size_t VfsFile::GetHeldSizeInRange(std::size_t offset, std::size_t length) const {
+    const std::size_t size = GetSize();
+    return offset < size ? std::min(length, size - offset) : 0;
 }
 
 std::string VfsFile::GetExtension() const {

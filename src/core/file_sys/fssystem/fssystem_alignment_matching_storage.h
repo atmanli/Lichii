@@ -74,8 +74,8 @@ public:
         return m_base_storage->GetSize();
     }
 
-    virtual size_t GetHeldSize() const override {
-        return m_base_storage->GetHeldSize();
+    virtual size_t GetHeldSizeInRange(size_t offset, size_t length) const override {
+        return m_base_storage->GetHeldSizeInRange(offset, length);
     }
 };
 
@@ -135,8 +135,8 @@ public:
         return m_base_storage->GetSize();
     }
 
-    virtual size_t GetHeldSize() const override {
-        return m_base_storage->GetHeldSize();
+    virtual size_t GetHeldSizeInRange(size_t offset, size_t length) const override {
+        return m_base_storage->GetHeldSizeInRange(offset, length);
     }
 };
 

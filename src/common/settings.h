@@ -1166,6 +1166,10 @@ struct Values {
 
 extern Values values;
 
+[[nodiscard]] inline u32 GetAudioOutputChannelCount() {
+    return values.sound_index.GetValue() == AudioMode::Surround ? 6 : 2;
+}
+
 struct NvidiaDlssRuntimeSettings {
     NvidiaDlssQuality quality;
     NvidiaDlssPreset preset;

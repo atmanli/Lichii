@@ -60,10 +60,14 @@ public:
             return;
         }
         std::error_code ec;
-        if (staged_link) {
-            fs::remove(stage, ec);
-        } else {
-            fs::remove_all(stage, ec);
+        // Only disposable staging is cleaned here. Recovery copies and collected backups live under
+        // work/ and must survive so the caller can report them.
+        if (!stage.empty()) {
+            if (staged_link) {
+                fs::remove(stage, ec);
+            } else {
+                fs::remove_all(stage, ec);
+            }
         }
         fs::remove(work, ec);
     }
@@ -165,9 +169,18 @@ public:
         std::error_code ec;
         if (published) {
             fs::rename(destination, stage, ec);
-        }
-        if (ec) {
-            throw std::runtime_error("Could not roll back the new save: " + ec.message());
+            if (ec) {
+                throw std::runtime_error("Could not roll back the new save: " + ec.message());
+            }
+            published = false;
+            // Reclaimed live content may include newer in-place writes after publish. Keep it as a
+            // reported recovery copy instead of deleting it as disposable staging. An identity
+            // check against the staged original would still drop those writes.
+            if (Exists(stage)) {
+                recovery = std::move(stage);
+                stage.clear();
+                has_recovery = true;
+            }
         }
         if (has_backup) {
             if (Exists(destination)) {
@@ -192,6 +205,10 @@ public:
         if (has_backup) {
             result.backups.push_back(std::move(backup));
         }
+        if (has_recovery) {
+            result.backups.push_back(std::move(recovery));
+            has_recovery = false;
+        }
     }
 
 private:
@@ -199,8 +216,10 @@ private:
     fs::path work;
     fs::path stage;
     fs::path backup;
+    fs::path recovery;
     bool had_destination{};
     bool has_backup{};
+    bool has_recovery{};
     bool staged_link{};
     bool published{};
 };

@@ -227,7 +227,51 @@ TEST_CASE("A failed Lichii publish rolls back the already replaced Ryujinx save"
         UpdateRyujinxSave(lichii, f.ryujinx, RyujinxSaveOperation::FromLichii, deny_publish);
     fs::permissions(lichii.parent_path(), fs::perms::owner_write, fs::perm_options::add);
     CHECK_FALSE(result.error.empty());
-    CHECK(result.backups.empty());
+    // Ryujinx publish succeeded before Lichii failed: reclaimed live content is reported, not wiped.
+    REQUIRE(result.backups.size() == 1);
+    CHECK(ReadSave(result.backups[0]) == "Lichii save");
+    CHECK(fs::exists(result.backups[0]));
+    CHECK(ReadSave(lichii) == "Lichii save");
+    CHECK(ReadSave(f.ryujinx) == "Ryujinx save");
+}
+
+TEST_CASE("Rollback recovery keeps newer writes from a published Ryujinx save", "[ryujinx]") {
+    if (geteuid() == 0) {
+        SKIP("Directory permissions do not prevent root from renaming");
+    }
+    Fixture f;
+    const auto lichii = f.root / "nand" / "lichii";
+    WriteSave(lichii, "Lichii save");
+    WriteSave(f.ryujinx, "Ryujinx save");
+    // Link creation runs after CopyFrom but before Publish. Mutate the staged Ryujinx copy so the
+    // published live path differs from the Lichii source; an identity check would drop this.
+    // RyujinxLinkCreator is a function pointer, so stash the parent path for the callback.
+    static fs::path mutate_parent;
+    mutate_parent = f.ryujinx.parent_path();
+    const auto deny_publish = [](fs::path from, fs::path to) {
+        for (fs::directory_iterator it(mutate_parent), end; it != end; ++it) {
+            const auto name = it->path().filename().string();
+            if (name.find(".lichii-save-") == std::string::npos) {
+                continue;
+            }
+            const auto staged_new = it->path() / "new";
+            if (fs::is_directory(staged_new) && !IsSymlink(staged_new)) {
+                WriteSave(staged_new, "Newer Ryujinx write");
+            }
+        }
+        if (!CreateSymlink(from, to)) {
+            return false;
+        }
+        fs::permissions(to.parent_path().parent_path(), fs::perms::owner_write,
+                        fs::perm_options::remove);
+        return true;
+    };
+    const auto result =
+        UpdateRyujinxSave(lichii, f.ryujinx, RyujinxSaveOperation::FromLichii, deny_publish);
+    fs::permissions(lichii.parent_path(), fs::perms::owner_write, fs::perm_options::add);
+    CHECK_FALSE(result.error.empty());
+    REQUIRE(result.backups.size() == 1);
+    CHECK(ReadSave(result.backups[0]) == "Newer Ryujinx write");
     CHECK(ReadSave(lichii) == "Lichii save");
     CHECK(ReadSave(f.ryujinx) == "Ryujinx save");
 }

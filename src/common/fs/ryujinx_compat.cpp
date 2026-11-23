@@ -81,7 +81,11 @@ public:
         if (ec) {
             throw std::runtime_error("Could not create the save parent directory");
         }
-        if (!fs::create_directory(candidate, ec) || ec) {
+        if (!fs::create_directory(candidate, ec)) {
+            if (ec) {
+                throw std::runtime_error("Could not create the save staging folder: " +
+                                         ec.message());
+            }
             throw std::runtime_error("Save staging folder already exists");
         }
         stage = std::move(new_stage);
@@ -94,7 +98,8 @@ public:
         std::error_code ec;
         fs::create_directory(stage, ec);
         if (ec) {
-            throw std::runtime_error("Could not create the staged save directory");
+            throw std::runtime_error("Could not create the staged save directory: " +
+                                     ec.message());
         }
         for (fs::recursive_directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec)) {
             const auto& entry = *it;
@@ -142,7 +147,7 @@ public:
         if (had_destination) {
             fs::rename(destination, backup, ec);
             if (ec) {
-                throw std::runtime_error("Could not move the existing save aside");
+                throw std::runtime_error("Could not move the existing save aside: " + ec.message());
             }
             has_backup = true;
         }
@@ -151,7 +156,7 @@ public:
         }
         fs::rename(stage, destination, ec);
         if (ec) {
-            throw std::runtime_error("Could not publish the staged save");
+            throw std::runtime_error("Could not publish the staged save: " + ec.message());
         }
         published = true;
     }
@@ -162,7 +167,7 @@ public:
             fs::rename(destination, stage, ec);
         }
         if (ec) {
-            throw std::runtime_error("Could not roll back the new save");
+            throw std::runtime_error("Could not roll back the new save: " + ec.message());
         }
         if (has_backup) {
             if (Exists(destination)) {
@@ -170,7 +175,7 @@ public:
             }
             fs::rename(backup, destination, ec);
             if (ec) {
-                throw std::runtime_error("Could not restore the old save");
+                throw std::runtime_error("Could not restore the old save: " + ec.message());
             }
             has_backup = false;
         }

@@ -22,15 +22,20 @@
 #include <QBuffer>
 #include <QByteArray>
 #include <QDateTime>
-#include <QDialog>
 #include <QDialogButtonBox>
+#include <QFontDatabase>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
+#include <QPushButton>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 
@@ -38,6 +43,9 @@
 #include "common/logging.h"
 #include "common/net/ca_store.h"
 #include "common/string_util.h"
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "qt_common/config/uisettings.h"
 
 namespace {
@@ -546,7 +554,8 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
 } // namespace
 
 ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
-                                             const std::atomic_bool& cancel, bool prefer_newest) {
+                                             const std::atomic_bool& cancel, bool prefer_newest,
+                                             SteamGridDbArt art) {
     ArtworkLookupResult out;
     // A trailing "(2026)" is not part of the name SteamGridDB knows; it says which release.
     std::string search_title = title;
@@ -662,10 +671,14 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
             out.status = ArtworkLookupStatus::NotFound;
             return out;
         }
-        // Square grids first, then icons.
-        for (const auto& list_path :
-             {fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
-              fmt::format("/icons/game/{}", game_id)}) {
+        const std::vector<std::string> list_paths =
+            art == SteamGridDbArt::Hero
+                ? std::vector{fmt::format("/heroes/game/{}?dimensions=1920x620,3840x1240,1600x650"
+                                          "&types=static&nsfw=false&humor=false",
+                                          game_id)}
+                : std::vector{fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
+                              fmt::format("/icons/game/{}", game_id)};
+        for (const auto& list_path : list_paths) {
             const auto list = sgdb_get(list_path);
             if (list.status != HttpStatus::Ok) {
                 return failed(list);
@@ -709,7 +722,7 @@ void IconSearch::Start(const QString& name, u64 title_id) {
     const std::string query = name.trimmed().toStdString();
     if (query.empty() && title_id == 0) {
         QMessageBox::information(parent_widget, tr("Find Icon"),
-                                 tr("Please enter a game name first so the icon can be found."));
+                                 tr("Enter a game name first so the icon can be found."));
         return;
     }
     last_name = name;
@@ -726,26 +739,97 @@ bool IconSearch::IsRunning() const {
     return watcher.isRunning();
 }
 
+namespace {
+
+// A choice in Choose an Icon: the icon on a dark plate above its number.
+class IconChoiceDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
+        return {154, 176};
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRectF tile = QRectF(option.rect).adjusted(0.5, 0.5, -10.5, -10.5);
+        const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        painter->setPen(QPen(selected  ? Spotlight::Color::Accent()
+                             : hovered ? Spotlight::Color::Stroke()
+                                       : Spotlight::Color::StrokeSubtle(),
+                             1));
+        painter->setBrush(selected ? Spotlight::Color::AccentSoft() : Spotlight::Color::FillFaint());
+        painter->drawRoundedRect(tile, 15, 15);
+        const QRectF plate(tile.left() + 7, tile.top() + 7, 128, 128);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(Spotlight::Color::Window());
+        painter->drawRoundedRect(plate, 10, 10);
+        const QPixmap pixmap = index.data(Qt::DecorationRole)
+                                   .value<QIcon>()
+                                   .pixmap(QSize(128, 128), painter->device()->devicePixelRatioF());
+        if (!pixmap.isNull()) {
+            QSizeF size = pixmap.deviceIndependentSize();
+            size.scale(plate.size(), Qt::KeepAspectRatio);
+            QPainterPath clip;
+            clip.addRoundedRect(plate, 10, 10);
+            painter->setClipPath(clip);
+            painter->drawPixmap(
+                QRectF(plate.center() - QPointF(size.width(), size.height()) / 2, size), pixmap,
+                QRectF(QPointF{}, pixmap.size()));
+            painter->setClipping(false);
+        }
+        painter->setFont(Spotlight::Font(12, 600));
+        painter->setPen(Spotlight::Color::Text());
+        painter->drawText(QRectF(tile.left(), plate.bottom() + 4, tile.width(), 20),
+                          Qt::AlignCenter, index.data(Qt::DisplayRole).toString());
+        if (option.state & QStyle::State_HasFocus && Spotlight::HasKeyboardFocus(option.widget)) {
+            painter->setPen(QPen(Spotlight::Color::Text(), 1));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(tile.adjusted(-1, -1, 1, 1), 16, 16);
+        }
+        painter->restore();
+    }
+};
+
+QLabel* SecondaryLabel(const QString& text, QWidget* parent, int weight = 400) {
+    auto* label = new QLabel(text, parent);
+    label->setFont(Spotlight::Font(13, weight));
+    label->setWordWrap(true);
+    Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    return label;
+}
+
+} // namespace
+
 int IconSearch::ChooseIcon(const std::vector<std::vector<u8>>& choices) {
     if (choices.size() == 1) {
         return 0;
     }
-    QDialog dialog(parent_widget);
+    Spotlight::Dialog dialog(parent_widget);
     dialog.setWindowTitle(tr("Choose an Icon"));
+    dialog.SetSubtitle(tr("SteamGridDB has several icons for this game. Pick one:"));
+    dialog.SetIcon(u"image", Spotlight::Color::Accent());
     auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(
-        new QLabel(tr("SteamGridDB has several icons for this game. Pick one:"), &dialog));
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
     auto* list = new QListWidget(&dialog);
     list->setViewMode(QListView::IconMode);
     list->setIconSize(QSize(128, 128));
     list->setResizeMode(QListView::Adjust);
     list->setMovement(QListView::Static);
-    list->setSpacing(8);
+    list->setUniformItemSizes(true);
+    list->setMouseTracking(true);
+    list->setFrameShape(QFrame::NoFrame);
+    list->setStyleSheet(QStringLiteral("QListWidget { background: transparent; border: 0; }"));
+    list->setItemDelegate(new IconChoiceDelegate(list));
     list->setSelectionMode(QAbstractItemView::SingleSelection);
     for (std::size_t i = 0; i < choices.size(); ++i) {
         QPixmap map;
         if (map.loadFromData(choices[i].data(), static_cast<uint>(choices[i].size()))) {
-            auto* item = new QListWidgetItem(QIcon(map), QString::number(i + 1));
+            auto* item = new QListWidgetItem(QIcon(map), tr("Icon %1").arg(i + 1));
             item->setData(Qt::UserRole, static_cast<int>(i));
             list->addItem(item);
         }
@@ -758,9 +842,11 @@ int IconSearch::ChooseIcon(const std::vector<std::vector<u8>>& choices) {
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
-    layout->addWidget(list);
+    layout->addWidget(list, 1);
+    layout->addWidget(SecondaryLabel(tr("Double-click an icon to accept it."), &dialog));
+    layout->addSpacing(6);
     layout->addWidget(buttons);
-    dialog.resize(520, 420);
+    dialog.resize(492, 316);
     if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
         return -1;
     }
@@ -768,32 +854,62 @@ int IconSearch::ChooseIcon(const std::vector<std::vector<u8>>& choices) {
 }
 
 bool IconSearch::AskForApiKey(bool missing) {
-    QString text = missing ? tr("No matching icon was found on switchiconshowdown.com. A "
-                                "SteamGridDB API key enables a fallback search.")
-                           : tr("SteamGridDB rejected the saved API key.");
-    if (UISettings::values.steamgriddb_api_key.GetValue().empty()) {
-        text += QStringLiteral("<br><br>") +
-                tr("Create a free key on the <a href=\"%1\">SteamGridDB API preferences</a> page.")
-                    .arg(QStringLiteral("https://www.steamgriddb.com/profile/preferences/api"));
-    }
-    QDialog dialog(parent_widget);
+    Spotlight::Dialog dialog(parent_widget);
     dialog.setWindowTitle(tr("SteamGridDB API Key"));
+    dialog.SetIcon(u"key", Spotlight::Color::Accent());
     auto* layout = new QVBoxLayout(&dialog);
-    auto* label = new QLabel(text, &dialog);
-    label->setTextFormat(Qt::RichText);
-    label->setOpenExternalLinks(true);
-    label->setWordWrap(true);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+    layout->addWidget(SecondaryLabel(
+        missing ? tr("No matching icon was found on switchiconshowdown.com. A "
+                     "SteamGridDB API key enables a fallback search.")
+                : tr("SteamGridDB rejected the saved API key."),
+        &dialog));
+    if (UISettings::values.steamgriddb_api_key.GetValue().empty()) {
+        auto* link = new QLabel(
+            QStringLiteral("<a href=\"%1\" style=\"color: #8fb5ff; text-decoration: none\">%2</a>")
+                .arg(QStringLiteral("https://www.steamgriddb.com/profile/preferences/api"),
+                     tr("SteamGridDB API preferences").toHtmlEscaped()),
+            &dialog);
+        link->setFont(Spotlight::Font(13, 600));
+        link->setOpenExternalLinks(true);
+        link->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        link->setToolTip(tr("Create a free key on the SteamGridDB API preferences page."));
+        auto* icon = new QLabel(&dialog);
+        icon->setPixmap(Spotlight::IconPixmap(u"arrow-square-out", 14, Spotlight::Color::Info(),
+                                              dialog.devicePixelRatioF()));
+        auto* row = new QHBoxLayout;
+        row->setSpacing(6);
+        row->addWidget(link);
+        row->addWidget(icon);
+        row->addStretch(1);
+        layout->addLayout(row);
+    }
+    auto* field = new QVBoxLayout;
+    field->setSpacing(8);
+    auto* label = SecondaryLabel(tr("API key"), &dialog, 600);
     auto* key_edit = new QLineEdit(
         QString::fromStdString(UISettings::values.steamgriddb_api_key.GetValue()), &dialog);
     key_edit->setEchoMode(QLineEdit::Password);
     key_edit->setPlaceholderText(tr("API key"));
+    key_edit->setFixedHeight(40);
+    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    mono.setPixelSize(14);
+    key_edit->setFont(mono);
+    label->setBuddy(key_edit);
+    field->addWidget(label);
+    field->addWidget(key_edit);
+    layout->addLayout(field);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    auto* ok = buttons->button(QDialogButtonBox::Ok);
+    const auto update_ok = [ok, key_edit] { ok->setEnabled(!key_edit->text().trimmed().isEmpty()); };
+    connect(key_edit, &QLineEdit::textChanged, &dialog, update_ok);
+    update_ok();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(label);
-    layout->addWidget(key_edit);
+    layout->addSpacing(6);
     layout->addWidget(buttons);
-    dialog.setMinimumWidth(420);
+    dialog.setFixedWidth(518);
     if (dialog.exec() != QDialog::Accepted || key_edit->text().trimmed().isEmpty()) {
         return false;
     }
@@ -848,13 +964,13 @@ void IconSearch::OnFinished() {
                       .arg(SearchDeadline.count());
         break;
     case IconSearchStatus::NetworkError:
-        message = tr("Could not reach the icon sources (%1). Check your connection and try again.")
-                      .arg(QString::fromStdString(result.error));
+        LOG_WARNING(Frontend, "Could not reach the icon sources: {}", result.error);
+        message = tr("Could not reach the icon sources. Check your connection and try again.");
         break;
     case IconSearchStatus::Cancelled:
         return;
     case IconSearchStatus::InternalError:
-        message = tr("Searching for an icon failed unexpectedly: %1")
+        message = tr("Searching for an icon failed unexpectedly: %1.")
                       .arg(QString::fromStdString(result.error));
         break;
     }

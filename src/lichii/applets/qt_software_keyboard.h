@@ -90,13 +90,12 @@ private:
     void MoveAndResizeWindow(QPoint pos, QSize size);
 
     /**
-     * Rescales all keyboard elements to account for High DPI displays.
+     * Sizes the keyboard card to fit the window.
      *
      * @param width Window width
      * @param height Window height
-     * @param dpi_scale Display scaling factor
      */
-    void RescaleKeyboardElements(float width, float height, float dpi_scale);
+    void RescaleKeyboardElements(float width, float height);
 
     /// Sets the keyboard type based on initialize_parameters.
     void SetKeyboardType();
@@ -127,6 +126,9 @@ private:
 
     /// Switches between LowerCase and UpperCase (Shift and Caps Lock)
     void ChangeBottomOSKIndex();
+
+    /// Marks the Shift key on the uppercase page as Caps Lock on or off
+    void SetCapsLockShown(bool locked);
 
     /// Processes a keyboard button click from the UI as normal keyboard input.
     void NormalKeyboardButtonClicked(QPushButton* button);

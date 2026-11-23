@@ -3,17 +3,16 @@
 
 #pragma once
 
-#include <QDialog>
+#include <array>
+#include <optional>
 #include "frontend_common/data_manager.h"
+#include "lichii/spotlight/dialog.h"
 #include "qt_common/qt_string_lookup.h"
 
-#include "ui_data_widget.h"
+class QLabel;
+class DataWidget;
 
-namespace Ui {
-class DataDialog;
-}
-
-class DataDialog : public QDialog {
+class DataDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -21,15 +20,28 @@ public:
     ~DataDialog();
 
 private:
-    std::unique_ptr<Ui::DataDialog> ui;
+    void UpdateTotal();
+
+    std::array<DataWidget*, 5> rows{};
 };
 
+/// One kind of Lichii data in the storage card: its size, a bar of its share and the buttons
+/// that open, export, import and clear it.
 class DataWidget : public QWidget {
     Q_OBJECT
 public:
     explicit DataWidget(FrontendCommon::DataManager::DataDir data_dir,
                         QtCommon::StringLookup::StringKey tooltip, const QString& exportName,
-                        QWidget* parent = nullptr);
+                        const QString& title, const QString& description, QStringView icon,
+                        const QColor& tint, bool divider, QWidget* parent = nullptr);
+
+    /// The size of the data, or nothing while it is being measured.
+    [[nodiscard]] std::optional<u64> Size() const;
+    /// The total all rows' bars share.
+    void SetTotal(u64 total);
+
+signals:
+    void SizeChanged();
 
 public slots:
     void clear();
@@ -39,10 +51,18 @@ public slots:
 
     void scan();
 
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
 private:
-    std::unique_ptr<Ui::DataWidget> ui;
     FrontendCommon::DataManager::DataDir m_dir;
     const QString m_exportName;
+    QColor m_tint;
+    bool m_divider;
+    QLabel* m_size;
+    QWidget* m_bar;
+    std::optional<u64> m_bytes;
+    u64 m_total = 0;
 
     std::optional<std::string> selectProfile();
 };

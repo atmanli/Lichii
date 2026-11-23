@@ -57,34 +57,7 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
     using namespace QtCommon::StringLookup;
 
     MigrationDialog migration_prompt;
-    migration_prompt.setWindowTitle(QObject::tr("Migration"));
-
-    // mutually exclusive
-    QButtonGroup* group = new QButtonGroup(&migration_prompt);
-
-    // MACRO MADNESS, indeed
-
-#define BUTTON(clazz, name, text, tooltip, checkState)                                             \
-    clazz* name = new clazz(&migration_prompt);                                                    \
-    name->setText(text);                                                                           \
-    name->setToolTip(Lookup(tooltip));                                                             \
-    name->setChecked(checkState);                                                                  \
-    migration_prompt.addBox(name);
-
-    BUTTON(QCheckBox, clear_shaders, QObject::tr("Clear Shader Cache"), MigrationTooltipClearShader,
-           true)
-
-#define RADIO(name, text, tooltip, checkState, strategy)                                           \
-    BUTTON(QRadioButton, name, text, tooltip, checkState)                                          \
-    group->addButton(name, static_cast<int>(MigrationWorker::MigrationStrategy::strategy));
-
-    RADIO(keep_old, QObject::tr("Keep Old Data"), MigrationTooltipKeepOld, true, Copy)
-    RADIO(clear_old, QObject::tr("Move Old Data (retain backup)"), MigrationTooltipClearOld, false,
-          Move)
-    RADIO(link_old, QObject::tr("Link Old Directory"), MigrationTooltipLinkOld, false, Link)
-
-#undef RADIO
-#undef BUTTON
+    migration_prompt.setWindowTitle(QObject::tr("Bring your data along"));
 
     std::vector<Emulator> found{};
 
@@ -96,11 +69,44 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
         return;
     }
 
+    migration_prompt.setText(QObject::tr("We found another emulator on this PC. Import its saves, "
+                                         "games and settings?"));
+
     auto* source = new QComboBox(&migration_prompt);
     for (const Emulator& emu : found) {
-        source->addItem(emu.name());
+        source->addItem(QStringLiteral("%1 \u00b7 %2")
+                            .arg(emu.name(), QString::fromStdString(
+                                                 Common::FS::GetLegacyPathString(emu.e_user_dir))));
     }
-    migration_prompt.addBox(source);
+    migration_prompt.addField(QObject::tr("From"), source);
+
+    // mutually exclusive
+    QButtonGroup* group = new QButtonGroup(&migration_prompt);
+    const auto radio = [&](const QString& text, const QString& description, StringKey tooltip,
+                           bool checked, MigrationWorker::MigrationStrategy strategy) {
+        auto* button = new QRadioButton(text, &migration_prompt);
+        button->setToolTip(Lookup(tooltip));
+        button->setChecked(checked);
+        group->addButton(button, static_cast<int>(strategy));
+        migration_prompt.addOption(button, description);
+        return button;
+    };
+    auto* keep_old = radio(QObject::tr("Copy"),
+                           QObject::tr("Keeps the old folder as it is. Uses the most space."),
+                           MigrationTooltipKeepOld, true, MigrationWorker::MigrationStrategy::Copy);
+    auto* clear_old =
+        radio(QObject::tr("Move"), QObject::tr("Moves the data and keeps a backup."),
+              MigrationTooltipClearOld, false, MigrationWorker::MigrationStrategy::Move);
+    auto* link_old =
+        radio(QObject::tr("Share the folder"), QObject::tr("Both apps use the same folder."),
+              MigrationTooltipLinkOld, false, MigrationWorker::MigrationStrategy::Link);
+
+    auto* clear_shaders = new QCheckBox(
+        QObject::tr("Clear the shader cache (recommended when coming from Yuzu or Suyu)"),
+        &migration_prompt);
+    clear_shaders->setToolTip(Lookup(MigrationTooltipClearShader));
+    migration_prompt.addBox(clear_shaders);
+
     const auto update_cache_default = [&] {
         const Emulator& emu = found.at(source->currentIndex());
         clear_shaders->setChecked(emu.e_user_dir != Common::FS::LegacyEdenDir);
@@ -121,16 +127,8 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
     QObject::connect(link_old, &QRadioButton::toggled, &migration_prompt,
                      [=](bool linked) { clear_shaders->setEnabled(!linked); });
     update_cache_default();
-    migration_prompt.setText(
-        QObject::tr("Import an existing emulator profile into Lichii?\n"
-                    "Copy keeps the original profile unchanged and is recommended.\n"
-                    "Move retains a recovery backup and requires space for a full copy.\n"
-                    "Link shares settings and saves with the source emulator.\n"
-                    "Existing Lichii data is kept in backup directories, not merged or deleted.\n\n"
-                    "Close the source emulator, then choose its profile below.\n"
-                    "Close this window to decide on the next launch."));
-    migration_prompt.addButton(QObject::tr("Import"));
     auto* fresh = migration_prompt.addButton(QObject::tr("Start fresh"), true);
+    migration_prompt.addButton(QObject::tr("Import"));
 
     migration_prompt.exec();
 

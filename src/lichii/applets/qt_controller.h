@@ -9,6 +9,7 @@
 #include <memory>
 #include <QDialog>
 #include "core/frontend/applets/controller.h"
+#include "lichii/spotlight/dialog.h"
 
 class MainWindow;
 class QCheckBox;
@@ -38,7 +39,7 @@ enum class NpadStyleIndex : u8;
 
 class ControllerNavigation;
 
-class QtControllerSelectorDialog final : public QDialog {
+class QtControllerSelectorDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -135,10 +136,7 @@ private:
     std::array<QGroupBox*, NUM_PLAYERS> player_groupboxes;
 
     // Icons for currently connected controllers/players.
-    std::array<QWidget*, NUM_PLAYERS> connected_controller_icons;
-
-    // Labels that represent the player numbers in place of the controller icons.
-    std::array<QLabel*, NUM_PLAYERS> player_labels;
+    std::array<QLabel*, NUM_PLAYERS> connected_controller_icons;
 
     // LED patterns for currently connected controllers/players.
     std::array<std::array<QCheckBox*, 4>, NUM_PLAYERS> led_patterns_boxes;

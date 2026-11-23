@@ -45,14 +45,18 @@ struct ArtworkLookupResult {
     std::string detail; // Never contains the API key.
 };
 
-// Finds square artwork for a game title on SteamGridDB with the user's API key: the best title
-// match, then its first 512x512 or 1024x1024 grid, else its first icon. A year at the end of the
-// title, like "(2026)", picks the entry released that year. prefer_newest picks the newest entry
-// of the best match's name (remakes share the name of the original). Blocking, so run it off the
-// UI thread; it stops within 30 seconds or as soon as cancel is set.
+enum class SteamGridDbArt { Square, Hero };
+
+// Finds artwork for a game title on SteamGridDB with the user's API key: the best title match,
+// then for Square its first 512x512 or 1024x1024 grid, else its first icon, and for Hero its first
+// static wide hero without adult or humor content. A year at the end of the title, like "(2026)",
+// picks the entry released that year. prefer_newest picks the newest entry of the best match's
+// name (remakes share the name of the original). Blocking, so run it off the UI thread; it stops
+// within 30 seconds or as soon as cancel is set.
 ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
                                              const std::atomic_bool& cancel,
-                                             bool prefer_newest = false);
+                                             bool prefer_newest = false,
+                                             SteamGridDbArt art = SteamGridDbArt::Square);
 
 // Looks an icon up by game name on switchiconshowdown.com, falling back to SteamGridDB when the
 // user has set an API key. The search runs in the background under one 10 second deadline; errors,

@@ -2,199 +2,150 @@
 <ui version="4.0">
  <class>ConfigureTouchFromButton</class>
  <widget class="QDialog" name="ConfigureTouchFromButton">
-  <property name="geometry">
-   <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>500</width>
-    <height>500</height>
-   </rect>
-  </property>
-  <property name="windowTitle">
-   <string>Configure Touchscreen Mappings</string>
-  </property>
-  <layout class="QVBoxLayout">
+  <property name="windowTitle"><string>Configure Touchscreen Mappings</string></property>
+  <property name="styleSheet"><string notr="true">QLabel[field="true"] { font: 600 13px "Lexend"; color: #9effffff; }
+QLabel[hint="true"] { font: 400 13px "Lexend"; color: #9effffff; }
+QPushButton[pill="true"] { font: 600 13px "Lexend"; min-height: 34px; max-height: 34px; padding: 0 13px;
+                           border-radius: 17px; background: #14ffffff; border: none; color: #ffffff; }
+QPushButton[pill="true"]:hover { background: #1fffffff; }
+QPushButton[pill="true"][kind="destructive"] { background: #1fff8fae; color: #ff8fae; }
+QPushButton[pill="true"][kind="destructive"]:hover { background: #2eff8fae; }
+QPushButton[pill="true"]:disabled { color: #73ffffff; background: #0dffffff; }
+QComboBox { min-height: 34px; max-height: 34px; border-radius: 12px; }
+QTreeView#binding_list { background: #0dffffff; border: 1px solid #14ffffff; border-radius: 18px; padding: 0;
+                         font: 500 13px "Lexend"; color: #ffffff; outline: none; }
+QTreeView#binding_list::item { min-height: 34px; padding: 0 14px; border: none; border-bottom: 1px solid #12ffffff; }
+QTreeView#binding_list::item:selected { background: #24ff6b95; }
+QTreeView#binding_list QHeaderView { background: transparent; border: none; }
+QTreeView#binding_list QHeaderView::section { background: transparent;
+                                              min-height: 34px; padding: 0 14px; border: none; border-bottom: 1px solid #12ffffff; }
+TouchScreenPreview { background: #0fffffff; border: 1px solid #2effffff; border-radius: 13px; }</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>14</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
+     <property name="spacing"><number>8</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
      <item>
-      <widget class="QLabel" name="label">
-       <property name="text">
-        <string>Mapping:</string>
-       </property>
-       <property name="textFormat">
-        <enum>Qt::PlainText</enum>
-       </property>
-      </widget>
+      <layout class="QVBoxLayout" name="mappingColumn">
+       <property name="spacing"><number>8</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="label">
+         <property name="text"><string>Mapping:</string></property>
+         <property name="textFormat"><enum>Qt::PlainText</enum></property>
+         <property name="field" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QComboBox" name="mapping">
+         <property name="minimumSize"><size><width>398</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>398</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item>
-      <widget class="QComboBox" name="mapping">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="button_new">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="text">
-        <string>New</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="button_delete">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="text">
-        <string>Delete</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="button_rename">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="text">
-        <string>Rename</string>
-       </property>
-      </widget>
-     </item>
-    </layout>
-   </item>
-   <item>
-    <widget class="Line" name="line">
-     <property name="orientation">
-      <enum>Qt::Horizontal</enum>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_2">
-     <item>
-      <widget class="QLabel" name="label_2">
-       <property name="text">
-        <string>Click the bottom area to add a point, then press a button to bind.
-Drag points to change position, or double-click table cells to edit values.</string>
-       </property>
-       <property name="textFormat">
-        <enum>Qt::PlainText</enum>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <spacer name="horizontalSpacer">
-       <property name="orientation">
-        <enum>Qt::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>40</width>
-         <height>20</height>
-        </size>
-       </property>
+      <spacer name="spacer1">
+       <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+       <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+       <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
       </spacer>
      </item>
-     <item>
-      <widget class="QPushButton" name="button_delete_bind">
-       <property name="text">
-        <string>Delete Point</string>
-       </property>
+     <item alignment="Qt::AlignmentFlag::AlignBottom">
+      <widget class="QPushButton" name="button_new">
+       <property name="text"><string>New</string></property>
+       <property name="pill" stdset="0"><bool>true</bool></property>
+      </widget>
+     </item>
+     <item alignment="Qt::AlignmentFlag::AlignBottom">
+      <widget class="QPushButton" name="button_delete">
+       <property name="text"><string>Delete</string></property>
+       <property name="pill" stdset="0"><bool>true</bool></property>
+       <property name="kind" stdset="0"><string notr="true">destructive</string></property>
+      </widget>
+     </item>
+     <item alignment="Qt::AlignmentFlag::AlignBottom">
+      <widget class="QPushButton" name="button_rename">
+       <property name="text"><string>Rename</string></property>
+       <property name="pill" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
     </layout>
    </item>
    <item>
     <widget class="QTreeView" name="binding_list">
-     <property name="sizePolicy">
-      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-       <horstretch>0</horstretch>
-       <verstretch>0</verstretch>
-      </sizepolicy>
-     </property>
-     <property name="rootIsDecorated">
-      <bool>false</bool>
-     </property>
-     <property name="uniformRowHeights">
-      <bool>true</bool>
-     </property>
-     <property name="itemsExpandable">
-      <bool>false</bool>
-     </property>
+     <property name="sizePolicy"><sizepolicy hsizetype="Expanding" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+     <property name="minimumSize"><size><width>0</width><height>176</height></size></property>
+     <property name="maximumSize"><size><width>16777215</width><height>176</height></size></property>
+     <property name="rootIsDecorated"><bool>false</bool></property>
+     <property name="uniformRowHeights"><bool>true</bool></property>
+     <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarPolicy::ScrollBarAsNeeded</enum></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayout_2">
+     <property name="spacing"><number>12</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
+     <item>
+      <spacer name="spacer2">
+       <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+       <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+       <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="button_delete_bind">
+       <property name="text"><string>Delete Point</string></property>
+       <property name="pill" stdset="0"><bool>true</bool></property>
+       <property name="kind" stdset="0"><string notr="true">destructive</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="label_2">
+     <property name="text"><string>Click the bottom area to add a point, then press a button to bind.
+Drag points to change position, or double-click table cells to edit values.</string></property>
+     <property name="textFormat"><enum>Qt::PlainText</enum></property>
+     <property name="hint" stdset="0"><bool>true</bool></property>
     </widget>
    </item>
    <item>
     <widget class="TouchScreenPreview" name="bottom_screen">
-     <property name="sizePolicy">
-      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-       <horstretch>0</horstretch>
-       <verstretch>0</verstretch>
-      </sizepolicy>
-     </property>
-     <property name="minimumSize">
-      <size>
-       <width>160</width>
-       <height>120</height>
-      </size>
-     </property>
-     <property name="baseSize">
-      <size>
-       <width>320</width>
-       <height>240</height>
-      </size>
-     </property>
-     <property name="cursor">
-      <cursorShape>CrossCursor</cursorShape>
-     </property>
-     <property name="mouseTracking">
-      <bool>true</bool>
-     </property>
-     <property name="autoFillBackground">
-      <bool>true</bool>
-     </property>
-     <property name="frameShape">
-      <enum>QFrame::StyledPanel</enum>
-     </property>
-     <property name="frameShadow">
-      <enum>QFrame::Sunken</enum>
-     </property>
+     <property name="sizePolicy"><sizepolicy hsizetype="Expanding" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+     <property name="minimumSize"><size><width>730</width><height>176</height></size></property>
+     <property name="maximumSize"><size><width>16777215</width><height>176</height></size></property>
     </widget>
    </item>
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout_3">
+     <property name="spacing"><number>10</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
      <item>
       <widget class="QLabel" name="coord_label">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="textFormat">
-        <enum>Qt::PlainText</enum>
-       </property>
+       <property name="hint" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
      <item>
       <widget class="QDialogButtonBox" name="buttonBox">
-       <property name="standardButtons">
-        <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
-       </property>
+       <property name="standardButtons"><set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Ok</set></property>
       </widget>
      </item>
     </layout>
@@ -202,20 +153,10 @@ Drag points to change position, or double-click table cells to edit values.</str
   </layout>
  </widget>
  <customwidgets>
-  <customwidget>
-   <class>TouchScreenPreview</class>
-   <extends>QFrame</extends>
-   <header>lichii/configuration/configure_touch_widget.h</header>
-   <container>1</container>
-  </customwidget>
+  <customwidget><class>TouchScreenPreview</class><extends>QFrame</extends><header>lichii/configuration/configure_touch_widget.h</header></customwidget>
  </customwidgets>
  <resources/>
  <connections>
-  <connection>
-   <sender>buttonBox</sender>
-   <signal>rejected()</signal>
-   <receiver>ConfigureTouchFromButton</receiver>
-   <slot>reject()</slot>
-  </connection>
+  <connection><sender>buttonBox</sender><signal>rejected()</signal><receiver>ConfigureTouchFromButton</receiver><slot>reject()</slot></connection>
  </connections>
 </ui>

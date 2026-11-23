@@ -27,6 +27,10 @@ public:
     ~ConfigureMicrophone() override;
     void ApplyConfiguration();
 
+signals:
+    /// The test started or stopped, or the status text changed.
+    void StateChanged();
+
 protected:
     void hideEvent(QHideEvent* event) override;
 

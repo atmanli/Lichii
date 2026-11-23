@@ -3,13 +3,19 @@
 
 #pragma once
 
-#include <QDialog>
+#include <QSet>
 
-class QCheckBox;
+#include "lichii/spotlight/dialog.h"
+
+class QAbstractButton;
 class QComboBox;
-class QLabel;
+class QScrollArea;
 class QVBoxLayout;
 class QWidget;
+
+namespace Spotlight {
+class StatusBanner;
+}
 
 namespace VideoCore {
 struct FxChainEntry;
@@ -17,7 +23,7 @@ struct FxEffectDesc;
 struct FxUniformDesc;
 }
 
-class ConfigurePostProcessing : public QDialog {
+class ConfigurePostProcessing : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -26,17 +32,24 @@ public:
 
 private:
     void RebuildRows();
-    QWidget* BuildSlot(int index, const VideoCore::FxChainEntry& entry);
-    void BuildUniformWidget(QWidget* parent, QVBoxLayout* layout, int index,
-                            const VideoCore::FxUniformDesc& uniform);
+    void BuildSlot(int index, const VideoCore::FxChainEntry& entry);
+    void BuildUniformRow(int index, const VideoCore::FxUniformDesc& uniform,
+                         const QString& category, QList<QWidget*>& body);
     void PopulateEffectCombo(QComboBox* combo, const VideoCore::FxChainEntry& entry) const;
     void ApplyStructuralChange();
     void PopulatePresetCombo();
     void RefreshPresetStatus();
+    void SavePreset();
+    void FitChain();
 
     QVBoxLayout* slots_layout{};
-    QWidget* slots_container{};
+    QWidget* slots_card{};
+    QWidget* chain_heading{};
+    QScrollArea* scroll{};
+    QWidget* sources{};
     QComboBox* preset_combo{};
-    QLabel* preset_status{};
-    QCheckBox* enabled_box{};
+    QComboBox* add_combo{};
+    Spotlight::StatusBanner* preset_status{};
+    QAbstractButton* enabled_box{};
+    QSet<int> expanded;
 };

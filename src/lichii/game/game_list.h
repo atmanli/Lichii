@@ -24,6 +24,7 @@
 #include "common/common_types.h"
 #include "core/core.h"
 #include "frontend_common/play_time_manager.h"
+#include "lichii/game/common.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/util/game.h"
@@ -35,14 +36,20 @@ class GameListModel;
 class GameTree;
 class GameGrid;
 class GameListSearchField;
+class GameListViewModel;
 class ControllerNavigation;
 class GameListWorker;
 class GameListDir;
+
 class MainWindow;
 enum class AmLaunchType;
 enum class StartGameType;
 
 class GameCarousel;
+
+namespace Spotlight {
+class Menu;
+}
 
 class QAbstractItemView;
 namespace Core {
@@ -74,11 +81,17 @@ public:
                       MainWindow* parent = nullptr);
     ~GameList() override;
 
-    QString GetLastFilterResultItem() const;
-    void ClearFilter();
     void SetFilterFocus();
-    void SetFilterVisible(bool visibility);
-    bool IsEmpty() const;
+    GameListSearchField* SearchField() const;
+    void SetFilterText(const QString& text);
+    void SetPlatform(Lichii::LibraryPlatform platform);
+    void SetLibrarySort(Lichii::LibrarySort sort);
+    void RefreshLibraryOrder();
+    void PlaySelected();
+    /// Selects the program's library entry, when the current view shows it.
+    void SelectProgram(u64 program_id);
+    void PlaySingleResult();
+    void ShowSelectedGameMenu(const QPoint& global_position);
     bool IsPopulating() const;
 
     void PopulateAsync(QVector<UISettings::GameDir>& game_dirs);
@@ -136,21 +149,28 @@ signals:
     void CreateShortcut(u64 program_id, const std::string& game_path,
                         const QtCommon::Game::ShortcutTarget target);
     void OpenPerGameGeneralRequested(u64 program_id, const std::string& file);
+    void OpenGameModsRequested(u64 program_id, const std::string& file);
     void LinkToRyujinxRequested(const u64& program_id);
     void OpenDirectory(const QString& directory);
     void AddDirectory();
     void ShowList(bool show);
     void PopulatingCompleted();
     void SaveConfig();
+    void LibraryChanged(const QModelIndex& game, int count);
+    void LibrarySortChanged(const QString& column_name);
+    void LibraryEnabledChanged(bool enabled);
 
 private slots:
-    void OnTextChanged(const QString& new_text);
-    void OnFilterCloseClicked();
     void OnPopulatingCompleted(const QStringList& watch_list);
 
 private:
     void SetupViews();
     void SetupScrollAnimation();
+    void ApplyFilter();
+    void ApplySort();
+    void RememberSelection();
+    void UpdateLibrary();
+    QModelIndex SelectedGame() const;
     bool eventFilter(QObject* obj, QEvent* event) override;
     void changeEvent(QEvent*) override;
 
@@ -159,10 +179,7 @@ private:
     void ToggleFavorite(u64 program_id);
 
     void PopupContextMenu(const QPoint& menu_location);
-    void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);
-    void AddCustomDirPopup(QMenu& context_menu, QModelIndex selected);
-    void AddPermDirPopup(QMenu& context_menu, QModelIndex selected);
-    void AddFavoritesPopup(QMenu& context_menu);
+    void AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const std::string& path);
 
     void RetranslateUI();
 
@@ -175,8 +192,6 @@ private:
     void ShowCustomArtwork(u64 program_id);
     QString GameTitle(u64 program_id) const;
 
-    friend class GameListSearchField;
-
     std::shared_ptr<FileSys::VfsFilesystem> vfs;
     FileSys::ManualContentProvider* provider;
     GameListSearchField* search_field = nullptr;
@@ -187,6 +202,7 @@ private:
     GameGrid* grid_view = nullptr;
     GameCarousel* carousel_view = nullptr;
     GameListModel* item_model = nullptr;
+    GameListViewModel* library_model = nullptr;
     Settings::GameListMode game_list_mode;
 
     ControllerNavigation* controller_navigation = nullptr;
@@ -201,10 +217,16 @@ private:
 
     bool m_isTreeMode = true;
     bool m_populating = false;
+    bool refocus_view = false;
+    QString selected_path;
     bool nup_conversion_running{};
     bool nx_tool_running{};
     u64 reportable_program_id{};
     QAbstractItemView* m_currentView = nullptr;
+    QPersistentModelIndex first_result;
+    int result_count = 0;
+    QString filter_text;
+    Lichii::LibraryPlatform platform = Lichii::LibraryPlatform::All;
 
     struct ArtworkLookup {
         u64 program_id;

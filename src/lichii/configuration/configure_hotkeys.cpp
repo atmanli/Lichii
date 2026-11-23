@@ -7,7 +7,6 @@
 #include <algorithm>
 
 #include <QMenu>
-#include <QMessageBox>
 #include <QStandardItemModel>
 #include <QTimer>
 
@@ -15,11 +14,12 @@
 #include "hid_core/hid_core.h"
 
 #include "frontend_common/config.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_configure_hotkeys.h"
 #include "lichii/configuration/configure_hotkeys.h"
+#include "lichii/configuration/settings_dialog.h"
 #include "lichii/hotkeys.h"
 #include "lichii/util/sequence_dialog/sequence_dialog.h"
+#include "qt_common/config/uisettings.h"
+#include "ui_configure_hotkeys.h"
 
 constexpr int name_column = 0;
 constexpr int hotkey_column = 1;
@@ -158,7 +158,8 @@ void ConfigureHotkeys::Configure(QModelIndex index) {
 
     const auto previous_key = model->data(index);
 
-    SequenceDialog hotkey_dialog{this};
+    const QString action = index.siblingAtColumn(name_column).data().toString();
+    SequenceDialog hotkey_dialog{this, action};
 
     const int return_code = hotkey_dialog.exec();
     const auto key_sequence = hotkey_dialog.GetSequence();
@@ -168,9 +169,16 @@ void ConfigureHotkeys::Configure(QModelIndex index) {
     const auto [key_sequence_used, used_action] = IsUsedKey(key_sequence);
 
     if (key_sequence_used && key_sequence != QKeySequence(previous_key.toString())) {
-        QMessageBox::warning(
-            this, tr("Conflicting Key Sequence"),
-            tr("The entered key sequence is already assigned to: %1").arg(used_action));
+        SettingsCard::Message{
+            this, 390, tr("Conflicting Key Sequence"),
+            previous_key.toString().isEmpty()
+                ? tr("%1 is already assigned to %2. %3 remains unbound.")
+                      .arg(key_sequence.toString(QKeySequence::NativeText), used_action, action)
+                : tr("%1 is already assigned to %2. %3 still uses %4.")
+                      .arg(key_sequence.toString(QKeySequence::NativeText), used_action, action,
+                           previous_key.toString()),
+            tr("OK")}
+            .exec();
     } else {
         model->setData(index, key_sequence.toString(QKeySequence::NativeText));
     }
@@ -182,7 +190,58 @@ void ConfigureHotkeys::ConfigureController(QModelIndex index) {
 
     const auto previous_key = model->data(index);
 
-    input_setter = [this, index, previous_key](const bool cancel) {
+    using namespace SettingsCard;
+    auto* waiting = new Spotlight::Dialog(this, Spotlight::Dialog::Chrome::Content);
+    waiting->setAttribute(Qt::WA_DeleteOnClose);
+    waiting->setWindowTitle(tr("Controller binding"));
+    auto* layout = Layout(*waiting, 385, 12);
+    layout->setContentsMargins(17, 17, 17, 17);
+    layout->addWidget(Text(tr("Controller binding"), 18, 400));
+
+    auto* row = new QHBoxLayout;
+    row->setSpacing(14);
+    row->setContentsMargins(18, 10, 16, 10);
+    auto* copy = new QVBoxLayout;
+    copy->setSpacing(2);
+    copy->addWidget(Text(index.siblingAtColumn(name_column).data().toString(), 14, 600));
+    copy->addWidget(
+        Text(tr("Press a controller chord"), 12, 400, Spotlight::Color::TextSecondary()));
+    row->addLayout(copy, 1);
+    auto* chip = Text(tr("Waiting…"), 11, 600, Spotlight::Color::OnAccent());
+    chip->setFixedHeight(22);
+    chip->setAlignment(Qt::AlignCenter);
+    chip->setStyleSheet(QStringLiteral(
+        "color: #2a0a14; background: #ff6b95; border-radius: 11px; padding: 0 9px;"));
+    row->addWidget(chip);
+    layout->addLayout(row);
+
+    auto* hint = new QHBoxLayout;
+    hint->setContentsMargins(8, 2, 8, 2);
+    hint->setSpacing(8);
+    hint->addWidget(IconTile(QStringLiteral("info"), 16, 16, 0, Spotlight::Color::TextSecondary(),
+                             Qt::transparent));
+    auto* description =
+        Text(tr("Lichii restores the prior binding if no input arrives within 2.5 seconds."), 12,
+             400, Spotlight::Color::TextSecondary());
+    description->setWordWrap(true);
+    hint->addWidget(description, 1);
+    layout->addLayout(hint);
+
+    connect(model, &QAbstractItemModel::dataChanged, waiting, [this, index, chip] {
+        if (pressed_buttons != Core::HID::NpadButton::None || pressed_home_button ||
+            pressed_capture_button) {
+            chip->setText(model->data(index).toString());
+        }
+    });
+    connect(waiting, &QDialog::rejected, this, [this] {
+        if (timeout_timer->isActive()) {
+            SetPollingResult(true);
+        }
+    });
+    input_setter = [this, index, previous_key, waiting](const bool cancel) {
+        if (waiting->isVisible()) {
+            waiting->accept();
+        }
         if (cancel) {
             model->setData(index, previous_key);
             return;
@@ -194,9 +253,11 @@ void ConfigureHotkeys::ConfigureController(QModelIndex index) {
         const auto [key_sequence_used, used_action] = IsUsedControllerKey(button_string);
 
         if (key_sequence_used) {
-            QMessageBox::warning(
-                this, tr("Conflicting Key Sequence"),
-                tr("The entered key sequence is already assigned to: %1").arg(used_action));
+            Message{this, 390, tr("Conflicting Button Sequence"),
+                    tr("%1 is already assigned to %2. The previous binding was kept.")
+                        .arg(button_string, used_action),
+                    tr("OK")}
+                .exec();
             model->setData(index, previous_key);
         } else {
             model->setData(index, button_string);
@@ -213,6 +274,8 @@ void ConfigureHotkeys::ConfigureController(QModelIndex index) {
     poll_timer->start(100);     // Check for new inputs every 100ms
     // We need to disable configuration to be able to read npad buttons
     controller->DisableConfiguration();
+    waiting->adjustSize();
+    waiting->open();
 }
 
 void ConfigureHotkeys::SetPollingResult(const bool cancel) {
@@ -328,6 +391,7 @@ std::pair<bool, QString> ConfigureHotkeys::IsUsedControllerKey(const QString& ke
 }
 
 void ConfigureHotkeys::ApplyConfiguration(HotkeyRegistry& registry) {
+    bool changed = false;
     for (int key_id = 0; key_id < model->rowCount(); key_id++) {
         const QStandardItem* parent = model->item(key_id, 0);
         for (int key_column_id = 0; key_column_id < parent->rowCount(); key_column_id++) {
@@ -341,14 +405,23 @@ void ConfigureHotkeys::ApplyConfiguration(HotkeyRegistry& registry) {
                 for (auto& [action_name, hotkey] : sub_actions) {
                     if (action_name != action->data().toString().toStdString())
                         continue;
-                    hotkey.keyseq = QKeySequence(keyseq->text());
-                    hotkey.controller_keyseq = controller_keyseq->text().toStdString();
+                    const QKeySequence new_keyseq(keyseq->text());
+                    const auto new_controller_keyseq = controller_keyseq->text().toStdString();
+                    if (hotkey.keyseq == new_keyseq &&
+                        hotkey.controller_keyseq == new_controller_keyseq) {
+                        continue;
+                    }
+                    hotkey.keyseq = new_keyseq;
+                    hotkey.controller_keyseq = new_controller_keyseq;
+                    changed = true;
                 }
             }
         }
     }
 
-    registry.SaveHotkeys();
+    if (changed) {
+        registry.SaveHotkeys();
+    }
 }
 
 void ConfigureHotkeys::RestoreDefaults() {
@@ -406,6 +479,24 @@ void ConfigureHotkeys::PopupContextMenu(const QPoint& menu_location) {
     context_menu.exec(ui->hotkey_list->viewport()->mapToGlobal(menu_location));
 }
 
+void ConfigureHotkeys::RestoreAction(QModelIndex index) {
+    RestoreHotkey(index.siblingAtColumn(hotkey_column));
+    RestoreControllerHotkey(index.siblingAtColumn(controller_column));
+}
+
+bool ConfigureHotkeys::IsDefault(QModelIndex index) const {
+    const UISettings::Shortcut* hotkey =
+        DefaultHotkey(*model->itemFromIndex(index.siblingAtColumn(name_column)));
+    if (hotkey == nullptr) {
+        return true;
+    }
+    return QKeySequence(index.siblingAtColumn(hotkey_column).data().toString()) ==
+               QKeySequence::fromString(QString::fromStdString(hotkey->shortcut.keyseq),
+                                        QKeySequence::NativeText) &&
+           index.siblingAtColumn(controller_column).data().toString() ==
+               QString::fromStdString(hotkey->shortcut.controller_keyseq);
+}
+
 void ConfigureHotkeys::RestoreControllerHotkey(QModelIndex index) {
     const UISettings::Shortcut* hotkey =
         DefaultHotkey(*model->itemFromIndex(index.siblingAtColumn(name_column)));
@@ -416,9 +507,10 @@ void ConfigureHotkeys::RestoreControllerHotkey(QModelIndex index) {
     const auto [key_sequence_used, used_action] = IsUsedControllerKey(default_key_sequence);
 
     if (key_sequence_used && default_key_sequence != model->data(index).toString()) {
-        QMessageBox::warning(
-            this, tr("Conflicting Button Sequence"),
-            tr("The default button sequence is already assigned to: %1").arg(used_action));
+        SettingsCard::Message{
+            this, 390, tr("Conflicting Button Sequence"),
+            tr("The default button sequence is already assigned to: %1").arg(used_action), tr("OK")}
+            .exec();
     } else {
         model->setData(index, default_key_sequence);
     }
@@ -435,9 +527,10 @@ void ConfigureHotkeys::RestoreHotkey(QModelIndex index) {
     const auto [key_sequence_used, used_action] = IsUsedKey(default_key_sequence);
 
     if (key_sequence_used && default_key_sequence != QKeySequence(model->data(index).toString())) {
-        QMessageBox::warning(
-            this, tr("Conflicting Key Sequence"),
-            tr("The default key sequence is already assigned to: %1").arg(used_action));
+        SettingsCard::Message{
+            this, 390, tr("Conflicting Key Sequence"),
+            tr("The default key sequence is already assigned to: %1").arg(used_action), tr("OK")}
+            .exec();
     } else {
         model->setData(index, default_key_sequence.toString(QKeySequence::NativeText));
     }

@@ -213,12 +213,13 @@ struct Values {
     Setting<bool> show_add_ons{linkage, true, "show_add_ons", Category::UiGameList};
     Setting<u32, true> game_icon_size{linkage, 44, 0, 512, "game_icon_size", Category::UiGameList};
     Setting<u32, true> game_cover_size{
-        linkage, 160, 0, 512, "game_cover_size", Category::UiGameList};
+        linkage, 128, 0, 512, "game_cover_size", Category::UiGameList};
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
-    Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
+    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::GridView,
+                                                   "game_list_mode", Category::UiGameList};
+    Setting<bool> show_game_name{linkage, false, "show_game_name", Category::UiGameList};
 
     std::atomic_bool is_game_list_reload_pending{false};
     Setting<bool> cache_game_list{linkage, true, "cache_game_list", Category::UiGameList};
@@ -255,7 +256,7 @@ void SaveWindowState();
 void RestoreWindowState(std::unique_ptr<QtConfig>& qtConfig);
 
 // sync with uisettings.cpp
-extern const std::array<Shortcut, 35> default_hotkeys;
+extern const std::array<Shortcut, 36> default_hotkeys;
 
 } // namespace UISettings
 

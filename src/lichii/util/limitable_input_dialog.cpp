@@ -8,9 +8,11 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include "lichii/spotlight/theme.h"
 #include "lichii/util/limitable_input_dialog.h"
 
-LimitableInputDialog::LimitableInputDialog(QWidget* parent) : QDialog{parent} {
+LimitableInputDialog::LimitableInputDialog(QWidget* parent) : Spotlight::Dialog{parent} {
+    SetIcon(QStringLiteral("text-aa"), Spotlight::Color::Accent());
     CreateUI();
     ConnectEvents();
 }
@@ -23,10 +25,20 @@ void LimitableInputDialog::CreateUI() {
     text_label_invalid = new QLabel(this);
     buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 
+    text_label->setFont(Spotlight::Font(13, 600));
+    text_entry->setMinimumWidth(328);
+    text_label_invalid->setFont(Spotlight::Font(11, 400));
+    text_label_invalid->setStyleSheet(QStringLiteral("color: #8cffffff;"));
+    text_label_invalid->setWordWrap(true);
+
     auto* const layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(10);
+    layout->setSizeConstraint(QLayout::SetFixedSize);
     layout->addWidget(text_label);
     layout->addWidget(text_entry);
     layout->addWidget(text_label_invalid);
+    layout->addSpacing(10);
     layout->addWidget(buttons);
 }
 

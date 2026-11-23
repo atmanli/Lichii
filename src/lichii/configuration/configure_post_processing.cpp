@@ -1,33 +1,34 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
 
-#include <QAction>
-#include <QCheckBox>
 #include <QComboBox>
-#include <QDialogButtonBox>
-#include <QFrame>
-#include <QGridLayout>
-#include <QInputDialog>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QMenu>
-#include <QPushButton>
+#include <QLineEdit>
 #include <QScrollArea>
 #include <QSlider>
-#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "common/settings.h"
+#include "lichii/configuration/configure_post_processing.h"
+#include "lichii/spotlight/settings_page.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "video_core/post_processing/fx_chain.h"
 #include "video_core/post_processing/fx_effect.h"
 #include "video_core/post_processing/fx_preset.h"
-#include "lichii/configuration/configure_post_processing.h"
 
 namespace {
+
+using Spotlight::PillButton;
+using Spotlight::SettingsPage;
+using Spotlight::StatusBanner;
+namespace Color = Spotlight::Color;
 
 std::array<float, 4> CurrentValue(int index, const VideoCore::FxUniformDesc& uniform) {
     auto& chain = VideoCore::FxChain::Instance();
@@ -61,35 +62,55 @@ QString SlotLabel(const VideoCore::FxEffectDesc& effect, const std::string& tech
     return name + QStringLiteral(" · ") + QString::fromStdString(technique);
 }
 
+QWidget* Line(QWidget* first, QWidget* second = nullptr) {
+    auto* line = new QWidget;
+    line->setProperty("spotlightTransparent", true);
+    auto* layout = new QHBoxLayout(line);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    layout->addWidget(first);
+    if (second != nullptr) {
+        layout->addWidget(second);
+    }
+    return line;
+}
+
 } // Anonymous namespace
 
-ConfigurePostProcessing::ConfigurePostProcessing(QWidget* parent) : QDialog(parent) {
+ConfigurePostProcessing::ConfigurePostProcessing(QWidget* parent) : Spotlight::Dialog(parent) {
     setWindowTitle(tr("Post-Processing Effects"));
-    setMinimumWidth(560);
-    setMinimumHeight(460);
+    SetIcon(u"magic-wand", Color::Accent());
+    setFixedWidth(760);
+
+    sources = new QWidget(this);
+    sources->hide();
 
     auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(14);
 
-    auto* description =
-        new QLabel(tr("Changes apply immediately while a game is running."), this);
-    description->setWordWrap(true);
-    root->addWidget(description);
+    auto* enable_row = new QHBoxLayout;
+    enable_row->setContentsMargins(18, 0, 16, 0);
+    enable_row->addWidget(SettingsPage::Text(tr("Enable post-processing"), 14, 600), 1);
+    auto* enabled = new Spotlight::ToggleSwitch;
+    enabled->setAccessibleName(tr("Enable post-processing"));
+    enabled->setChecked(Settings::values.post_shader_enabled.GetValue());
+    connect(enabled, &QAbstractButton::toggled, this,
+            [](bool checked) { Settings::values.post_shader_enabled.SetValue(checked); });
+    enabled_box = enabled;
+    enable_row->addWidget(enabled);
+    root->addLayout(enable_row);
 
-    enabled_box = new QCheckBox(tr("Enable post-processing"), this);
-    enabled_box->setChecked(Settings::values.post_shader_enabled.GetValue());
-    connect(enabled_box, &QCheckBox::toggled, this, [](bool checked) {
-        Settings::values.post_shader_enabled.SetValue(checked);
-    });
-    root->addWidget(enabled_box);
+    auto* preset_row = new QHBoxLayout;
+    preset_row->setSpacing(8);
+    preset_row->addWidget(SettingsPage::Text(tr("Preset"), 13, 600));
+    preset_combo = new QComboBox(sources);
+    auto* preset_pill = SettingsPage::BindCombo(preset_combo);
+    preset_pill->setAccessibleName(tr("Preset"));
+    preset_row->addWidget(preset_pill);
 
-    auto* preset_row = new QHBoxLayout();
-    preset_row->addWidget(new QLabel(tr("Preset:"), this));
-
-    preset_combo = new QComboBox(this);
-    preset_row->addWidget(preset_combo, 1);
-
-    auto* apply_button = new QPushButton(tr("Apply"), this);
-    connect(apply_button, &QPushButton::clicked, this, [this]() {
+    auto* apply_button = new PillButton(tr("Apply"), {}, PillButton::Kind::Accent, 34);
+    connect(apply_button, &QAbstractButton::clicked, this, [this]() {
         const QString name = preset_combo->currentData().toString();
         if (name.isEmpty()) {
             return;
@@ -99,9 +120,9 @@ ConfigurePostProcessing::ConfigurePostProcessing(QWidget* parent) : QDialog(pare
     });
     preset_row->addWidget(apply_button);
 
-    auto* reset_button = new QPushButton(tr("Reset Values"), this);
+    auto* reset_button = new PillButton(tr("Reset Values"), {}, PillButton::Kind::Control, 34);
     reset_button->setToolTip(tr("Return every effect to the values the preset ships with."));
-    connect(reset_button, &QPushButton::clicked, this, [this]() {
+    connect(reset_button, &QAbstractButton::clicked, this, [this]() {
         const std::string active = VideoCore::GetActiveFxPreset();
         if (active.empty()) {
             return;
@@ -111,73 +132,90 @@ ConfigurePostProcessing::ConfigurePostProcessing(QWidget* parent) : QDialog(pare
     });
     preset_row->addWidget(reset_button);
 
-    auto* save_button = new QPushButton(tr("Save As..."), this);
-    connect(save_button, &QPushButton::clicked, this, [this]() {
-        bool accepted = false;
-        const QString name =
-            QInputDialog::getText(this, tr("Save Preset"), tr("Preset name:"), QLineEdit::Normal,
-                                  QString(), &accepted);
-        if (!accepted || name.trimmed().isEmpty()) {
-            return;
-        }
-        VideoCore::SaveFxPreset(name.trimmed().toStdString(), std::string());
-        PopulatePresetCombo();
-        RefreshPresetStatus();
-    });
+    auto* save_button = new PillButton(tr("Save As..."), {}, PillButton::Kind::Control, 34);
+    connect(save_button, &QAbstractButton::clicked, this, [this] { SavePreset(); });
     preset_row->addWidget(save_button);
 
-    auto* clear_button = new QPushButton(tr("Clear"), this);
+    auto* clear_button = new PillButton(tr("Clear"), {}, PillButton::Kind::Control, 34);
     clear_button->setToolTip(tr("Remove every effect in use and deselect the preset."));
-    connect(clear_button, &QPushButton::clicked, this, [this]() {
+    connect(clear_button, &QAbstractButton::clicked, this, [this]() {
         VideoCore::FxChain::Instance().Clear();
         VideoCore::SetActiveFxPreset(std::string());
         preset_combo->setCurrentIndex(0);
         ApplyStructuralChange();
     });
     preset_row->addWidget(clear_button);
-
+    preset_row->addStretch();
     root->addLayout(preset_row);
 
-    preset_status = new QLabel(this);
-    preset_status->setWordWrap(true);
+    preset_status = new StatusBanner;
     root->addWidget(preset_status);
 
-    auto* scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    slots_container = new QWidget(scroll);
-    slots_layout = new QVBoxLayout(slots_container);
-    slots_layout->setAlignment(Qt::AlignTop);
-    scroll->setWidget(slots_container);
-    root->addWidget(scroll, 1);
-
-    auto* actions = new QHBoxLayout();
-
-    auto* add_button = new QPushButton(tr("Add Effect"), this);
-    auto* add_menu = new QMenu(add_button);
+    auto* effects_row = new QHBoxLayout;
+    effects_row->setSpacing(8);
+    effects_row->addWidget(SettingsPage::Text(tr("Effects"), 14, 600), 1);
+    add_combo = new QComboBox(sources);
     for (const auto& effect : VideoCore::GetFxCatalog()) {
         if (!effect.Valid()) {
             continue;
         }
         for (const auto& technique : effect.techniques) {
-            QAction* action = add_menu->addAction(SlotLabel(effect, technique));
-            action->setToolTip(QString::fromStdString(effect.description));
-            const std::string file = effect.file;
-            const std::string name = technique;
-            connect(action, &QAction::triggered, this, [this, file, name]() {
-                VideoCore::FxChain::Instance().Append(file, name);
-                ApplyStructuralChange();
-            });
+            add_combo->addItem(SlotLabel(effect, technique),
+                               QString::fromStdString(effect.file + "|" + technique));
+            add_combo->setItemData(add_combo->count() - 1,
+                                   QString::fromStdString(effect.description), Qt::ToolTipRole);
         }
     }
-    add_button->setMenu(add_menu);
-    actions->addWidget(add_button);
+    auto* add_pill = SettingsPage::BindCombo(add_combo, tr("Installed techniques"));
+    add_pill->setAccessibleName(tr("Installed techniques"));
+    effects_row->addWidget(add_pill);
+    auto* add_button =
+        new PillButton(tr("Add Effect"), QStringLiteral("plus"), PillButton::Kind::Accent, 34);
+    add_button->setEnabled(add_combo->count() > 0);
+    connect(add_button, &QAbstractButton::clicked, this, [this]() {
+        const QString key = add_combo->currentData().toString();
+        const qsizetype separator = key.indexOf(QLatin1Char('|'));
+        if (separator < 0) {
+            return;
+        }
+        VideoCore::FxChain::Instance().Append(key.left(separator).toStdString(),
+                                              key.mid(separator + 1).toStdString());
+        expanded.insert(static_cast<int>(VideoCore::FxChain::Instance().Size()) - 1);
+        ApplyStructuralChange();
+    });
+    effects_row->addWidget(add_button);
+    root->addLayout(effects_row);
 
-    actions->addStretch();
-    root->addLayout(actions);
+    chain_heading = new QWidget;
+    chain_heading->setProperty("spotlightTransparent", true);
+    auto* heading_layout = new QHBoxLayout(chain_heading);
+    heading_layout->setContentsMargins(6, 0, 6, 0);
+    heading_layout->setSpacing(10);
+    heading_layout->addWidget(SettingsPage::Text(tr("Effect chain"), 14, 600), 0,
+                              Qt::AlignBaseline);
+    heading_layout->addWidget(SettingsPage::Text(tr("Rendered in order"), 12, 500, true), 1,
+                              Qt::AlignBaseline);
+    root->addWidget(chain_heading);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::close);
-    root->addWidget(buttons);
+    scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->viewport()->setAutoFillBackground(false);
+    slots_card = SettingsPage::Card();
+    slots_card->setProperty("compactRows", true);
+    slots_layout = new QVBoxLayout(slots_card);
+    slots_layout->setContentsMargins(1, 1, 1, 1);
+    slots_layout->setSpacing(0);
+    scroll->setWidget(slots_card);
+    root->addWidget(scroll);
+
+    auto* footer = new QHBoxLayout;
+    footer->addStretch();
+    auto* close_button = new PillButton(tr("Close"), {}, PillButton::Kind::Control, 40);
+    connect(close_button, &QAbstractButton::clicked, this, &QDialog::reject);
+    footer->addWidget(close_button);
+    root->addLayout(footer);
 
     VideoCore::ReloadFxCatalog();
     VideoCore::ReloadFxPresetCatalog();
@@ -193,6 +231,43 @@ ConfigurePostProcessing::~ConfigurePostProcessing() = default;
 void ConfigurePostProcessing::ApplyStructuralChange() {
     VideoCore::FxChain::Instance().StoreToSettings();
     RebuildRows();
+    RefreshPresetStatus();
+}
+
+void ConfigurePostProcessing::SavePreset() {
+    Spotlight::Dialog ask(this);
+    ask.setWindowTitle(tr("Save Preset"));
+    ask.setFixedWidth(400);
+    auto* layout = new QVBoxLayout(&ask);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    layout->addWidget(SettingsPage::Text(tr("Preset name"), 13, 600, true));
+    auto* name = new QLineEdit;
+    name->setPlaceholderText(tr("Enter a name"));
+    name->setAccessibleName(tr("Preset name"));
+    name->setMinimumHeight(40);
+    layout->addWidget(name);
+    layout->addSpacing(10);
+    auto* buttons = new QHBoxLayout;
+    buttons->setSpacing(8);
+    buttons->addStretch();
+    auto* cancel = new PillButton(tr("Cancel"), {}, PillButton::Kind::Control, 40);
+    auto* ok = new PillButton(tr("OK"), {}, PillButton::Kind::Accent, 40);
+    ok->setEnabled(false);
+    buttons->addWidget(cancel);
+    buttons->addWidget(ok);
+    layout->addLayout(buttons);
+    connect(name, &QLineEdit::textChanged, ok,
+            [ok](const QString& text) { ok->setEnabled(!text.trimmed().isEmpty()); });
+    connect(name, &QLineEdit::returnPressed, ok, &QAbstractButton::click);
+    connect(cancel, &QAbstractButton::clicked, &ask, &QDialog::reject);
+    connect(ok, &QAbstractButton::clicked, &ask, &QDialog::accept);
+    name->setFocus();
+    if (ask.exec() != QDialog::Accepted || name->text().trimmed().isEmpty()) {
+        return;
+    }
+    VideoCore::SaveFxPreset(name->text().trimmed().toStdString(), std::string());
+    PopulatePresetCombo();
     RefreshPresetStatus();
 }
 
@@ -225,25 +300,19 @@ void ConfigurePostProcessing::PopulatePresetCombo() {
 
 void ConfigurePostProcessing::RefreshPresetStatus() {
     const std::string active = VideoCore::GetActiveFxPreset();
+    QString text;
     if (active.empty()) {
-        if (VideoCore::FxChain::Instance().Size() == 0) {
-            preset_status->setText(
-                tr("No effects in use. Pick a preset and press Apply, or add effects one "
-                   "by one."));
-            return;
-        }
-        preset_status->setText(tr("Custom chain. Pick a preset above and press Apply to replace it."));
-        return;
+        text = VideoCore::FxChain::Instance().Size() == 0
+                   ? tr("No effects in use. Pick a preset and press Apply, or add effects one "
+                        "by one.")
+                   : tr("Custom chain. Pick a preset above and press Apply to replace it.");
+    } else if (VideoCore::IsActiveFxPresetModified()) {
+        text = tr("Active preset: %1 (modified). Press Reset Values to go back to how it ships.")
+                   .arg(QString::fromStdString(active));
+    } else {
+        text = tr("Active preset: %1").arg(QString::fromStdString(active));
     }
-
-    if (VideoCore::IsActiveFxPresetModified()) {
-        preset_status->setText(
-            tr("Active preset: %1 (modified). Press Reset Values to go back to how it ships.")
-                .arg(QString::fromStdString(active)));
-        return;
-    }
-
-    preset_status->setText(tr("Active preset: %1").arg(QString::fromStdString(active)));
+    preset_status->Set(text, StatusBanner::Tone::Info);
 }
 
 void ConfigurePostProcessing::PopulateEffectCombo(QComboBox* combo,
@@ -271,19 +340,24 @@ void ConfigurePostProcessing::PopulateEffectCombo(QComboBox* combo,
     }
 }
 
-void ConfigurePostProcessing::BuildUniformWidget(QWidget* parent, QVBoxLayout* layout, int index,
-                                                 const VideoCore::FxUniformDesc& uniform) {
+void ConfigurePostProcessing::BuildUniformRow(int index, const VideoCore::FxUniformDesc& uniform,
+                                              const QString& category, QList<QWidget*>& body) {
     const auto value = CurrentValue(index, uniform);
     const QString label = QString::fromStdString(uniform.label);
+    const QString tooltip = QString::fromStdString(uniform.tooltip);
+    const std::string name = uniform.name;
+    const auto add = [&](const QString& title, QWidget* control) {
+        auto* detail =
+            SettingsPage::AddRow(slots_layout, title, category, {}, {}, control, tooltip);
+        SettingsPage::NestRow(detail);
+        body.append(detail->parentWidget());
+    };
 
     if (uniform.ui_type == VideoCore::FxUiType::CheckBox) {
-        auto* box = new QCheckBox(label, parent);
-        box->setChecked(value[0] != 0.0f);
-        if (!uniform.tooltip.empty()) {
-            box->setToolTip(QString::fromStdString(uniform.tooltip));
-        }
-        const std::string name = uniform.name;
-        connect(box, &QCheckBox::toggled, this, [index, name](bool checked) {
+        auto* toggle = new Spotlight::ToggleSwitch;
+        toggle->setAccessibleName(label);
+        toggle->setChecked(value[0] != 0.0f);
+        connect(toggle, &QAbstractButton::toggled, this, [index, name](bool checked) {
             std::array<float, 4> next{};
             if (checked) {
                 next[0] = 1.0f;
@@ -291,15 +365,13 @@ void ConfigurePostProcessing::BuildUniformWidget(QWidget* parent, QVBoxLayout* l
             VideoCore::FxChain::Instance().SetValue(static_cast<size_t>(index), name, next);
             VideoCore::FxChain::Instance().StoreToSettings();
         });
-        layout->addWidget(box);
+        add(label, toggle);
         return;
     }
 
     if (uniform.ui_type == VideoCore::FxUiType::Combo ||
         uniform.ui_type == VideoCore::FxUiType::Radio) {
-        auto* row = new QHBoxLayout();
-        row->addWidget(new QLabel(label, parent));
-        auto* combo = new QComboBox(parent);
+        auto* combo = new QComboBox(sources);
         for (size_t i = 0; i < uniform.items.size(); ++i) {
             combo->addItem(QString::fromStdString(uniform.items[i]), static_cast<int>(i));
         }
@@ -311,44 +383,39 @@ void ConfigurePostProcessing::BuildUniformWidget(QWidget* parent, QVBoxLayout* l
         if (current >= 0 && current < combo->count()) {
             combo->setCurrentIndex(current);
         }
-        if (!uniform.tooltip.empty()) {
-            combo->setToolTip(QString::fromStdString(uniform.tooltip));
-        }
-        const std::string name = uniform.name;
         connect(combo, &QComboBox::currentIndexChanged, this, [index, name](int selected) {
             std::array<float, 4> next{};
             next[0] = static_cast<float>(selected);
             VideoCore::FxChain::Instance().SetValue(static_cast<size_t>(index), name, next);
             VideoCore::FxChain::Instance().StoreToSettings();
         });
-        row->addWidget(combo, 1);
-        layout->addLayout(row);
+        auto* pill = SettingsPage::BindCombo(combo);
+        pill->setAccessibleName(label);
+        add(label, pill);
         return;
     }
 
-    auto* grid = new QGridLayout();
     for (unsigned component = 0; component < uniform.components; ++component) {
         QString component_label = label;
         if (uniform.components > 1) {
             component_label = label + QStringLiteral(" [%1]").arg(component);
         }
 
-        auto* name_label = new QLabel(component_label, parent);
-        auto* value_label = new QLabel(parent);
+        auto* value_label = SettingsPage::Text(FormatValue(uniform, value[component]), 12, 600);
+        value_label->setAlignment(Qt::AlignCenter);
         value_label->setMinimumWidth(64);
-        value_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        value_label->setText(FormatValue(uniform, value[component]));
+        value_label->setStyleSheet(
+            QStringLiteral("QLabel { background: %1; border: 1px solid %2; border-radius: 10px; "
+                           "padding: 5px 10px; }")
+                .arg(Color::FillFaint().name(QColor::HexArgb),
+                     Color::StrokeSubtle().name(QColor::HexArgb)));
 
-        auto* slider = new QSlider(Qt::Horizontal, parent);
+        auto* slider = new QSlider(Qt::Horizontal, sources);
         slider->setMinimum(0);
         slider->setMaximum(SliderSteps(uniform));
         slider->setValue(
             static_cast<int>(std::lround((value[component] - uniform.ui_min) / uniform.ui_step)));
-        if (!uniform.tooltip.empty()) {
-            slider->setToolTip(QString::fromStdString(uniform.tooltip));
-        }
 
-        const std::string name = uniform.name;
         const auto desc = uniform;
         connect(slider, &QSlider::valueChanged, this,
                 [index, name, desc, component, value_label](int steps) {
@@ -358,31 +425,84 @@ void ConfigurePostProcessing::BuildUniformWidget(QWidget* parent, QVBoxLayout* l
                     VideoCore::FxChain::Instance().StoreToSettings();
                     value_label->setText(FormatValue(desc, next[component]));
                 });
-
-        grid->addWidget(name_label, static_cast<int>(component), 0);
-        grid->addWidget(slider, static_cast<int>(component), 1);
-        grid->addWidget(value_label, static_cast<int>(component), 2);
+        auto* bound = SettingsPage::BindSlider(slider);
+        bound->setMinimumWidth(240);
+        bound->setAccessibleName(component_label);
+        add(component_label, Line(value_label, bound));
     }
-    layout->addLayout(grid);
 }
 
-QWidget* ConfigurePostProcessing::BuildSlot(int index, const VideoCore::FxChainEntry& entry) {
-    auto* group = new QFrame(slots_container);
-    group->setObjectName(QStringLiteral("fxSlot"));
-    group->setStyleSheet(QStringLiteral(
-        "QFrame#fxSlot { background-color: palette(alternate-base);"
-        " border: 1px solid palette(mid); border-radius: 6px; }"));
-    auto* layout = new QVBoxLayout(group);
+void ConfigurePostProcessing::BuildSlot(int index, const VideoCore::FxChainEntry& entry) {
+    const size_t count = VideoCore::FxChain::Instance().Size();
+    const VideoCore::FxEffectDesc* effect = VideoCore::FindFxEffect(entry.file);
+    const bool open = expanded.contains(index);
 
-    auto* header = new QHBoxLayout();
+    auto* controls = new QWidget;
+    controls->setProperty("spotlightTransparent", true);
+    auto* controls_layout = new QHBoxLayout(controls);
+    controls_layout->setContentsMargins(0, 0, 0, 0);
+    controls_layout->setSpacing(10);
+    auto* toggle = new Spotlight::CircleButton(
+        open ? QStringLiteral("caret-up") : QStringLiteral("caret-down"), 32);
+    toggle->setAccessibleName(open ? tr("Collapse") : tr("Expand"));
+    auto* up_button = new Spotlight::CircleButton(QStringLiteral("arrow-up"), 32);
+    up_button->setAccessibleName(tr("Move up"));
+    up_button->setEnabled(index > 0);
+    auto* down_button = new Spotlight::CircleButton(QStringLiteral("arrow-down"), 32);
+    down_button->setAccessibleName(tr("Move down"));
+    down_button->setEnabled(static_cast<size_t>(index) + 1 < count);
+    auto* remove_button = new Spotlight::CircleButton(QStringLiteral("trash"), 32);
+    remove_button->setAccessibleName(tr("Remove"));
+    for (auto* button : {toggle, up_button, down_button, remove_button}) {
+        controls_layout->addWidget(button);
+    }
 
-    auto* toggle = new QToolButton(group);
-    toggle->setArrowType(Qt::RightArrow);
-    toggle->setAutoRaise(true);
-    toggle->setCheckable(true);
-    header->addWidget(toggle);
+    const QString title =
+        effect != nullptr && effect->Valid()
+            ? SlotLabel(*effect, entry.technique)
+            : QString::fromStdString(effect != nullptr ? effect->label : entry.file);
+    const QString state = effect == nullptr        ? tr("Effect file missing")
+                          : !effect->error.empty() ? tr("Effect failed to compile")
+                                                   : QString{};
+    SettingsPage::AddRow(slots_layout, QStringLiteral("%1. %2").arg(index + 1).arg(title), state,
+                         {}, {}, controls);
 
-    auto* combo = new QComboBox(group);
+    connect(up_button, &QAbstractButton::clicked, this, [this, index]() {
+        VideoCore::FxChain::Instance().Move(static_cast<size_t>(index), -1);
+        const bool moved_open = expanded.remove(index);
+        if (expanded.remove(index - 1)) {
+            expanded.insert(index);
+        }
+        if (moved_open) {
+            expanded.insert(index - 1);
+        }
+        ApplyStructuralChange();
+    });
+    connect(down_button, &QAbstractButton::clicked, this, [this, index]() {
+        VideoCore::FxChain::Instance().Move(static_cast<size_t>(index), 1);
+        const bool moved_open = expanded.remove(index);
+        if (expanded.remove(index + 1)) {
+            expanded.insert(index);
+        }
+        if (moved_open) {
+            expanded.insert(index + 1);
+        }
+        ApplyStructuralChange();
+    });
+    connect(remove_button, &QAbstractButton::clicked, this, [this, index]() {
+        VideoCore::FxChain::Instance().Remove(static_cast<size_t>(index));
+        QSet<int> shifted;
+        for (const int open_index : expanded) {
+            if (open_index != index) {
+                shifted.insert(open_index > index ? open_index - 1 : open_index);
+            }
+        }
+        expanded = shifted;
+        ApplyStructuralChange();
+    });
+
+    QList<QWidget*> body;
+    auto* combo = new QComboBox(sources);
     PopulateEffectCombo(combo, entry);
     connect(combo, &QComboBox::currentIndexChanged, this, [this, index, combo](int) {
         const QString key = combo->currentData().toString();
@@ -395,123 +515,109 @@ QWidget* ConfigurePostProcessing::BuildSlot(int index, const VideoCore::FxChainE
                                                key.mid(separator + 1).toStdString());
         ApplyStructuralChange();
     });
-    header->addWidget(combo, 1);
+    auto* technique = SettingsPage::AddRow(slots_layout, tr("Technique"), {}, {}, {},
+                                           SettingsPage::BindCombo(combo));
+    SettingsPage::NestRow(technique);
+    body.append(technique->parentWidget());
 
-    auto* up_button = new QToolButton(group);
-    up_button->setText(QStringLiteral("▲"));
-    up_button->setEnabled(index > 0);
-    connect(up_button, &QToolButton::clicked, this, [this, index]() {
-        VideoCore::FxChain::Instance().Move(static_cast<size_t>(index), -1);
-        ApplyStructuralChange();
-    });
-    header->addWidget(up_button);
-
-    auto* down_button = new QToolButton(group);
-    down_button->setText(QStringLiteral("▼"));
-    down_button->setEnabled(static_cast<size_t>(index) + 1 < VideoCore::FxChain::Instance().Size());
-    connect(down_button, &QToolButton::clicked, this, [this, index]() {
-        VideoCore::FxChain::Instance().Move(static_cast<size_t>(index), 1);
-        ApplyStructuralChange();
-    });
-    header->addWidget(down_button);
-
-    auto* reset_button = new QToolButton(group);
-    reset_button->setText(QStringLiteral("⟲"));
-    reset_button->setToolTip(tr("Reset to defaults"));
-    connect(reset_button, &QToolButton::clicked, this, [this, index]() {
-        VideoCore::FxChain::Instance().ResetValues(static_cast<size_t>(index));
-        ApplyStructuralChange();
-    });
-    header->addWidget(reset_button);
-
-    auto* remove_button = new QToolButton(group);
-    remove_button->setText(QStringLiteral("✕"));
-    connect(remove_button, &QToolButton::clicked, this, [this, index]() {
-        VideoCore::FxChain::Instance().Remove(static_cast<size_t>(index));
-        ApplyStructuralChange();
-    });
-    header->addWidget(remove_button);
-
-    layout->addLayout(header);
-
-    auto* body = new QWidget(group);
-    auto* body_layout = new QVBoxLayout(body);
-    body_layout->setContentsMargins(0, 0, 0, 0);
-    body->setVisible(false);
-    layout->addWidget(body);
-
-    connect(toggle, &QToolButton::toggled, this, [toggle, body](bool open) {
-        body->setVisible(open);
-        if (open) {
-            toggle->setArrowType(Qt::DownArrow);
-        } else {
-            toggle->setArrowType(Qt::RightArrow);
-        }
-    });
-
-    const VideoCore::FxEffectDesc* effect = VideoCore::FindFxEffect(entry.file);
+    const auto add_banner = [&](const QString& message, StatusBanner::Tone tone) {
+        auto* holder = new QWidget;
+        holder->setProperty("spotlightTransparent", true);
+        auto* holder_layout = new QHBoxLayout(holder);
+        holder_layout->setContentsMargins(46, 6, 16, 12);
+        auto* banner = new StatusBanner;
+        banner->Set(message, tone);
+        holder_layout->addWidget(banner);
+        slots_layout->addWidget(holder);
+        body.append(holder);
+    };
     if (effect == nullptr) {
-        auto* missing =
-            new QLabel(tr("Effect '%1' was not found.").arg(QString::fromStdString(entry.file)),
-                       group);
-        missing->setWordWrap(true);
-        body_layout->addWidget(missing);
-        return group;
-    }
-
-    if (!effect->error.empty()) {
-        auto* failed = new QLabel(
-            tr("Effect failed to compile:\n%1").arg(QString::fromStdString(effect->error)), group);
-        failed->setWordWrap(true);
-        body_layout->addWidget(failed);
-        return group;
-    }
-
-    std::string current_category;
-    for (const auto& uniform : effect->uniforms) {
-        if (uniform.category != current_category) {
-            current_category = uniform.category;
-            if (!current_category.empty()) {
-                auto* category = new QLabel(QString::fromStdString(current_category), group);
-                category->setStyleSheet(QStringLiteral("font-weight: bold;"));
-                body_layout->addWidget(category);
-            }
+        add_banner(tr("The file for this effect, %1, is no longer in the post_shaders folder.")
+                       .arg(QString::fromStdString(entry.file)),
+                   StatusBanner::Tone::Warning);
+    } else if (!effect->error.empty()) {
+        add_banner(tr("Effect failed to compile:\n%1").arg(QString::fromStdString(effect->error)),
+                   StatusBanner::Tone::Error);
+    } else {
+        for (const auto& uniform : effect->uniforms) {
+            BuildUniformRow(index, uniform, QString::fromStdString(uniform.category), body);
         }
-        BuildUniformWidget(body, body_layout, index, uniform);
+        auto* reset = new PillButton(tr("Reset to defaults"), {}, PillButton::Kind::Control, 32);
+        connect(reset, &QAbstractButton::clicked, this, [this, index]() {
+            VideoCore::FxChain::Instance().ResetValues(static_cast<size_t>(index));
+            ApplyStructuralChange();
+        });
+        auto* values = SettingsPage::AddRow(slots_layout, tr("Effect values"), {}, {}, {}, reset);
+        SettingsPage::NestRow(values);
+        body.append(values->parentWidget());
     }
 
-    return group;
+    for (auto* widget : body) {
+        widget->setVisible(open);
+    }
+    connect(toggle, &QAbstractButton::clicked, this, [this, index, toggle, body]() {
+        const bool now_open = !expanded.contains(index);
+        if (now_open) {
+            expanded.insert(index);
+        } else {
+            expanded.remove(index);
+        }
+        toggle->SetIcon(now_open ? QStringLiteral("caret-up") : QStringLiteral("caret-down"));
+        toggle->setAccessibleName(now_open ? tr("Collapse") : tr("Expand"));
+        for (auto* widget : body) {
+            widget->setVisible(now_open);
+        }
+        FitChain();
+    });
+}
+
+void ConfigurePostProcessing::FitChain() {
+    slots_layout->activate();
+    const int wanted = slots_card->sizeHint().height();
+    scroll->setFixedHeight(std::min(460, wanted));
+    const QPoint center = geometry().center();
+    adjustSize();
+    if (isVisible()) {
+        move(center - rect().center());
+    }
 }
 
 void ConfigurePostProcessing::RebuildRows() {
     QLayoutItem* item = nullptr;
     while ((item = slots_layout->takeAt(0)) != nullptr) {
         if (item->widget() != nullptr) {
+            item->widget()->hide();
             item->widget()->deleteLater();
         }
         delete item;
     }
-
-    bool has_usable = false;
-    for (const auto& effect : VideoCore::GetFxCatalog()) {
-        if (effect.Valid()) {
-            has_usable = true;
-            break;
+    for (auto* source : sources->findChildren<QWidget*>(Qt::FindDirectChildrenOnly)) {
+        if (source != preset_combo && source != add_combo) {
+            source->deleteLater();
         }
     }
 
-    if (!has_usable) {
-        auto* empty = new QLabel(
-            tr("No usable ReShade FX effects were found. Place .fx files in the post_shaders "
-               "folder."),
-            slots_container);
-        empty->setWordWrap(true);
-        slots_layout->addWidget(empty);
-        return;
-    }
-
+    const bool has_usable =
+        std::any_of(VideoCore::GetFxCatalog().begin(), VideoCore::GetFxCatalog().end(),
+                    [](const auto& effect) { return effect.Valid(); });
     const auto entries = VideoCore::FxChain::Instance().Entries();
-    for (size_t i = 0; i < entries.size(); ++i) {
-        slots_layout->addWidget(BuildSlot(static_cast<int>(i), entries[i]));
+    if (!has_usable) {
+        auto* holder = new QWidget;
+        holder->setProperty("spotlightTransparent", true);
+        auto* holder_layout = new QHBoxLayout(holder);
+        holder_layout->setContentsMargins(14, 14, 14, 14);
+        auto* banner = new StatusBanner;
+        banner->Set(tr("No usable ReShade FX effects were found. Place .fx files in the "
+                       "post_shaders folder."),
+                    StatusBanner::Tone::Warning);
+        holder_layout->addWidget(banner);
+        slots_layout->addWidget(holder);
     }
+    for (size_t i = 0; i < entries.size(); ++i) {
+        BuildSlot(static_cast<int>(i), entries[i]);
+    }
+    const bool shown = !has_usable || !entries.empty();
+    chain_heading->setVisible(has_usable && !entries.empty());
+    scroll->setVisible(shown);
+    FitChain();
 }

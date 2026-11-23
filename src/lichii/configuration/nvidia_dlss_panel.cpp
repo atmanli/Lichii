@@ -18,25 +18,17 @@
 
 #include <QApplication>
 #include <QDesktopServices>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QMessageBox>
-#include <QPlainTextEdit>
-#include <QProgressDialog>
-#include <QPushButton>
 #include <QStringList>
 #include <QUrl>
-#include <QVBoxLayout>
 #include <fmt/format.h>
 #include <zlib.h>
 
 #include "common/common_types.h"
 #include "common/fs/fs_util.h"
 #include "common/logging.h"
-#include "video_core/vulkan_common/streamline.h"
+#include "lichii/configuration/graphics_panel_widgets.h"
 #include "lichii/configuration/nvidia_dlss_panel.h"
+#include "video_core/vulkan_common/streamline.h"
 
 #include "common/net/ca_store.h"
 
@@ -312,43 +304,27 @@ QString PathText(const std::filesystem::path& path) {
 } // Anonymous namespace
 
 NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
-    QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(24, 0, 0, 8);
-    layout->setSpacing(6);
-
-    QHBoxLayout* status_row = new QHBoxLayout;
-    status_row->setSpacing(8);
-    icon_label = new QLabel(this);
-    icon_label->setTextFormat(Qt::RichText);
-    icon_label->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
-    icon_label->setFixedWidth(16);
-    status_label = new QLabel(this);
-    status_label->setTextFormat(Qt::RichText);
-    status_label->setWordWrap(true);
-    status_row->addWidget(icon_label);
-    status_row->addWidget(status_label, 1);
-
-    QHBoxLayout* button_row = new QHBoxLayout;
-    button_row->setContentsMargins(24, 0, 0, 0);
-    download_button = new QPushButton(this);
-    folder_button = new QPushButton(Tr("Open Folder"), this);
-    QLabel* about = new QLabel(
-        QStringLiteral("<a href=\"%1\">%2</a>").arg(QString::fromLatin1(RELEASE_PAGE),
-                                                   Tr("Where do these files come from?")),
-        this);
-    about->setOpenExternalLinks(true);
-    about->setToolTip(Tr("NVIDIA's Streamline releases on GitHub. The files are in bin\\x64 of "
-                         "the release zip."));
-    button_row->addWidget(download_button);
-    button_row->addWidget(folder_button);
-    button_row->addStretch(1);
-    button_row->addWidget(about);
-
-    layout->addLayout(status_row);
-    layout->addLayout(button_row);
-
-    connect(download_button, &QPushButton::clicked, this, [this] { Download(); });
-    connect(folder_button, &QPushButton::clicked, this, [] {
+    using namespace GraphicsPanel;
+    RuntimeCard card(this, Tr("NVIDIA DLSS"), Tr("Windows · NVIDIA Streamline"),
+                     QStringLiteral("graphics-card"));
+    status = card.status;
+    auto* options = new QVBoxLayout;
+    options->setObjectName(QStringLiteral("dlssRuntimeOptions"));
+    options->setSpacing(8);
+    card.body->addLayout(options);
+    auto* release =
+        card.ProjectLink(Tr("Streamline project"), QUrl(QString::fromLatin1(RELEASE_PAGE)));
+    release->setToolTip(Tr("NVIDIA's Streamline releases on GitHub. The files are in bin\\x64 "
+                           "of the release zip."));
+    auto* folder_button = new PillButton(Tr("Open Folder"), QStringLiteral("folder-open"),
+                                         PillButton::Kind::Control, 34);
+    card.actions->addWidget(folder_button);
+    card.actions->addStretch();
+    download_button = new PillButton(Tr("Download components"), QStringLiteral("download-simple"),
+                                     PillButton::Kind::Accent, 34);
+    card.actions->addWidget(download_button);
+    connect(download_button, &QAbstractButton::clicked, this, [this] { Download(); });
+    connect(folder_button, &QAbstractButton::clicked, this, [] {
         const std::filesystem::path folder = Streamline::FindDlssFiles().folder;
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
@@ -404,22 +380,22 @@ void NvidiaDlssPanel::Refresh() {
     QString button;
     if (has_streamline && has_model) {
         status =
-            Tr("<b>Ready.</b> Found %1 and %2.<br>DLSS and the settings below apply only "
+            Tr("Ready. Found %1 and %2. DLSS and the settings below apply only "
                "when a game uses its own DLSS. While DLSS runs, the status bar shows DLSS, "
                "its mode and its preset.")
                 .arg(Named(QStringLiteral("NVIDIA Streamline"), files.interposer_version), dlss);
         button = Tr("Download Frame Generation files from NVIDIA");
     } else if (has_model) {
-        status = Tr("<b>Files needed:</b> %1. %2 will be used. Until then, games use AMD FSR "
+        status = Tr("Files needed: %1. %2 will be used. Until then, games use AMD FSR "
                     "3.1.")
                      .arg(streamline, dlss);
         button = has_frame_gen ? Tr("Download from NVIDIA (1 MB)") : Tr("Download from NVIDIA");
     } else if (has_streamline) {
-        status = Tr("<b>One file needed:</b> NVIDIA DLSS (nvngx_dlss.dll). Until then, games use "
+        status = Tr("One file needed: NVIDIA DLSS (nvngx_dlss.dll). Until then, games use "
                     "AMD FSR 3.1.");
         button = has_frame_gen ? Tr("Download from NVIDIA (31 MB)") : Tr("Download from NVIDIA");
     } else {
-        status = Tr("<b>NVIDIA's files needed:</b> %1 and DLSS (nvngx_dlss.dll). Until then, "
+        status = Tr("NVIDIA's files needed: %1 and DLSS (nvngx_dlss.dll). Until then, "
                     "games use AMD FSR 3.1.")
                      .arg(streamline);
         button = has_frame_gen ? Tr("Download from NVIDIA (32 MB)") : Tr("Download from NVIDIA");
@@ -428,12 +404,16 @@ void NvidiaDlssPanel::Refresh() {
         status += QStringLiteral(" ") + frame_gen;
     }
     const bool ready = has_streamline && has_model;
-    icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
-                              : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
-    status_label->setText(status);
-    status_label->setToolTip(Tr("Folder: %1").arg(PathText(files.folder)));
-    download_button->setText(button);
-    download_button->setVisible(!ready || !has_frame_gen);
+    const auto tone =
+        ready && has_frame_gen ? GraphicsPanel::Tone::Ready : GraphicsPanel::Tone::Warning;
+    const QString summary =
+        !has_frame_gen ? Tr("NVIDIA DLSS Frame Generation needs missing runtime components.")
+        : ready        ? Tr("Installed · DLSS runtime available")
+                       : Tr("NVIDIA DLSS runtime missing.");
+    this->status->SetMessage(
+        summary, tone, status + QLatin1Char('\n') + Tr("Folder: %1").arg(PathText(files.folder)));
+    download_button->setToolTip(button);
+    download_button->setEnabled(!ready || !has_frame_gen);
 }
 
 void NvidiaDlssPanel::SetFrameGenWanted(bool wanted) {
@@ -482,19 +462,18 @@ void NvidiaDlssPanel::Download() {
     const std::filesystem::path folder = files.folder;
     const auto fail = [this](const std::string& error) {
         LOG_ERROR(Frontend, "NVIDIA DLSS download failed: {}", error);
-        QMessageBox::warning(this, Tr("NVIDIA DLSS"),
-                             Tr("Could not download NVIDIA's files: %1")
-                                 .arg(QString::fromStdString(error)));
+        GraphicsPanel::ShowResult(
+            this, Tr("NVIDIA DLSS"),
+            Tr("Could not download NVIDIA's files: %1").arg(QString::fromStdString(error)),
+            GraphicsPanel::Tone::Error);
         Refresh();
     };
 
     RemoteZip zip;
     std::string licences;
     {
-        QProgressDialog busy(Tr("Contacting NVIDIA's download..."), QString{}, 0, 0, this);
-        busy.setWindowTitle(Tr("NVIDIA DLSS"));
-        busy.setWindowModality(Qt::WindowModal);
-        busy.setMinimumDuration(0);
+        GraphicsPanel::RuntimeProgress busy(this, Tr("NVIDIA DLSS"),
+                                            Tr("Contacting NVIDIA's download..."));
         busy.show();
         QApplication::processEvents();
         if (!zip.Open()) {
@@ -549,28 +528,13 @@ void NvidiaDlssPanel::Download() {
     for (const std::string& entry : wanted) {
         names << QString::fromStdString(FileName(entry));
     }
-    QDialog dialog(this);
-    dialog.setWindowTitle(Tr("Download NVIDIA DLSS"));
-    QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    QLabel* intro = new QLabel(
-        Tr("Lichii will download %1 from NVIDIA's Streamline %2 release on GitHub into %3.<br>"
-           "These files are NVIDIA's, under NVIDIA's licence terms below.")
-            .arg(names.join(QStringLiteral(", ")), QString::fromLatin1(RELEASE_VERSION),
-                 PathText(folder)),
-        &dialog);
-    intro->setWordWrap(true);
-    QPlainTextEdit* licence_text = new QPlainTextEdit(QString::fromStdString(licences), &dialog);
-    licence_text->setReadOnly(true);
-    licence_text->setMinimumSize(640, 380);
-    QDialogButtonBox* buttons = new QDialogButtonBox(&dialog);
-    buttons->addButton(Tr("Accept and Download"), QDialogButtonBox::AcceptRole);
-    buttons->addButton(QDialogButtonBox::Cancel);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(intro);
-    layout->addWidget(licence_text, 1);
-    layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (!GraphicsPanel::ConfirmDownload(
+            this, Tr("Download NVIDIA DLSS"),
+            Tr("Lichii will download %1 from NVIDIA's Streamline %2 release on GitHub into %3.\n\n"
+               "These files are NVIDIA's, under NVIDIA's licence terms below.")
+                .arg(names.join(QStringLiteral(", ")), QString::fromLatin1(RELEASE_VERSION),
+                     PathText(folder)),
+            QString::fromStdString(licences), Tr("Cancel"), Tr("Accept and Download"))) {
         return;
     }
 
@@ -585,12 +549,9 @@ void NvidiaDlssPanel::Download() {
         entries.push_back(entry);
         total += entry->compressed;
     }
-    QProgressDialog progress(Tr("Downloading NVIDIA's DLSS files..."), Tr("Cancel"), 0, 1000,
-                             this);
-    progress.setWindowTitle(Tr("NVIDIA DLSS"));
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setValue(0);
+    GraphicsPanel::RuntimeProgress progress(this, Tr("NVIDIA DLSS"),
+                                            Tr("Downloading NVIDIA's DLSS files..."), Tr("Cancel"));
+    progress.show();
     QApplication::processEvents();
     // The download address from the first step only lasts a few minutes.
     if (!zip.Resolve()) {
@@ -612,9 +573,9 @@ void NvidiaDlssPanel::Download() {
     QStringList skipped;
     for (size_t i = 0; i < wanted.size(); ++i) {
         const std::optional<std::string> contents = zip.Read(*entries[i], [&](u64 received) {
-            progress.setValue(static_cast<int>((done + received) * 1000 / std::max<u64>(total, 1)));
+            progress.SetValue(static_cast<int>((done + received) * 1000 / std::max<u64>(total, 1)));
             QApplication::processEvents();
-            return !progress.wasCanceled();
+            return !progress.WasCanceled();
         });
         if (!contents) {
             discard();
@@ -710,18 +671,20 @@ void NvidiaDlssPanel::Download() {
         LOG_INFO(Frontend, "Downloaded {} from NVIDIA's Streamline {} release",
                  Common::FS::PathToUTF8String(target), RELEASE_VERSION);
     }
-    progress.setValue(1000);
+    progress.SetValue(1000);
     progress.close();
     Refresh();
     if (!skipped.isEmpty()) {
-        QMessageBox::warning(this, Tr("NVIDIA DLSS"),
-                             Tr("These files failed NVIDIA's signature check, so none of DLSS "
-                                "Frame Generation's files were saved and it stays off: %1")
-                                 .arg(skipped.join(QStringLiteral(", "))));
+        GraphicsPanel::ShowResult(this, Tr("NVIDIA DLSS"),
+                                  Tr("These files failed NVIDIA's signature check, so none of DLSS "
+                                     "Frame Generation's files were saved and it stays off: %1")
+                                      .arg(skipped.join(QStringLiteral(", "))),
+                                  GraphicsPanel::Tone::Error);
         return;
     }
-    QMessageBox::information(this, Tr("NVIDIA DLSS"),
-                             Tr("NVIDIA DLSS is ready. It is used the next time a game starts."));
+    GraphicsPanel::ShowResult(this, Tr("NVIDIA DLSS"),
+                              Tr("NVIDIA DLSS is ready. It is used the next time a game starts."),
+                              GraphicsPanel::Tone::Ready);
 }
 
 #endif

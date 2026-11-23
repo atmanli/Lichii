@@ -33,7 +33,11 @@ class ConfigurePerGameAddons : public QWidget {
     Q_OBJECT
 
 public:
-    enum PatchData { NUMERIC_VERSION = Qt::UserRole, PATCH_LOCATION };
+    enum PatchData {
+        NUMERIC_VERSION = Qt::UserRole,
+        PATCH_LOCATION,
+        PATCH_TYPE = PATCH_LOCATION + 2
+    };
 
     explicit ConfigurePerGameAddons(Core::System& system_, QWidget* parent = nullptr);
     ~ConfigurePerGameAddons() override;
@@ -45,6 +49,9 @@ public:
     void SetFile(FileSys::VirtualFile file_);
 
     void SetTitleId(u64 id);
+    QStandardItemModel* Model() const {
+        return item_model;
+    }
     void ReloadAfterModStore(const QSet<QString>& store_toggled);
 
 signals:

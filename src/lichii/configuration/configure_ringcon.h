@@ -4,7 +4,7 @@
 
 #include <functional>
 #include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 namespace InputCommon {
 class InputSubsystem;
@@ -19,7 +19,7 @@ namespace Ui {
 class ConfigureRingController;
 } // namespace Ui
 
-class ConfigureRingController : public QDialog {
+class ConfigureRingController : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

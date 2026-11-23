@@ -4,6 +4,8 @@
 #pragma once
 
 #include <functional>
+#include <QIcon>
+#include <QList>
 #include <QString>
 
 class QWidget;
@@ -16,6 +18,12 @@ struct GameIdentity {
     QString build_id;
 };
 
+struct LibraryGame {
+    QString title_id;
+    QString name;
+    QIcon icon;
+};
+
 struct DialogContext {
     QString base_url;
     QString initial_title_id;
@@ -23,6 +31,7 @@ struct DialogContext {
     std::function<GameIdentity(const QString&)> game_identity;
     std::function<bool(const QString&, const QString&)> is_enabled;
     std::function<bool(const QString&, const QString&, bool)> set_enabled;
+    QList<LibraryGame> library_games{};
 };
 
 bool ShowDialog(QWidget* parent, DialogContext context);

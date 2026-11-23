@@ -26,7 +26,6 @@ add_executable(lichii
     Info.plist
     about_dialog.cpp
     about_dialog.h
-    aboutdialog.ui
     compatibility_report.cpp
     compatibility_report.h
     applets/qt_amiibo_settings.cpp
@@ -192,7 +191,6 @@ add_executable(lichii
     install_dialog.h
     loading_screen.cpp
     loading_screen.h
-    loading_screen.ui
 
     main.cpp
     nx2_switches.h
@@ -256,16 +254,37 @@ add_executable(lichii
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
-    deps_dialog.cpp deps_dialog.h deps_dialog.ui
+    deps_dialog.cpp deps_dialog.h
 
-    data_dialog.h data_dialog.cpp data_dialog.ui
-    data_widget.ui
-    ryujinx_dialog.h ryujinx_dialog.cpp ryujinx_dialog.ui
+    spotlight/theme.cpp spotlight/theme.h
+    spotlight/hero.cpp spotlight/hero.h
+    spotlight/hero_art.cpp spotlight/hero_art.h
+    spotlight/launcher.cpp spotlight/launcher.h
+    spotlight/library_header.cpp spotlight/library_header.h
+    spotlight/menu.cpp spotlight/menu.h
+    spotlight/notice.cpp spotlight/notice.h
+    spotlight/nextendo_live.cpp spotlight/nextendo_live.h
+    spotlight/settings_page.cpp spotlight/settings_page.h
+    spotlight/settings_get_started.cpp spotlight/settings_get_started.h
+    spotlight/top_bar.cpp spotlight/top_bar.h
+    spotlight/widgets.cpp spotlight/widgets.h
+    spotlight/confirm.cpp spotlight/confirm.h
+    spotlight/dialog.cpp spotlight/dialog.h
+    spotlight/fullscreen_hint.cpp spotlight/fullscreen_hint.h
+    spotlight/ingame_bar.cpp spotlight/ingame_bar.h
+    spotlight/ingame_menu.cpp spotlight/ingame_menu.h
+    spotlight/shader_chip.cpp spotlight/shader_chip.h
+    spotlight/startup_prompt.cpp spotlight/startup_prompt.h
+    spotlight/stopping_overlay.cpp spotlight/stopping_overlay.h
+    spotlight/style.cpp spotlight/style.h
+
+    data_dialog.h data_dialog.cpp
+    ryujinx_dialog.h ryujinx_dialog.cpp
     main_window.h main_window.cpp main.ui
 
     configuration/system/new_user_dialog.h configuration/system/new_user_dialog.cpp configuration/system/new_user_dialog.ui
     configuration/system/profile_avatar_dialog.h configuration/system/profile_avatar_dialog.cpp
-    configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
+    configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp
 
     render/performance_overlay.h render/performance_overlay.cpp
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
@@ -555,10 +574,16 @@ endif()
 # Remember that the linker is incredibly stupid.
 target_link_libraries(lichii PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
-# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically.
-if (TARGET nxformat::static_nozstd)
+# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically,
+# or in MinGW builds loaded from nxformat.dll next to the executable.
+if (TARGET lichii_nxformat)
     target_sources(lichii PRIVATE nx_tools.h nx_tools.cpp)
-    target_link_libraries(lichii PRIVATE nxformat::static_nozstd)
+    target_link_libraries(lichii PRIVATE lichii_nxformat)
     target_compile_definitions(lichii PRIVATE LICHII_NX_TOOLS)
+    if (MINGW)
+        target_sources(lichii PRIVATE nx_tools_loader.cpp)
+        add_custom_command(TARGET lichii POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LICHII_NXFORMAT_DLL}" "$<TARGET_FILE_DIR:lichii>")
+    endif()
 endif()
 create_target_directory_groups(lichii)

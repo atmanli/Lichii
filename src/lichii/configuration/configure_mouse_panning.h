@@ -3,7 +3,7 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 namespace InputCommon {
 class InputSubsystem;
@@ -13,7 +13,7 @@ namespace Ui {
 class ConfigureMousePanning;
 }
 
-class ConfigureMousePanning : public QDialog {
+class ConfigureMousePanning : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

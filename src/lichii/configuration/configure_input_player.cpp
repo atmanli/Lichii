@@ -7,11 +7,16 @@
 #include <algorithm>
 #include <memory>
 #include <utility>
-#include <QInputDialog>
-#include <QMenu>
+#include <QDialogButtonBox>
+#include <QFontDatabase>
+#include <QLabel>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QSpinBox>
+#include <QStandardItemModel>
 #include <QTimer>
+#include <QVBoxLayout>
 #include "common/assert.h"
 #include "common/param_package.h"
 #include "hid_core/frontend/emulated_controller.h"
@@ -27,6 +32,10 @@
 #include "lichii/configuration/configure_input_player_widget.h"
 #include "lichii/configuration/configure_mouse_panning.h"
 #include "lichii/configuration/input_profiles.h"
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/menu.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "lichii/util/limitable_input_dialog.h"
 
 const std::array<std::string, ConfigureInputPlayer::ANALOG_SUB_BUTTONS_NUM>
@@ -160,6 +169,208 @@ QString GetDirectionName(const std::string& direction) {
     return QString::fromStdString(direction);
 }
 
+// Paper: controls-map-buttons. Cards, binding labels, combo boxes and pills of the Map buttons page.
+QString PlayerStyle() {
+    return QStringLiteral(R"(
+QWidget[spotlightTransparent="true"],
+PlayerControlPreview {
+    background: transparent;
+}
+QGroupBox[card="true"] {
+    background-color: rgba(255, 255, 255, 13);
+    border: 1px solid rgba(255, 255, 255, 20);
+    border-radius: 18px;
+    margin: 0;
+    padding: 41px 14px 14px 14px;
+    font: 600 13px "Lexend";
+}
+QGroupBox[card="true"]::title {
+    subcontrol-origin: border;
+    subcontrol-position: top left;
+    left: 14px;
+    top: 14px;
+    padding: 0;
+    color: #ffffff;
+}
+QGroupBox[binding="true"],
+QGroupBox[bare="true"] {
+    background-color: transparent;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+    padding: 20px 0 0 0;
+    font: 600 11px "Lexend";
+}
+QGroupBox[bare="true"] {
+    padding: 0;
+}
+QGroupBox[binding="true"]::title {
+    subcontrol-origin: border;
+    subcontrol-position: top left;
+    left: 0;
+    top: 0;
+    padding: 0;
+    color: rgba(255, 255, 255, 158);
+}
+QGroupBox[binding="true"]::title:disabled {
+    color: rgba(255, 255, 255, 92);
+}
+QGroupBox[bare="true"]::indicator {
+    width: 0;
+    height: 0;
+    margin: 0;
+}
+QLabel[heading="true"] {
+    font: 600 13px "Lexend";
+    color: rgba(255, 255, 255, 158);
+}
+QLabel[caption="true"] {
+    font: 500 12px "Lexend";
+    color: rgba(255, 255, 255, 158);
+}
+QLabel[small="true"] {
+    font: 600 12px "Lexend";
+    color: rgba(255, 255, 255, 158);
+}
+QLabel#labelZLThreshold,
+QLabel#labelZRThreshold {
+    font: 600 11px "Lexend";
+}
+QComboBox {
+    background-color: rgba(255, 255, 255, 20);
+    border: 1px solid transparent;
+    border-radius: 12px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0 30px 0 13px;
+    font: 600 13px "Lexend";
+}
+QComboBox:hover,
+QComboBox:on {
+    background-color: rgba(255, 255, 255, 31);
+}
+QComboBox:focus {
+    border-color: transparent;
+}
+QComboBox[keyboardFocus="true"] {
+    border-color: #ffffff;
+}
+QPushButton[pill="fill"],
+QPushButton[pill="ghost"] {
+    background-color: rgba(255, 255, 255, 20);
+    color: #ffffff;
+    border: 1px solid transparent;
+    border-radius: 17px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0 17px;
+    font: 600 13px "Lexend";
+}
+QPushButton[pill="ghost"] {
+    background-color: transparent;
+}
+QPushButton[pill="fill"]:hover,
+QPushButton[pill="ghost"]:hover {
+    background-color: rgba(255, 255, 255, 36);
+}
+QPushButton[pill="fill"]:disabled,
+QPushButton[pill="ghost"]:disabled {
+    color: rgba(255, 255, 255, 92);
+}
+QPushButton#mousePanningButton,
+QPushButton#vibrationButton,
+QPushButton#motionButton {
+    min-height: 30px;
+    max-height: 30px;
+    border-radius: 16px;
+}
+QPushButton#vibrationButton,
+QPushButton#motionButton {
+    font: 600 12px "Lexend";
+}
+QPushButton[keyboardFocus="true"] {
+    border-color: #ffffff;
+}
+QSpinBox {
+    background-color: rgba(255, 255, 255, 15);
+    border: 1px solid rgba(255, 255, 255, 31);
+    border-radius: 12px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0 6px;
+}
+QSlider {
+    min-height: 18px;
+    max-height: 18px;
+}
+QSlider::groove:horizontal {
+    height: 6px;
+    border-radius: 3px;
+    background-color: rgba(255, 255, 255, 46);
+}
+QSlider::sub-page:horizontal {
+    height: 6px;
+    border-radius: 3px;
+    background-color: #ff6b95;
+}
+QSlider::handle:horizontal {
+    width: 18px;
+    height: 18px;
+    margin: -6px 0;
+    border-radius: 9px;
+    background-color: #ffffff;
+}
+QFrame#mappingHint {
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 20);
+    border-radius: 14px;
+}
+QLabel#mappingHintText {
+    font: 400 13px "Lexend";
+    color: rgba(255, 255, 255, 184);
+}
+QFrame#deviceWarning {
+    background-color: rgba(255, 211, 122, 20);
+    border: 1px solid rgba(255, 211, 122, 51);
+    border-radius: 14px;
+}
+QLabel#labelDeviceWarning {
+    font: 400 13px "Lexend";
+    color: #ffe7b3;
+}
+)");
+}
+
+/// Paper: the Set threshold card. Asks for a whole percentage; returns the old value on Cancel.
+int AskThreshold(QWidget* parent, int value) {
+    Spotlight::Dialog dialog(parent);
+    dialog.setWindowTitle(QObject::tr("Set threshold"));
+    dialog.SetIcon(QStringLiteral("sliders-horizontal"), Spotlight::Color::Accent());
+    dialog.SetSubtitle(QObject::tr("Choose a value between 0% and 100%"));
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(24);
+    layout->setSizeConstraint(QLayout::SetFixedSize);
+    auto* spin = new QSpinBox;
+    spin->setRange(0, 100);
+    spin->setValue(value);
+    spin->setSuffix(QStringLiteral(" %"));
+    spin->setFixedWidth(80);
+    layout->addWidget(spin, 0, Qt::AlignLeft);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->setMinimumWidth(296);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    spin->setFocus();
+    spin->selectAll();
+    return dialog.exec() == QDialog::Accepted ? spin->value() : value;
+}
+
+QIcon MenuIcon(const char* name) {
+    return Spotlight::Icon(QString::fromLatin1(name), Spotlight::Color::MenuInk(), 16);
+}
+
 void SetAnalogParam(const Common::ParamPackage& input_param, Common::ParamPackage& analog_param,
                     const std::string& button_name) {
     // The poller returned a complete axis, so set all the buttons
@@ -177,6 +388,61 @@ void SetAnalogParam(const Common::ParamPackage& input_param, Common::ParamPackag
     analog_param.Set(button_name, input_param.Serialize());
 }
 } // namespace
+
+InputBindingButton::InputBindingButton(QWidget* parent) : QPushButton(parent) {
+    setAttribute(Qt::WA_Hover);
+    setCursor(Qt::PointingHandCursor);
+    setFont(Spotlight::Font(12, 600));
+}
+
+void InputBindingButton::SetWaiting(bool waiting_) {
+    waiting = waiting_;
+    update();
+}
+
+QSize InputBindingButton::sizeHint() const {
+    return {88, 32};
+}
+
+QSize InputBindingButton::minimumSizeHint() const {
+    return {48, 32};
+}
+
+void InputBindingButton::paintEvent(QPaintEvent*) {
+    using namespace Spotlight;
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const bool unset = text() == QObject::tr("[not set]");
+    QColor fill = Color::Field();
+    QColor stroke = Color::StrokeSubtle();
+    QColor ink = unset ? Color::TextMuted() : Color::Text();
+    qreal stroke_width = 1;
+    if (waiting) {
+        fill = Color::AccentSoft();
+        stroke = Color::Accent();
+        ink = QColor(0xff, 0xc2, 0xd2);
+        stroke_width = 1.5;
+    } else if (!isEnabled()) {
+        fill = Color::FillFaint();
+        ink.setAlpha(92);
+    } else if (isDown()) {
+        fill = Color::Control();
+    } else if (underMouse()) {
+        fill = Color::Fill();
+    }
+    if (HasKeyboardFocus(this)) {
+        stroke = Color::Text();
+    }
+    const qreal inset = stroke_width / 2;
+    p.setPen(QPen(stroke, stroke_width));
+    p.setBrush(fill);
+    p.drawRoundedRect(QRectF(rect()).adjusted(inset, inset, -inset, -inset), Radius::Small,
+                      Radius::Small);
+    p.setPen(ink);
+    const QRect text_rect = rect().adjusted(8, 0, -8, 0);
+    p.drawText(text_rect, Qt::AlignCenter,
+               fontMetrics().elidedText(text(), Qt::ElideRight, text_rect.width()));
+}
 
 QString ConfigureInputPlayer::ButtonToText(const Common::ParamPackage& param) {
     if (!param.Has("engine")) {
@@ -320,6 +586,37 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
         emulated_controller->EnableConfiguration();
     }
     ui->setupUi(this);
+    setStyleSheet(PlayerStyle());
+    for (auto* child : findChildren<QWidget*>()) {
+        if (child->metaObject() == &QWidget::staticMetaObject) {
+            child->setProperty("spotlightTransparent", true);
+        }
+    }
+    setProperty("spotlightTransparent", true);
+    ui->mappingHintIcon->setPixmap(Spotlight::IconPixmap(
+        QStringLiteral("info"), 16, Spotlight::Color::TextMuted(), devicePixelRatioF()));
+    ui->deviceWarningIcon->setPixmap(Spotlight::IconPixmap(
+        QStringLiteral("warning-circle"), 16, Spotlight::Color::Warning(), devicePixelRatioF()));
+    ui->comboDevices->setIconSize(QSize(15, 15));
+    QFont range_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    range_font.setPixelSize(13);
+    range_font.setWeight(QFont::DemiBold);
+    ui->spinboxLStickRange->setFont(range_font);
+    ui->spinboxRStickRange->setFont(range_font);
+    for (auto* column : {ui->bottomLeft, ui->bottomRight}) {
+        column->setFixedWidth(214);
+    }
+    for (const auto& [slider, label] : {std::pair{ui->sliderZLThreshold, ui->labelZLThreshold},
+                                        std::pair{ui->sliderZRThreshold, ui->labelZRThreshold}}) {
+        connect(slider, &QSlider::valueChanged, label,
+                [label](int value) { label->setText(QStringLiteral("%1%").arg(value)); });
+    }
+    connect(ui->connectedToggle, &QAbstractButton::toggled, ui->groupConnectedController,
+            &QGroupBox::setChecked);
+    connect(ui->groupConnectedController, &QGroupBox::toggled, ui->connectedToggle,
+            &QAbstractButton::setChecked);
+    connect(ui->groupConnectedController, &QGroupBox::toggled, ui->comboControllerType,
+            &QWidget::setEnabled);
 
     setFocusPolicy(Qt::ClickFocus);
 
@@ -382,26 +679,26 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
         button->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(button, &QPushButton::customContextMenuRequested,
                 [=, this](const QPoint& menu_location) {
-                    QMenu context_menu;
+                    Spotlight::Menu context_menu;
                     Common::ParamPackage param = emulated_controller->GetButtonParam(button_id);
-                    context_menu.addAction(tr("Clear"), [&] {
+                    context_menu.addAction(MenuIcon("x"), tr("Clear"), [&] {
                         emulated_controller->SetButtonParam(button_id, {});
                         button_map[button_id]->setText(tr("[not set]"));
                     });
                     if (param.Has("code") || param.Has("button") || param.Has("hat")) {
-                        context_menu.addAction(tr("Invert button"), [&] {
+                        context_menu.addAction(MenuIcon("arrows-down-up"), tr("Invert button"), [&] {
                             const bool invert_value = !param.Get("inverted", false);
                             param.Set("inverted", invert_value);
                             button_map[button_id]->setText(ButtonToText(param));
                             emulated_controller->SetButtonParam(button_id, param);
                         });
-                        context_menu.addAction(tr("Toggle button"), [&] {
+                        context_menu.addAction(MenuIcon("toggle-left"), tr("Toggle button"), [&] {
                             const bool toggle_value = !param.Get("toggle", false);
                             param.Set("toggle", toggle_value);
                             button_map[button_id]->setText(ButtonToText(param));
                             emulated_controller->SetButtonParam(button_id, param);
                         });
-                        context_menu.addAction(tr("Turbo button"), [&] {
+                        context_menu.addAction(MenuIcon("lightning"), tr("Turbo button"), [&] {
                             const bool turbo_value = !param.Get("turbo", false);
                             param.Set("turbo", turbo_value);
                             button_map[button_id]->setText(ButtonToText(param));
@@ -409,24 +706,22 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                         });
                     }
                     if (param.Has("axis")) {
-                        context_menu.addAction(tr("Invert axis"), [&] {
+                        context_menu.addAction(MenuIcon("arrows-left-right"), tr("Invert axis"), [&] {
                             const bool toggle_value = !(param.Get("invert", "+") == "-");
                             param.Set("invert", toggle_value ? "-" : "+");
                             button_map[button_id]->setText(ButtonToText(param));
                             emulated_controller->SetButtonParam(button_id, param);
                         });
-                        context_menu.addAction(tr("Invert button"), [&] {
+                        context_menu.addAction(MenuIcon("arrows-down-up"), tr("Invert button"), [&] {
                             const bool invert_value = !param.Get("inverted", false);
                             param.Set("inverted", invert_value);
                             button_map[button_id]->setText(ButtonToText(param));
                             emulated_controller->SetButtonParam(button_id, param);
                         });
-                        context_menu.addAction(tr("Set threshold"), [&] {
+                        context_menu.addAction(MenuIcon("sliders-horizontal"), tr("Set threshold"), [&] {
                             const int button_threshold =
                                 static_cast<int>(param.Get("threshold", 0.5f) * 100.0f);
-                            const int new_threshold = QInputDialog::getInt(
-                                this, tr("Set threshold"), tr("Choose a value between 0% and 100%"),
-                                button_threshold, 0, 100);
+                            const int new_threshold = AskThreshold(this, button_threshold);
                             param.Set("threshold", new_threshold / 100.0f);
 
                             if (button_id == Settings::NativeButton::ZL) {
@@ -437,7 +732,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                             }
                             emulated_controller->SetButtonParam(button_id, param);
                         });
-                        context_menu.addAction(tr("Toggle axis"), [&] {
+                        context_menu.addAction(MenuIcon("toggle-left"), tr("Toggle axis"), [&] {
                             const bool toggle_value = !param.Get("toggle", false);
                             param.Set("toggle", toggle_value);
                             button_map[button_id]->setText(ButtonToText(param));
@@ -467,23 +762,21 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
 
         connect(button, &QPushButton::customContextMenuRequested,
                 [=, this](const QPoint& menu_location) {
-                    QMenu context_menu;
+                    Spotlight::Menu context_menu;
                     Common::ParamPackage param = emulated_controller->GetMotionParam(motion_id);
-                    context_menu.addAction(tr("Clear"), [&] {
+                    context_menu.addAction(MenuIcon("x"), tr("Clear"), [&] {
                         emulated_controller->SetMotionParam(motion_id, {});
                         motion_map[motion_id]->setText(tr("[not set]"));
                     });
                     if (param.Has("motion")) {
-                        context_menu.addAction(tr("Set gyro threshold"), [&] {
+                        context_menu.addAction(MenuIcon("sliders-horizontal"), tr("Set gyro threshold"), [&] {
                             const int gyro_threshold =
                                 static_cast<int>(param.Get("threshold", 0.007f) * 1000.0f);
-                            const int new_threshold = QInputDialog::getInt(
-                                this, tr("Set threshold"), tr("Choose a value between 0% and 100%"),
-                                gyro_threshold, 0, 100);
+                            const int new_threshold = AskThreshold(this, gyro_threshold);
                             param.Set("threshold", new_threshold / 1000.0f);
                             emulated_controller->SetMotionParam(motion_id, param);
                         });
-                        context_menu.addAction(tr("Calibrate sensor"), [&] {
+                        context_menu.addAction(MenuIcon("target"), tr("Calibrate sensor"), [&] {
                             emulated_controller->StartMotionCalibration();
                         });
                     }
@@ -565,9 +858,9 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
 
             connect(analog_button, &QPushButton::customContextMenuRequested,
                     [=, this](const QPoint& menu_location) {
-                        QMenu context_menu;
+                        Spotlight::Menu context_menu;
                         Common::ParamPackage param = emulated_controller->GetStickParam(analog_id);
-                        context_menu.addAction(tr("Clear"), [&] {
+                        context_menu.addAction(MenuIcon("x"), tr("Clear"), [&] {
                             if (param.Get("engine", "") != "analog_from_button") {
                                 emulated_controller->SetStickParam(analog_id, {});
                                 for (auto button : analog_map_buttons[analog_id]) {
@@ -592,7 +885,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                             emulated_controller->SetStickParam(analog_id, param);
                             analog_map_buttons[analog_id][sub_button_id]->setText(tr("[not set]"));
                         });
-                        context_menu.addAction(tr("Center axis"), [&] {
+                        context_menu.addAction(MenuIcon("crosshair"), tr("Center axis"), [&] {
                             const auto stick_value =
                                 emulated_controller->GetSticksValues()[analog_id];
                             const float offset_x = stick_value.x.properties.offset;
@@ -618,7 +911,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                             param.Set("offset_y", -raw_value_y + offset_y);
                             emulated_controller->SetStickParam(analog_id, param);
                         });
-                        context_menu.addAction(tr("Invert axis"), [&] {
+                        context_menu.addAction(MenuIcon("arrows-left-right"), tr("Invert axis"), [&] {
                             if (sub_button_id == 2 || sub_button_id == 3) {
                                 const bool invert_value = param.Get("invert_x", "+") == "-";
                                 const std::string invert_str = invert_value ? "+" : "-";
@@ -660,14 +953,14 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
         connect(
             analog_map_modifier_button[analog_id], &QPushButton::customContextMenuRequested,
             [=, this](const QPoint& menu_location) {
-                QMenu context_menu;
+                Spotlight::Menu context_menu;
                 Common::ParamPackage param = emulated_controller->GetStickParam(analog_id);
-                context_menu.addAction(tr("Clear"), [&] {
+                context_menu.addAction(MenuIcon("x"), tr("Clear"), [&] {
                     param.Set("modifier", "");
                     analog_map_modifier_button[analog_id]->setText(tr("[not set]"));
                     emulated_controller->SetStickParam(analog_id, param);
                 });
-                context_menu.addAction(tr("Toggle button"), [&] {
+                context_menu.addAction(MenuIcon("toggle-left"), tr("Toggle button"), [&] {
                     Common::ParamPackage modifier_param =
                         Common::ParamPackage{param.Get("modifier", "")};
                     const bool toggle_value = !modifier_param.Get("toggle", false);
@@ -676,7 +969,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                     analog_map_modifier_button[analog_id]->setText(ButtonToText(modifier_param));
                     emulated_controller->SetStickParam(analog_id, param);
                 });
-                context_menu.addAction(tr("Invert button"), [&] {
+                context_menu.addAction(MenuIcon("arrows-down-up"), tr("Invert button"), [&] {
                     Common::ParamPackage modifier_param =
                         Common::ParamPackage{param.Get("modifier", "")};
                     const bool invert_value = !modifier_param.Get("inverted", false);
@@ -744,6 +1037,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
 
     if (debug || player_index == 9) {
         ui->groupConnectedController->setCheckable(false);
+        ui->connectedToggle->hide();
     }
 
     // The Debug Controller can only choose the Pro Controller.
@@ -825,6 +1119,7 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
             &ConfigureInputPlayer::SaveProfile);
 
     LoadConfiguration();
+    ui->connectedToggle->setChecked(ui->groupConnectedController->isChecked());
 }
 
 ConfigureInputPlayer::~ConfigureInputPlayer() {
@@ -874,6 +1169,28 @@ void ConfigureInputPlayer::showEvent(QShowEvent* event) {
     }
     QWidget::showEvent(event);
     ui->main->addWidget(bottom_row);
+}
+
+void ConfigureInputPlayer::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    ArrangeColumns();
+}
+
+void ConfigureInputPlayer::ArrangeColumns() {
+    const bool narrow = width() < 900;
+    if (narrow_columns == narrow) {
+        return;
+    }
+    narrow_columns = narrow;
+    ui->bodyLayout->removeWidget(ui->bottomMiddle);
+    ui->bodyLayout->removeWidget(ui->bottomRight);
+    if (narrow) {
+        ui->bodyLayout->addWidget(ui->bottomMiddle, 0, 1, 2, 1, Qt::AlignTop);
+        ui->bodyLayout->addWidget(ui->bottomRight, 1, 0, Qt::AlignTop);
+    } else {
+        ui->bodyLayout->addWidget(ui->bottomMiddle, 0, 1, Qt::AlignTop);
+        ui->bodyLayout->addWidget(ui->bottomRight, 0, 2, Qt::AlignTop);
+    }
 }
 
 void ConfigureInputPlayer::changeEvent(QEvent* event) {
@@ -992,6 +1309,14 @@ void ConfigureInputPlayer::UpdateInputDeviceCombobox() {
 
 void ConfigureInputPlayer::RestoreDefaults() {
     UpdateMappingWithDefaults();
+}
+
+QString ConfigureInputPlayer::ControllerName() const {
+    return ui->comboControllerType->currentText();
+}
+
+QString ConfigureInputPlayer::DeviceName() const {
+    return ui->comboDevices->currentText();
 }
 
 void ConfigureInputPlayer::ClearAll() {
@@ -1136,6 +1461,19 @@ void ConfigureInputPlayer::SetConnectableControllers() {
         return;
     }
 
+    if (npad_style_set.palma == 1 || npad_style_set.lark == 1 || npad_style_set.lucia == 1 ||
+        npad_style_set.lagoon == 1 || npad_style_set.lager == 1) {
+        auto* combo = ui->comboControllerType;
+        combo->insertSeparator(combo->count());
+        combo->addItem(tr("ONLY WHEN THE GAME SUPPORTS THEM"));
+        const int header = combo->count() - 1;
+        combo->setItemData(header, Spotlight::Font(10, 600), Qt::FontRole);
+        combo->setItemData(header, Spotlight::Color::TextMuted(), Qt::ForegroundRole);
+        if (auto* model = qobject_cast<QStandardItemModel*>(combo->model())) {
+            model->item(header)->setEnabled(false);
+        }
+    }
+
     if (npad_style_set.palma == 1) {
         add_item(Core::HID::NpadStyleIndex::Pokeball, tr("Poke Ball Plus"));
     }
@@ -1185,7 +1523,12 @@ void ConfigureInputPlayer::UpdateInputDevices() {
     input_devices = input_subsystem->GetInputDevices();
     ui->comboDevices->clear();
     for (const auto& device : input_devices) {
-        ui->comboDevices->addItem(QString::fromStdString(device.Get("display", "Unknown")), {});
+        const auto engine = device.Get("engine", "");
+        const bool keyboard = engine == "keyboard" || engine == "mouse";
+        ui->comboDevices->addItem(
+            Spotlight::Icon(keyboard ? QStringLiteral("keyboard") : QStringLiteral("game-controller"),
+                            Spotlight::Color::TextSecondary(), 15),
+            QString::fromStdString(device.Get("display", "Unknown")));
     }
 }
 
@@ -1207,7 +1550,7 @@ void ConfigureInputPlayer::UpdateDeviceWarning() {
         }
     }
     ui->labelDeviceWarning->setText(QString::fromStdString(warning));
-    ui->labelDeviceWarning->setVisible(!warning.empty());
+    ui->deviceWarning->setVisible(!warning.empty());
 }
 
 void ConfigureInputPlayer::UpdateControllerAvailableButtons() {
@@ -1514,6 +1857,8 @@ void ConfigureInputPlayer::HandleClick(
     } else {
         button->setText(tr("[waiting]"));
     }
+    waiting_button = static_cast<InputBindingButton*>(button);
+    waiting_button->SetWaiting(true);
     button->setFocus();
 
     input_setter = std::move(new_input_setter);
@@ -1543,6 +1888,10 @@ void ConfigureInputPlayer::SetPollingResult(const Common::ParamPackage& params, 
 
     if (!abort) {
         (*input_setter)(params);
+    }
+    if (waiting_button != nullptr) {
+        waiting_button->SetWaiting(false);
+        waiting_button = nullptr;
     }
 
     UpdateUI();
@@ -1584,6 +1933,10 @@ void ConfigureInputPlayer::mousePressEvent(QMouseEvent* event) {
 }
 
 void ConfigureInputPlayer::wheelEvent(QWheelEvent* event) {
+    if (!input_setter) {
+        event->ignore();
+        return;
+    }
     const int x = event->angleDelta().x();
     const int y = event->angleDelta().y();
     input_subsystem->GetMouse()->MouseWheelChange(x, y);

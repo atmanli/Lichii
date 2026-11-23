@@ -4,15 +4,15 @@
 #pragma once
 
 #include <filesystem>
-#include <QDialog>
 #include "common/net/net.h"
+#include "lichii/spotlight/dialog.h"
 
 class QRadioButton;
 namespace Ui {
 class UpdateDialog;
 }
 
-class UpdateDialog : public QDialog {
+class UpdateDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

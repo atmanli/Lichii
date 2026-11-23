@@ -17,7 +17,6 @@
 #include <QImage>
 #include <QObject>
 #include <QPainter>
-#include <QPainterPath>
 #include <QRegularExpression>
 #include <QStandardItem>
 #include <QString>
@@ -73,23 +72,6 @@ static QPixmap GetDefaultIcon(u32 size) {
     return QPixmap::fromImage(icon);
 }
 
-static QPixmap RoundedIcon(const QPixmap& picture) {
-    if (!IsLichiiTheme() || picture.isNull()) {
-        return picture;
-    }
-    QImage icon(picture.size(), QImage::Format_ARGB32_Premultiplied);
-    icon.fill(Qt::transparent);
-    QPainter painter(&icon);
-    painter.setRenderHint(QPainter::Antialiasing);
-    QPainterPath path;
-    const qreal radius = picture.width() * 0.18;
-    path.addRoundedRect(QRectF(icon.rect()), radius, radius);
-    painter.setClipPath(path);
-    painter.drawPixmap(0, 0, picture);
-    painter.end();
-    return QPixmap::fromImage(icon);
-}
-
 static QPixmap ThemeIcon(const char* name) {
     if (IsLichiiTheme()) {
         // Lichii Dark keeps folder rows compact with the 16 px line icons from its set.
@@ -138,6 +120,8 @@ public:
     static constexpr int FileTypeRole = SortRole + 4;
     /// True when the picture comes from the game or its custom artwork, not the default art.
     static constexpr int HasIconRole = SortRole + 5;
+    /// True when the game's main.npdm says it is a Switch 2 program.
+    static constexpr int Switch2Role = SortRole + 6;
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
@@ -175,17 +159,14 @@ public:
 
     /// Shows an image file as a game's picture, or the default art when it is not an image.
     static void SetPicture(QStandardItem* item, const std::vector<u8>& picture_data) {
-        const u32 size = UISettings::CurrentGameIconSize().GetValue();
-
         QPixmap picture;
         const bool has_icon =
             picture.loadFromData(picture_data.data(), static_cast<u32>(picture_data.size()));
         if (!has_icon) {
-            picture = GetDefaultIcon(size);
+            picture = GetDefaultIcon(UISettings::CurrentGameIconSize().GetValue());
         }
-        picture = picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
-        item->setData(RoundedIcon(picture), Qt::DecorationRole);
+        item->setData(picture, Qt::DecorationRole);
         item->setData(has_icon, HasIconRole);
     }
 

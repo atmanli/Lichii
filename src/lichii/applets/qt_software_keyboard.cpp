@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cmath>
 #include <QCursor>
 #include <QKeyEvent>
-#include <QScreen>
+#include <QStyle>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -18,19 +20,11 @@
 #include "lichii/applets/qt_software_keyboard.h"
 #include "lichii/main_window.h"
 #include "lichii/util/overlay_dialog.h"
+#include "lichii/spotlight/theme.h"
 
 namespace {
 
 using namespace Service::AM::Frontend;
-
-constexpr float BASE_HEADER_FONT_SIZE = 23.0f;
-constexpr float BASE_SUB_FONT_SIZE = 17.0f;
-constexpr float BASE_EDITOR_FONT_SIZE = 26.0f;
-constexpr float BASE_CHAR_BUTTON_FONT_SIZE = 28.0f;
-constexpr float BASE_LABEL_BUTTON_FONT_SIZE = 18.0f;
-constexpr float BASE_ICON_BUTTON_SIZE = 36.0f;
-[[maybe_unused]] constexpr float BASE_WIDTH = 1280.0f;
-constexpr float BASE_HEIGHT = 720.0f;
 
 } // Anonymous namespace
 
@@ -338,12 +332,26 @@ QtSoftwareKeyboardDialog::QtSoftwareKeyboardDialog(
 
     SetupMouseHover();
 
+    ui->iconOSK->setPixmap(Spotlight::IconPixmap(QStringLiteral("keyboard"), 20,
+                                                 Spotlight::Color::Purple(), devicePixelRatioF()));
+    for (auto* button : {ui->button_cancel, ui->button_cancel_shift, ui->button_cancel_num}) {
+        connect(button, &QPushButton::clicked, this, &QtSoftwareKeyboardDialog::reject);
+    }
+    if (is_inline) {
+        ui->verticalLayout->setAlignment(ui->mainOSK, Qt::AlignHCenter | Qt::AlignBottom);
+        setStyleSheet(styleSheet() +
+                      QStringLiteral("QDialog#SoftwareKeyboard { background: transparent; }"));
+    }
+
     if (!initialize_parameters.ok_text.empty()) {
         ui->button_ok->setText(QString::fromStdU16String(initialize_parameters.ok_text));
     }
 
     ui->label_header->setText(QString::fromStdU16String(initialize_parameters.header_text));
     ui->label_sub->setText(QString::fromStdU16String(initialize_parameters.sub_text));
+    ui->headerOSK->setHidden(initialize_parameters.header_text.empty());
+    ui->subOSK->setHidden(initialize_parameters.sub_text.empty());
+    ui->headerBlock->setHidden(ui->headerOSK->isHidden() && ui->subOSK->isHidden());
 
     ui->button_left_optional_num->setText(QChar{initialize_parameters.left_optional_symbol_key});
     ui->button_right_optional_num->setText(QChar{initialize_parameters.right_optional_symbol_key});
@@ -376,6 +384,12 @@ QtSoftwareKeyboardDialog::~QtSoftwareKeyboardDialog() {
 void QtSoftwareKeyboardDialog::ShowNormalKeyboard(QPoint pos, QSize size) {
     if (isVisible()) {
         return;
+    }
+
+    for (int i = 0; i < ui->topOSK->count(); ++i) {
+        ui->topOSK->widget(i)->setSizePolicy(QSizePolicy::Preferred, i == ui->topOSK->currentIndex()
+                                                                         ? QSizePolicy::Preferred
+                                                                         : QSizePolicy::Ignored);
     }
 
     MoveAndResizeWindow(pos, size);
@@ -433,6 +447,9 @@ void QtSoftwareKeyboardDialog::ShowInlineKeyboard(
 
     ui->topOSK->setStyleSheet(QStringLiteral("background: rgba(0, 0, 0, 0);"));
 
+    ui->titleOSK->hide();
+    ui->headerBlock->hide();
+    ui->topOSK->hide();
     ui->headerOSK->hide();
     ui->subOSK->hide();
     ui->inputOSK->hide();
@@ -575,77 +592,84 @@ void QtSoftwareKeyboardDialog::MoveAndResizeWindow(QPoint pos, QSize size) {
     QDialog::move(pos);
     QDialog::resize(size);
 
-    // High DPI
-    const float dpi_scale = screen()->logicalDotsPerInch() / 96.0f;
-
-    RescaleKeyboardElements(size.width(), size.height(), dpi_scale);
+    RescaleKeyboardElements(size.width(), size.height());
 }
 
-void QtSoftwareKeyboardDialog::RescaleKeyboardElements(float width, float height, float dpi_scale) {
-    const auto header_font_size = BASE_HEADER_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-    const auto sub_font_size = BASE_SUB_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-    const auto editor_font_size = BASE_EDITOR_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-    const auto char_button_font_size =
-        BASE_CHAR_BUTTON_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-    const auto label_button_font_size =
-        BASE_LABEL_BUTTON_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
+void QtSoftwareKeyboardDialog::RescaleKeyboardElements(float width, float height) {
+    const float card_height = is_inline                         ? 340.0f
+                              : ui->topOSK->currentIndex() == 1 ? 600.0f
+                                                                : 560.0f;
+    const float scale =
+        std::clamp(std::min((width - 32.0f) / 664.0f, (height - 32.0f) / card_height), 0.7f, 1.0f);
+    const auto px = [scale](float value) {
+        return std::max(1, static_cast<int>(std::lround(value * scale)));
+    };
 
-    QFont header_font(QStringLiteral("MS Shell Dlg 2"), header_font_size, QFont::Normal);
-    QFont sub_font(QStringLiteral("MS Shell Dlg 2"), sub_font_size, QFont::Normal);
-    QFont editor_font(QStringLiteral("MS Shell Dlg 2"), editor_font_size, QFont::Normal);
-    QFont char_button_font(QStringLiteral("MS Shell Dlg 2"), char_button_font_size, QFont::Normal);
-    QFont label_button_font(QStringLiteral("MS Shell Dlg 2"), label_button_font_size,
-                            QFont::Normal);
+    ui->verticalLayout_2->setContentsMargins(px(24), px(24), px(24), px(24));
+    ui->verticalLayout_2->setSpacing(px(14));
+    ui->iconOSK->setFixedSize(px(38), px(38));
+    ui->label_title->setFont(Spotlight::DisplayFont(px(20)));
+    ui->label_header->setFont(Spotlight::Font(px(14), 600));
+    ui->label_sub->setFont(Spotlight::Font(px(12)));
+    ui->line_edit_osk->setFont(Spotlight::Font(px(14)));
+    ui->line_edit_osk->setFixedHeight(px(40));
+    ui->text_edit_osk->setFont(Spotlight::Font(px(13)));
+    ui->text_edit_osk->setFixedHeight(px(80));
+    ui->label_characters->setFont(Spotlight::Font(px(11)));
+    ui->label_characters_box->setFont(Spotlight::Font(px(11)));
 
-    ui->label_header->setFont(header_font);
-    ui->label_sub->setFont(sub_font);
-    ui->line_edit_osk->setFont(editor_font);
-    ui->text_edit_osk->setFont(editor_font);
-    ui->label_characters->setFont(sub_font);
-    ui->label_characters_box->setFont(sub_font);
+    for (auto* layout :
+         {ui->normalPageVerticalLayout, ui->shiftPageVerticalLayout, ui->numPageVerticalLayout}) {
+        layout->setSpacing(px(16));
+    }
+    for (auto* icon : {ui->icon_controller, ui->icon_controller_shift, ui->icon_controller_num}) {
+        icon->setFixedSize(px(22), px(18));
+    }
+    for (auto* label :
+         {ui->label_shift, ui->label_shift_shift, ui->label_cancel, ui->label_cancel_shift,
+          ui->label_cancel_num, ui->label_enter, ui->label_enter_shift, ui->label_enter_num}) {
+        label->setFont(Spotlight::Font(px(12)));
+    }
+    for (auto* keycap :
+         {ui->key_stick, ui->key_stick_shift, ui->key_cancel, ui->key_cancel_shift,
+          ui->key_cancel_num, ui->key_enter, ui->key_enter_shift, ui->key_enter_num}) {
+        keycap->setFont(Spotlight::Font(px(10), 700));
+        keycap->setMinimumWidth(px(22));
+        keycap->setFixedHeight(px(20));
+    }
+    for (auto* button : {ui->button_cancel, ui->button_cancel_shift, ui->button_cancel_num}) {
+        button->setFont(Spotlight::Font(px(13), 600));
+        button->setFixedHeight(px(34));
+    }
 
-    ui->label_shift->setFont(label_button_font);
-    ui->label_shift_shift->setFont(label_button_font);
-    ui->label_cancel->setFont(label_button_font);
-    ui->label_cancel_shift->setFont(label_button_font);
-    ui->label_cancel_num->setFont(label_button_font);
-    ui->label_enter->setFont(label_button_font);
-    ui->label_enter_shift->setFont(label_button_font);
-    ui->label_enter_num->setFont(label_button_font);
+    const int key = px(42);
+    const int gap = px(7);
+    const int wide = px(76);
+    for (auto* grid : {ui->kbOSKnormal, ui->kbOSKshift, ui->kbOSKnum}) {
+        const int wide_column = grid == ui->kbOSKnum ? 5 : 12;
+        grid->setSpacing(gap);
+        for (int i = 0; i < grid->count(); ++i) {
+            int item_row, item_column, row_span, column_span;
+            grid->getItemPosition(i, &item_row, &item_column, &row_span, &column_span);
+            int button_width = gap * (column_span - 1);
+            for (int c = item_column; c < item_column + column_span; ++c) {
+                button_width += c == wide_column ? wide : key;
+            }
+            if (auto* widget = grid->itemAt(i)->widget()) {
+                widget->setFixedSize(button_width, key);
+            }
+        }
+    }
 
     for (auto* button : all_buttons) {
-        if (button == ui->button_return || button == ui->button_return_shift) {
-            button->setFont(label_button_font);
-            continue;
-        }
-
-        if (button == ui->button_space || button == ui->button_space_shift) {
-            button->setFont(label_button_font);
-            continue;
-        }
-
-        if (button == ui->button_shift || button == ui->button_shift_shift) {
-            button->setFont(label_button_font);
-            button->setIconSize(QSize(BASE_ICON_BUTTON_SIZE, BASE_ICON_BUTTON_SIZE) *
-                                (height / BASE_HEIGHT));
-            continue;
-        }
-
-        if (button == ui->button_backspace || button == ui->button_backspace_shift ||
-            button == ui->button_backspace_num) {
-            button->setFont(label_button_font);
-            button->setIconSize(QSize(BASE_ICON_BUTTON_SIZE, BASE_ICON_BUTTON_SIZE) *
-                                (height / BASE_HEIGHT));
-            continue;
-        }
-
-        if (button == ui->button_ok || button == ui->button_ok_shift ||
-            button == ui->button_ok_num) {
-            button->setFont(label_button_font);
-            continue;
-        }
-
-        button->setFont(char_button_font);
+        const bool is_label = button->text().size() > 1 || button->text().isEmpty();
+        button->setFont(Spotlight::Font(px(is_label ? 12 : 14), 600));
+    }
+    for (auto* button :
+         {ui->button_backspace, ui->button_backspace_shift, ui->button_backspace_num}) {
+        button->setIcon(Spotlight::Icon(QStringLiteral("backspace"),
+                                        Spotlight::Color::TextSecondary(), px(18)));
+        button->setIconSize(QSize(px(18), px(18)));
     }
 }
 
@@ -661,25 +685,21 @@ void QtSoftwareKeyboardDialog::SetKeyboardType() {
     default: {
         bottom_osk_index = BottomOSKIndex::LowerCase;
         ui->bottomOSK->setCurrentIndex(static_cast<int>(bottom_osk_index));
-
-        ui->verticalLayout_2->setStretch(0, 320);
-        ui->verticalLayout_2->setStretch(1, 400);
-
-        ui->gridLineOSK->setRowStretch(5, 94);
-        ui->gridBoxOSK->setRowStretch(2, 81);
         break;
     }
     case SwkbdType::NumberPad: {
         bottom_osk_index = BottomOSKIndex::NumberPad;
         ui->bottomOSK->setCurrentIndex(static_cast<int>(bottom_osk_index));
-
-        ui->verticalLayout_2->setStretch(0, 370);
-        ui->verticalLayout_2->setStretch(1, 350);
-
-        ui->gridLineOSK->setRowStretch(5, 144);
-        ui->gridBoxOSK->setRowStretch(2, 131);
         break;
     }
+    }
+
+    const bool number_pad = bottom_osk_index == BottomOSKIndex::NumberPad;
+    for (int i = 0; i < ui->bottomOSK->count(); ++i) {
+        const bool number_pad_page = i == static_cast<int>(BottomOSKIndex::NumberPad);
+        ui->bottomOSK->widget(i)->setSizePolicy(
+            QSizePolicy::Preferred,
+            number_pad_page == number_pad ? QSizePolicy::Preferred : QSizePolicy::Ignored);
     }
 }
 
@@ -700,16 +720,6 @@ void QtSoftwareKeyboardDialog::SetTextDrawType() {
     case SwkbdTextDrawType::Line:
     case SwkbdTextDrawType::DownloadCode: {
         ui->topOSK->setCurrentIndex(0);
-
-        if (initialize_parameters.max_text_length <= 10) {
-            ui->gridLineOSK->setColumnStretch(0, 390);
-            ui->gridLineOSK->setColumnStretch(1, 500);
-            ui->gridLineOSK->setColumnStretch(2, 390);
-        } else {
-            ui->gridLineOSK->setColumnStretch(0, 130);
-            ui->gridLineOSK->setColumnStretch(1, 1020);
-            ui->gridLineOSK->setColumnStretch(2, 130);
-        }
 
         if (is_inline) {
             return;
@@ -823,14 +833,7 @@ void QtSoftwareKeyboardDialog::SetControllerImage() {
     const auto controller_type =
         handheld->IsConnected() ? handheld->GetNpadStyleIndex() : player_1->GetNpadStyleIndex();
 
-    const QString theme = [] {
-        if (QIcon::themeName().contains(QStringLiteral("dark")) ||
-            QIcon::themeName().contains(QStringLiteral("midnight"))) {
-            return QStringLiteral("_dark");
-        } else {
-            return QString{};
-        }
-    }();
+    const QString theme = QStringLiteral("_dark");
 
     switch (controller_type) {
     case Core::HID::NpadStyleIndex::Fullkey:
@@ -1050,23 +1053,13 @@ void QtSoftwareKeyboardDialog::ChangeBottomOSKIndex() {
         bottom_osk_index = BottomOSKIndex::UpperCase;
         ui->bottomOSK->setCurrentIndex(static_cast<int>(bottom_osk_index));
 
-        ui->button_shift_shift->setStyleSheet(
-            QStringLiteral("image: url(:/overlay/osk_button_shift_lock_off.png);"
-                           "\nimage-position: left;"));
-
-        ui->button_shift_shift->setIconSize(ui->button_shift->iconSize());
-        ui->button_backspace_shift->setIconSize(ui->button_backspace->iconSize());
+        SetCapsLockShown(false);
         break;
     case BottomOSKIndex::UpperCase:
         if (caps_lock_enabled) {
             caps_lock_enabled = false;
 
-            ui->button_shift_shift->setStyleSheet(
-                QStringLiteral("image: url(:/overlay/osk_button_shift_lock_off.png);"
-                               "\nimage-position: left;"));
-
-            ui->button_shift_shift->setIconSize(ui->button_shift->iconSize());
-            ui->button_backspace_shift->setIconSize(ui->button_backspace->iconSize());
+            SetCapsLockShown(false);
 
             ui->label_shift_shift->setText(QStringLiteral("Caps Lock"));
 
@@ -1075,12 +1068,7 @@ void QtSoftwareKeyboardDialog::ChangeBottomOSKIndex() {
         } else {
             caps_lock_enabled = true;
 
-            ui->button_shift_shift->setStyleSheet(
-                QStringLiteral("image: url(:/overlay/osk_button_shift_lock_on.png);"
-                               "\nimage-position: left;"));
-
-            ui->button_shift_shift->setIconSize(ui->button_shift->iconSize());
-            ui->button_backspace_shift->setIconSize(ui->button_backspace->iconSize());
+            SetCapsLockShown(true);
 
             ui->label_shift_shift->setText(QStringLiteral("Caps Lock Off"));
         }
@@ -1089,6 +1077,12 @@ void QtSoftwareKeyboardDialog::ChangeBottomOSKIndex() {
     default:
         break;
     }
+}
+
+void QtSoftwareKeyboardDialog::SetCapsLockShown(bool locked) {
+    ui->button_shift_shift->setProperty("locked", locked);
+    ui->button_shift_shift->style()->unpolish(ui->button_shift_shift);
+    ui->button_shift_shift->style()->polish(ui->button_shift_shift);
 }
 
 void QtSoftwareKeyboardDialog::NormalKeyboardButtonClicked(QPushButton* button) {

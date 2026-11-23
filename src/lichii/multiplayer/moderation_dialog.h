@@ -8,7 +8,7 @@
 
 #include <memory>
 #include <optional>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 #include "network/room.h"
 #include "network/room_member.h"
 
@@ -18,7 +18,7 @@ class ModerationDialog;
 
 class QStandardItemModel;
 
-class ModerationDialog : public QDialog {
+class ModerationDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

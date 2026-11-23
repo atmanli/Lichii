@@ -6,62 +6,76 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>807</width>
-    <height>432</height>
+    <width>868</width>
+    <height>480</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>Room Window</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="spacing">
+    <number>14</number>
+   </property>
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>0</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>0</number>
+   </property>
    <item>
-    <layout class="QVBoxLayout" name="verticalLayout_3">
+    <widget class="QLabel" name="description">
+     <property name="text">
+      <string>Room Description</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ChatRoom" name="chat" native="true"/>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="action_row">
+     <property name="topMargin">
+      <number>12</number>
+     </property>
      <item>
-      <layout class="QHBoxLayout" name="horizontalLayout">
-       <property name="rightMargin">
-        <number>0</number>
+      <widget class="QPushButton" name="moderation">
+       <property name="text">
+        <string>Moderation...</string>
        </property>
-       <item>
-        <widget class="QLabel" name="description">
-         <property name="text">
-          <string>Room Description</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <spacer name="horizontalSpacer">
-         <property name="orientation">
-          <enum>Qt::Horizontal</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>40</width>
-           <height>20</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
-       <item>
-        <widget class="QPushButton" name="moderation">
-         <property name="text">
-          <string>Moderation...</string>
-         </property>
-         <property name="visible">
-          <bool>false</bool>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QPushButton" name="disconnect">
-         <property name="text">
-          <string>Leave Room</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
+       <property name="visible">
+        <bool>false</bool>
+       </property>
+      </widget>
      </item>
      <item>
-      <widget class="ChatRoom" name="chat" native="true"/>
+      <spacer name="action_spacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>0</width>
+         <height>0</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="disconnect">
+       <property name="text">
+        <string>Leave Room</string>
+       </property>
+      </widget>
      </item>
     </layout>
    </item>

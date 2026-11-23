@@ -4,10 +4,11 @@
 
 #include <array>
 #include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
-class QGroupBox;
-class QSpinBox;
+class QCheckBox;
+class QLabel;
+class QSlider;
 
 namespace Ui {
 class ConfigureVibration;
@@ -18,7 +19,7 @@ enum class ControllerTriggerType;
 class HIDCore;
 } // namespace Core::HID
 
-class ConfigureVibration : public QDialog {
+class ConfigureVibration : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -37,11 +38,9 @@ private:
 
     static constexpr std::size_t NUM_PLAYERS = 8;
 
-    /// Groupboxes encapsulating the vibration strength spinbox.
-    std::array<QGroupBox*, NUM_PLAYERS> vibration_groupboxes;
-
-    /// Spinboxes representing the vibration strength percentage.
-    std::array<QSpinBox*, NUM_PLAYERS> vibration_spinboxes;
+    std::array<QCheckBox*, NUM_PLAYERS> vibration_checkboxes;
+    std::array<QSlider*, NUM_PLAYERS> vibration_sliders;
+    std::array<QLabel*, NUM_PLAYERS> vibration_labels;
 
     /// Callback index to stop the controllers events
     std::array<int, NUM_PLAYERS> controller_callback_key;

@@ -2,19 +2,31 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <utility>
 #include "common/settings.h"
 #include "ui_configure_touchscreen_advanced.h"
 #include "lichii/configuration/configure_touchscreen_advanced.h"
+#include "lichii/spotlight/theme.h"
 
 ConfigureTouchscreenAdvanced::ConfigureTouchscreenAdvanced(QWidget* parent)
-    : QDialog(parent), ui(std::make_unique<Ui::ConfigureTouchscreenAdvanced>()) {
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::ConfigureTouchscreenAdvanced>()) {
     ui->setupUi(this);
+    SetIcon(QStringLiteral("hand-tap"), Spotlight::Color::Info());
 
     connect(ui->restore_defaults_button, &QPushButton::clicked, this,
             &ConfigureTouchscreenAdvanced::RestoreDefaults);
 
     LoadConfiguration();
-    resize(0, 0);
+
+    const std::pair<QSlider*, QLabel*> sliders[] = {
+        {ui->diameter_x_box, ui->diameter_x_value},
+        {ui->diameter_y_box, ui->diameter_y_value},
+        {ui->angle_box, ui->angle_value},
+    };
+    for (const auto& [slider, label] : sliders) {
+        connect(slider, &QSlider::valueChanged, label, qOverload<int>(&QLabel::setNum));
+        label->setNum(slider->value());
+    }
 }
 
 ConfigureTouchscreenAdvanced::~ConfigureTouchscreenAdvanced() = default;
@@ -24,7 +36,7 @@ void ConfigureTouchscreenAdvanced::changeEvent(QEvent* event) {
         RetranslateUI();
     }
 
-    QDialog::changeEvent(event);
+    Spotlight::Dialog::changeEvent(event);
 }
 
 void ConfigureTouchscreenAdvanced::RetranslateUI() {

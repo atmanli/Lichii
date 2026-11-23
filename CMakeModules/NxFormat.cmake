@@ -15,7 +15,13 @@
 # without Zstandard is used, so the converter runs on Lichii's own bundled zstd
 # and the executable holds a single copy of it.
 #
-# Defines nxformat::static_nozstd when the converter is built.
+# MinGW cannot link the Windows release, which is built with MSVC (__chkstk,
+# _fltused). MinGW builds load its nxformat.dll at run time instead
+# (src/lichii/nx_tools_loader.cpp): the DLL is copied next to lichii.exe, and
+# Lichii still starts without it.
+#
+# Defines lichii_nxformat when the converter is built, and LICHII_NXFORMAT_DLL
+# for MinGW builds.
 set(LICHII_NXFORMAT_ROOT "" CACHE PATH "Unpacked nxformat release (empty: download the pinned one)")
 
 function(lichii_find_nxformat)
@@ -23,13 +29,7 @@ function(lichii_find_nxformat)
     set(tag V1.0.3)
     set(root "${LICHII_NXFORMAT_ROOT}")
     if (NOT root)
-        if (MINGW)
-            # The Windows release is built with MSVC: MinGW cannot link it (__chkstk, _fltused).
-            message(WARNING "NX converter disabled: the prebuilt nxformat library is built with "
-                            "MSVC and does not link in MinGW builds. Set LICHII_NXFORMAT_ROOT to "
-                            "a MinGW build of nxformat to build it. Loading .nx games is not affected.")
-            return()
-        elseif (WIN32 AND ARCHITECTURE_x86_64)
+        if (WIN32 AND ARCHITECTURE_x86_64)
             set(platform windows-x64)
             set(sha256 f96148cf062adaa0aed3069945f08e1d7537e38d490f714f3bb27767fc297066)
         elseif (APPLE)
@@ -81,12 +81,20 @@ function(lichii_find_nxformat)
     endif()
 
     find_package(nxformat ${version} REQUIRED CONFIG PATHS "${root}/lib/cmake/nxformat" NO_DEFAULT_PATH)
-    set_target_properties(nxformat::static_nozstd PROPERTIES IMPORTED_GLOBAL TRUE)
-    set_property(TARGET nxformat::static_nozstd APPEND PROPERTY INTERFACE_LINK_LIBRARIES zstd::zstd)
-    if (MSVC)
-        # The library is built against the release DLL runtime (/MD); Debug builds use /MDd.
-        set_property(TARGET nxformat::static_nozstd APPEND PROPERTY INTERFACE_LINK_OPTIONS
-            "$<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt>")
+    add_library(lichii_nxformat INTERFACE)
+    if (MINGW)
+        target_include_directories(lichii_nxformat INTERFACE "${root}/include")
+        target_compile_definitions(lichii_nxformat INTERFACE NXFORMAT_STATIC LICHII_NXFORMAT_DYNAMIC)
+        set(LICHII_NXFORMAT_DLL "${NXFORMAT_RUNTIME}" CACHE INTERNAL "nxformat.dll loaded by MinGW builds")
+    else()
+        set_target_properties(nxformat::static_nozstd PROPERTIES IMPORTED_GLOBAL TRUE)
+        set_property(TARGET nxformat::static_nozstd APPEND PROPERTY INTERFACE_LINK_LIBRARIES zstd::zstd)
+        if (MSVC)
+            # The library is built against the release DLL runtime (/MD); Debug builds use /MDd.
+            set_property(TARGET nxformat::static_nozstd APPEND PROPERTY INTERFACE_LINK_OPTIONS
+                "$<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt>")
+        endif()
+        target_link_libraries(lichii_nxformat INTERFACE nxformat::static_nozstd)
     endif()
     message(STATUS "nxformat ${nxformat_VERSION}: ${root}")
 endfunction()

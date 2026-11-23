@@ -5,15 +5,16 @@
 
 #include <string_view>
 #include <QDate>
-#include <QDialog>
 #include <QList>
+
+#include "lichii/spotlight/dialog.h"
 
 class QLabel;
 class QScrollArea;
 class QToolButton;
 class QVBoxLayout;
 
-class WhatsNewDialog final : public QDialog {
+class WhatsNewDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -48,6 +49,7 @@ private:
     QLabel* metadata{};
     QLabel* summary{};
     QScrollArea* scroll{};
+    QWidget* highlight_card{};
     QVBoxLayout* highlights{};
     QToolButton* previous{};
     QToolButton* next{};

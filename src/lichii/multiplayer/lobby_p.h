@@ -7,10 +7,12 @@
 #pragma once
 
 #include <utility>
+#include <QIcon>
 #include <QPixmap>
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include "common/common_types.h"
+#include "lichii/spotlight/theme.h"
 
 namespace Column {
 enum List {
@@ -42,8 +44,9 @@ public:
 
     QVariant data(int role) const override {
         if (role == Qt::DecorationRole) {
-            bool has_password = data(PasswordRole).toBool();
-            return has_password ? QIcon::fromTheme(QStringLiteral("lock")).pixmap(16) : QIcon();
+            static const QIcon lock =
+                Spotlight::Icon(u"lock-simple", Spotlight::Color::Warning(), 15);
+            return data(PasswordRole).toBool() ? lock : QIcon();
         }
         if (role != Qt::DisplayRole) {
             return LobbyItem::data(role);
@@ -88,28 +91,16 @@ public:
     static const int GameIconRole = Qt::UserRole + 3;
 
     LobbyItemGame() = default;
-    explicit LobbyItemGame(u64 title_id, QString game_name, QPixmap smdh_icon) {
+    explicit LobbyItemGame(u64 title_id, QString game_name, const QIcon& game_icon) {
         setData(static_cast<unsigned long long>(title_id), TitleIDRole);
         setData(game_name, GameNameRole);
-        if (!smdh_icon.isNull()) {
-            setData(smdh_icon, GameIconRole);
-        } else {
-            setData(QIcon::fromTheme(QStringLiteral("chip")).pixmap(32), GameIconRole);
-        }
+        setData(game_icon.isNull() ? QIcon::fromTheme(QStringLiteral("chip")) : game_icon,
+                GameIconRole);
     }
 
     QVariant data(int role) const override {
         if (role == Qt::DecorationRole) {
-            auto val = data(GameIconRole);
-            if (val.isValid()) {
-                val = val.value<QPixmap>().scaled(32, 32, Qt::KeepAspectRatio,
-                                                  Qt::TransformationMode::SmoothTransformation);
-            } else {
-                auto blank_image = QPixmap(32, 32);
-                blank_image.fill(Qt::black);
-                val = blank_image;
-            }
-            return val;
+            return data(GameIconRole);
         } else if (role != Qt::DisplayRole) {
             return LobbyItem::data(role);
         }

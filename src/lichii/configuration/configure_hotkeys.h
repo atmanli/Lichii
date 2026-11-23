@@ -40,17 +40,25 @@ public:
      */
     void Populate(const HotkeyRegistry& registry);
 
+    QStandardItemModel* Model() const {
+        return model;
+    }
+    /// Asks for a new binding for the keyboard or controller column of an action.
+    void Configure(QModelIndex index);
+    /// Restores both bindings of an action to their defaults.
+    void RestoreAction(QModelIndex index);
+    bool IsDefault(QModelIndex index) const;
+    void RestoreDefaults();
+    void ClearAll();
+
 private:
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
 
-    void Configure(QModelIndex index);
     void ConfigureController(QModelIndex index);
     std::pair<bool, QString> IsUsedKey(QKeySequence key_sequence) const;
     std::pair<bool, QString> IsUsedControllerKey(const QString& key_sequence) const;
 
-    void RestoreDefaults();
-    void ClearAll();
     void PopupContextMenu(const QPoint& menu_location);
     void RestoreControllerHotkey(QModelIndex index);
     void RestoreHotkey(QModelIndex index);

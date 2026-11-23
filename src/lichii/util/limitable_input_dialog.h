@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QDialogButtonBox;
 class QLabel;
@@ -10,7 +10,7 @@ class QLineEdit;
 
 /// A QDialog that functions similarly to QInputDialog, however, it allows
 /// restricting the minimum and total number of characters that can be entered.
-class LimitableInputDialog final : public QDialog {
+class LimitableInputDialog final : public Spotlight::Dialog {
     Q_OBJECT
 public:
     explicit LimitableInputDialog(QWidget* parent = nullptr);

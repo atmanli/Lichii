@@ -7,9 +7,10 @@
 #include <string>
 #include <thread>
 
-#include <QDialog>
+#include <array>
 
 #include "common/common_types.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace Core {
 class System;
@@ -25,6 +26,10 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 
+namespace Spotlight {
+class Notice;
+}
+
 /// True when the title has a shader precache file.
 bool ShaderWarmFilesExist(u64 title_id);
 
@@ -37,9 +42,9 @@ bool SetShaderWarmRequested(u64 title_id, bool requested);
 /// Removes the title's precache files. Returns false and fills `error` on failure.
 bool DeleteShaderWarmFiles(u64 title_id, std::string& error);
 
-/// Window that builds a game's shader precache file on a worker thread and shows the stage, the
+/// Window that builds a game's shader precache file on a worker thread and shows its stages, the
 /// progress and the result. Closing it while it works stops the build first.
-class ShaderWarmDialog : public QDialog {
+class ShaderWarmDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -72,9 +77,19 @@ private:
     std::filesystem::path game_path;
     u64 title_id;
 
-    QLabel* stage_label{};
+    struct Stage {
+        QLabel* tile;
+        QLabel* name;
+        QLabel* value;
+    };
+
+    void SetStage(int index, const QString& value);
+
+    std::array<Stage, 5> stages{};
+    int current_stage = -1;
     QProgressBar* progress_bar{};
-    QLabel* result_label{};
+    Spotlight::Notice* result_notice{};
+    QLabel* footer{};
     QPushButton* button{};
 
     bool running{};

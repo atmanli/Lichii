@@ -3,14 +3,18 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <mutex>
 #include <QApplication>
 #include <QDialogButtonBox>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPainterPath>
 #include <QScrollArea>
 #include <QStandardItemModel>
+#include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QVBoxLayout>
 #include "common/fs/path_util.h"
@@ -21,6 +25,9 @@
 #include "lichii/applets/qt_profile_select.h"
 #include "lichii/main_window.h"
 #include "lichii/util/controller_navigation.h"
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 namespace {
 QString FormatUserEntryText(const QString& username, Common::UUID uuid) {
@@ -48,24 +55,120 @@ QPixmap GetIcon(Common::UUID uuid) {
 
     return icon.scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
+
+constexpr int NameRole = Qt::UserRole + 1;
+constexpr int UuidRole = Qt::UserRole + 2;
+constexpr int UserRowHeight = 58;
+constexpr int VisibleUserRows = 5;
+
+class UserDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex&) const override {
+        return {option.rect.width(), UserRowHeight};
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const auto* view = qobject_cast<const QAbstractItemView*>(option.widget);
+        QRect row = option.rect;
+        if (view) {
+            row.setWidth(view->viewport()->width() - row.left());
+        }
+        const bool first = index.row() == 0;
+        const bool last = index.row() + 1 == index.model()->rowCount();
+        const bool selected = option.state & QStyle::State_Selected;
+        if (selected || option.state & QStyle::State_MouseOver) {
+            const QRectF area = QRectF(row).adjusted(1, 1, -1, -1);
+            const qreal top = first ? Spotlight::Radius::Inset - 2 : 0;
+            const qreal bottom = last ? Spotlight::Radius::Inset - 2 : 0;
+            QPainterPath path;
+            path.moveTo(area.left(), area.top() + top);
+            path.arcTo(area.left(), area.top(), top * 2, top * 2, 180, -90);
+            path.lineTo(area.right() - top, area.top());
+            path.arcTo(area.right() - top * 2, area.top(), top * 2, top * 2, 90, -90);
+            path.lineTo(area.right(), area.bottom() - bottom);
+            path.arcTo(area.right() - bottom * 2, area.bottom() - bottom * 2, bottom * 2,
+                       bottom * 2, 0, -90);
+            path.lineTo(area.left() + bottom, area.bottom());
+            path.arcTo(area.left(), area.bottom() - bottom * 2, bottom * 2, bottom * 2, 270, -90);
+            path.closeSubpath();
+            if (selected) {
+                painter->setPen(QPen(Spotlight::Color::Accent(), 2));
+                painter->setBrush(Spotlight::Color::AccentSoft());
+            } else {
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(Spotlight::Color::FillFaint());
+            }
+            painter->drawPath(path);
+        }
+        const bool next_selected =
+            view && view->selectionModel()->isRowSelected(index.row() + 1, {});
+        if (!last && !selected && !next_selected) {
+            painter->fillRect(QRect(row.left() + 18, row.bottom(), row.width() - 36, 1),
+                              Spotlight::Color::Divider());
+        }
+        const QRectF avatar(row.left() + 14, row.top() + (row.height() - 38) / 2.0, 38, 38);
+        Spotlight::PaintWholeIcon(*painter, avatar,
+                                  index.data(Qt::DecorationRole).value<QIcon>().pixmap(64, 64),
+                                  Spotlight::Radius::Row);
+        const int text_left = row.left() + 14 + 38 + 12;
+        const int text_right = row.right() - 14 - (selected ? 16 + 12 : 0);
+        const int text_width = text_right - text_left;
+        const QFont name_font = Spotlight::Font(14, 600);
+        const QFont uuid_font = Spotlight::Font(12, 400);
+        const int text_top = row.top() + (row.height() - 19 - 2 - 16) / 2;
+        painter->setFont(name_font);
+        painter->setPen(Spotlight::Color::Text());
+        painter->drawText(QRect(text_left, text_top, text_width, 19),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(name_font).elidedText(index.data(NameRole).toString(),
+                                                             Qt::ElideRight, text_width));
+        painter->setFont(uuid_font);
+        painter->setPen(Spotlight::Color::TextSecondary());
+        painter->drawText(QRect(text_left, text_top + 21, text_width, 16),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(uuid_font).elidedText(index.data(UuidRole).toString(),
+                                                             Qt::ElideRight, text_width));
+        if (selected) {
+            const qreal ratio = painter->device()->devicePixelRatioF();
+            painter->drawPixmap(
+                QPointF(row.right() - 14 - 16, row.top() + (row.height() - 16) / 2.0),
+                Spotlight::IconPixmap(u"check", 16, Spotlight::Color::Accent(), ratio));
+        }
+        painter->restore();
+    }
+};
 } // Anonymous namespace
 
 QtProfileSelectionDialog::QtProfileSelectionDialog(
     Core::System& system, QWidget* parent,
     const Core::Frontend::ProfileSelectParameters& parameters)
-    : QDialog(parent), profile_manager{system.GetProfileManager()} {
+    : Spotlight::Dialog(parent), profile_manager{system.GetProfileManager()} {
+    SetIcon(u"users", Spotlight::Color::Info());
+    SetCardWidth(425);
     outer_layout = new QVBoxLayout(this);
+    outer_layout->setContentsMargins(0, 0, 0, 0);
+    outer_layout->setSpacing(0);
 
-    instruction_label = new QLabel();
+    users_label = new QLabel(tr("Users"));
+    users_label->setFont(Spotlight::Font(13, 600));
+    Spotlight::SetTextColor(users_label, Spotlight::Color::TextSecondary());
 
     scroll_area = new QScrollArea;
+    scroll_area->setFrameShape(QFrame::NoFrame);
 
     buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
     connect(buttons, &QDialogButtonBox::accepted, this, &QtProfileSelectionDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QtProfileSelectionDialog::reject);
 
-    outer_layout->addWidget(instruction_label);
+    outer_layout->addWidget(users_label);
+    outer_layout->addSpacing(8);
     outer_layout->addWidget(scroll_area);
+    outer_layout->addSpacing(14);
     outer_layout->addWidget(buttons);
 
     layout = new QVBoxLayout(scroll_area);
@@ -74,7 +177,15 @@ QtProfileSelectionDialog::QtProfileSelectionDialog(
     tree_view->setModel(item_model);
     controller_navigation = new ControllerNavigation(system.HIDCore(), this);
 
-    tree_view->setAlternatingRowColors(true);
+    tree_view->setHeaderHidden(true);
+    tree_view->setRootIsDecorated(false);
+    tree_view->setItemDelegate(new UserDelegate(tree_view));
+    tree_view->setMouseTracking(true);
+    tree_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    tree_view->setStyleSheet(QStringLiteral(
+        "QTreeView { background-color: rgba(255, 255, 255, 13); border: 1px solid "
+        "rgba(255, 255, 255, 20); border-radius: 18px; padding: 0; }"
+        "QTreeView::item:hover, QTreeView::item:selected { background: transparent; }"));
     tree_view->setSelectionMode(QHeaderView::SingleSelection);
     tree_view->setSelectionBehavior(QHeaderView::SelectRows);
     tree_view->setVerticalScrollMode(QHeaderView::ScrollPerPixel);
@@ -97,6 +208,8 @@ QtProfileSelectionDialog::QtProfileSelectionDialog(
     layout->addWidget(tree_view);
 
     connect(tree_view, &QTreeView::clicked, this, &QtProfileSelectionDialog::SelectUser);
+    connect(tree_view->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            &QtProfileSelectionDialog::SelectUser);
     connect(tree_view, &QTreeView::doubleClicked, this, &QtProfileSelectionDialog::accept);
     connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent,
             [this](Qt::Key key) {
@@ -117,16 +230,24 @@ QtProfileSelectionDialog::QtProfileSelectionDialog(
         const auto username = Common::StringFromFixedZeroTerminatedBuffer(
             reinterpret_cast<const char*>(profile.username.data()), profile.username.size());
 
-        list_items.push_back(QList<QStandardItem*>{new QStandardItem{
-            GetIcon(user), FormatUserEntryText(QString::fromStdString(username), user)}});
+        auto* item = new QStandardItem{GetIcon(user),
+                                       FormatUserEntryText(QString::fromStdString(username), user)};
+        item->setData(QString::fromStdString(username), NameRole);
+        item->setData(QString::fromStdString(user.FormattedString()), UuidRole);
+        list_items.push_back(QList<QStandardItem*>{item});
     }
 
     for (const auto& item : list_items)
         item_model->appendRow(item);
 
+    tree_view->ensurePolished();
+    const int rows = std::clamp(item_model->rowCount(), 1, VisibleUserRows);
+    tree_view->setFixedHeight(rows * UserRowHeight + 2 * tree_view->frameWidth());
+    scroll_area->setFixedHeight(tree_view->height());
+    tree_view->setCurrentIndex(item_model->index(user_index, 0));
+
     SetWindowTitle(parameters);
     SetDialogPurpose(parameters);
-    resize(550, 400);
 }
 
 QtProfileSelectionDialog::~QtProfileSelectionDialog() {
@@ -139,6 +260,7 @@ int QtProfileSelectionDialog::exec() {
         user_index = 0;
         return QDialog::Accepted;
     }
+    setWindowFlag(Qt::FramelessWindowHint);
     return QDialog::exec();
 }
 
@@ -196,35 +318,35 @@ void QtProfileSelectionDialog::SetDialogPurpose(
 
     switch (parameters.purpose) {
     case UserSelectionPurpose::GameCardRegistration:
-        instruction_label->setText(tr("Who will receive the points?"));
+        SetSubtitle(tr("Who will receive the points?"));
         return;
     case UserSelectionPurpose::EShopLaunch:
-        instruction_label->setText(tr("Who is using Nintendo eShop?"));
+        SetSubtitle(tr("Who is using Nintendo eShop?"));
         return;
     case UserSelectionPurpose::EShopItemShow:
-        instruction_label->setText(tr("Who is making this purchase?"));
+        SetSubtitle(tr("Who is making this purchase?"));
         return;
     case UserSelectionPurpose::PicturePost:
-        instruction_label->setText(tr("Who is posting?"));
+        SetSubtitle(tr("Who is posting?"));
         return;
     case UserSelectionPurpose::NintendoAccountLinkage:
-        instruction_label->setText(tr("Select a user to link to a Nintendo Account."));
+        SetSubtitle(tr("Select a user to link to a Nintendo Account."));
         return;
     case UserSelectionPurpose::SettingsUpdate:
-        instruction_label->setText(tr("Change settings for which user?"));
+        SetSubtitle(tr("Change settings for which user?"));
         return;
     case UserSelectionPurpose::SaveDataDeletion:
-        instruction_label->setText(tr("Format data for which user?"));
+        SetSubtitle(tr("Format data for which user?"));
         return;
     case UserSelectionPurpose::UserMigration:
-        instruction_label->setText(tr("Which user will be transferred to another console?"));
+        SetSubtitle(tr("Which user will be transferred to another console?"));
         return;
     case UserSelectionPurpose::SaveDataTransfer:
-        instruction_label->setText(tr("Send save data for which user?"));
+        SetSubtitle(tr("Send save data for which user?"));
         return;
     case UserSelectionPurpose::General:
     default:
-        instruction_label->setText(tr("Select a user:"));
+        SetSubtitle(tr("Select a user:"));
         return;
     }
 }

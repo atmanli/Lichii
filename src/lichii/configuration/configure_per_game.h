@@ -10,8 +10,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <QByteArray>
 #include <QDialog>
 #include <QFutureWatcher>
 #include <QImage>
@@ -45,7 +47,7 @@ class ConfigureSystem;
 class ConfigureNetwork;
 class ConfigureApplets;
 
-class QGraphicsScene;
+class QLabel;
 class QStandardItem;
 class QStandardItemModel;
 class QTreeView;
@@ -53,6 +55,10 @@ class QVBoxLayout;
 
 namespace Ui {
 class ConfigurePerGame;
+}
+
+namespace Spotlight {
+class SettingsPage;
 }
 
 class ConfigurePerGame : public QDialog {
@@ -83,18 +89,42 @@ public:
         return title_changed;
     }
 
+    /// An icon picked for a NUP or NX game, as a 256x256 JPEG: it is written into the game file
+    /// once Game Settings has closed and released the file.
+    std::optional<QByteArray> TakeArchiveIcon() {
+        return std::exchange(archive_icon, std::nullopt);
+    }
+
+    /// The user asked to edit the title and icon stored in the game file.
+    bool ArchiveEditRequested() const {
+        return archive_edit_requested;
+    }
+
 signals:
     void BrowseModsRequested();
+    void OpenSaveDataRequested();
 
     /// The custom artwork was saved or removed.
     void CustomArtworkChanged(u64 program_id);
 
 private:
     void done(int result) override;
+    void reject() override;
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
 
-    void HandleApplyButtonClicked();
+    void BuildSettings();
+    void BuildAddons(int mods, int updates);
+    void RebuildAddons();
+    void AddPresetRow(QVBoxLayout* section);
+    void BuildNativeModes(int category);
+    void BuildInfoPage(int category);
+    void BuildArtworkPage(int category);
+    /// Shown on the Artwork page: a warning when detection finds nothing, an error when saving
+    /// fails.
+    void ShowArtworkProblem(const QString& text, bool error);
+    void UpdateModsSummary();
+    void UpdateSpotlightIdentity();
 
     void LoadConfiguration();
     void UpdateIconPreview(const QPixmap& map);
@@ -117,6 +147,11 @@ private:
     std::filesystem::path file_path;
     const u64 title_id;
     bool is_nup_file{false};
+    /// NUP and NX files take the icon inside them; other formats keep it for this PC only.
+    bool icon_in_file{false};
+    std::optional<QByteArray> archive_icon;
+    bool archive_edit_requested{false};
+    QLabel* icon_destination = nullptr;
     std::string original_title;
     std::string initial_title;
     std::optional<QString> renamed_title;
@@ -125,16 +160,36 @@ private:
     /// The game's own icon, shown again when the custom artwork is removed.
     QPixmap file_icon;
     bool has_custom_icon{false};
-    /// The saved custom artwork is deleted on Apply or OK.
+    /// The saved custom artwork is deleted when Game Settings closes.
     bool remove_custom_icon{false};
     QFutureWatcher<DetectIconResult> detect_watcher;
     std::shared_ptr<std::atomic_bool> detect_cancel;
 
-    QGraphicsScene* scene;
+    Spotlight::SettingsPage* settings_page = nullptr;
+    QLabel* game_banner_icon = nullptr;
+    QLabel* game_banner_title = nullptr;
+    QLabel* game_banner_summary = nullptr;
+    QLabel* game_banner_version = nullptr;
+    int artwork_category = -1;
+    QLabel* artwork_image = nullptr;
+    QLabel* info_image = nullptr;
+    QWidget* artwork_detecting = nullptr;
+    QWidget* artwork_problem = nullptr;
+    QLabel* artwork_problem_text = nullptr;
+    QLabel* update_summary = nullptr;
+    QList<QLabel*> mods_summaries;
+    QVBoxLayout* store_rows = nullptr;
+    QLabel* store_header = nullptr;
+    QLabel* own_header = nullptr;
+    QVBoxLayout* own_rows = nullptr;
+    QVBoxLayout* content_rows = nullptr;
+    bool addons_queued = false;
+    QPixmap shown_icon;
 
     std::unique_ptr<QtConfig> game_config;
 
     Core::System& system;
+    const std::vector<VkDeviceInfo::Record>& devices;
     std::unique_ptr<ConfigurationShared::Builder> builder;
     std::shared_ptr<std::vector<ConfigurationShared::Tab*>> tab_group;
 

@@ -7,7 +7,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QItemSelection;
 class QModelIndex;
@@ -31,7 +31,7 @@ namespace Ui {
 class ConfigureTouchFromButton;
 }
 
-class ConfigureTouchFromButton : public QDialog {
+class ConfigureTouchFromButton : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -51,7 +51,6 @@ public slots:
     void SetCoordinates(int dot_id, const QPoint& pos);
 
 protected:
-    void showEvent(QShowEvent* ev) override;
     void keyPressEvent(QKeyEvent* event) override;
 
 private slots:

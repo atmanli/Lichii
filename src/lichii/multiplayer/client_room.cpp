@@ -19,11 +19,22 @@
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/moderation_dialog.h"
 #include "lichii/multiplayer/state.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 ClientRoomWindow::ClientRoomWindow(QWidget* parent)
-    : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
-      ui(std::make_unique<Ui::ClientRoom>()) {
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::ClientRoom>()) {
     ui->setupUi(this);
+    SetIcon(u"chat-circle", Spotlight::Color::Success());
+    resize(868, 490);
+    ui->description->setFont(Spotlight::Font(14, 400));
+    Spotlight::SetTextColor(ui->description, QColor(0xff, 0xff, 0xff, 0xb8));
+    ui->moderation->setIcon(Spotlight::Icon(u"shield", Spotlight::Color::Text(), 16));
+    ui->disconnect->setProperty("kind", QStringLiteral("destructive"));
+    ui->disconnect->setIcon(Spotlight::Icon(u"sign-out", Spotlight::Color::AccentLight(), 16));
+    for (auto* button : {ui->moderation, ui->disconnect}) {
+        button->setMinimumHeight(40);
+    }
     ui->chat->Initialize();
 
     // setup the callbacks for network updates
@@ -77,7 +88,7 @@ void ClientRoomWindow::OnStateChange(const Network::RoomMember::State& state) {
     if (state == Network::RoomMember::State::Joined ||
         state == Network::RoomMember::State::Moderator) {
         ui->chat->Clear();
-        ui->chat->AppendStatusMessage(tr("Connected"));
+        ui->chat->AppendStatusMessage(tr("Connected"), true);
         SetModPerms(state == Network::RoomMember::State::Moderator);
     }
     UpdateView();
@@ -99,11 +110,12 @@ void ClientRoomWindow::UpdateView() {
             auto memberlist = member->GetMemberInformation();
             ui->chat->SetPlayerList(memberlist);
             const auto information = member->GetRoomInformation();
-            setWindowTitle(QString(tr("%1 - %2 (%3/%4 members) - connected"))
-                               .arg(QString::fromStdString(information.name))
-                               .arg(QString::fromStdString(information.preferred_game.name))
-                               .arg(memberlist.size())
-                               .arg(information.member_slots));
+            setWindowTitle(
+                tr("%1 · %2").arg(QString::fromStdString(information.name),
+                                  QString::fromStdString(information.preferred_game.name)));
+            SetSubtitle(tr("%1/%2 members · connected")
+                            .arg(memberlist.size())
+                            .arg(information.member_slots));
             ui->description->setText(QString::fromStdString(information.description));
             return;
         }

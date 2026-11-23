@@ -76,8 +76,12 @@ public:
         auto candidate = destination.parent_path() / name;
         auto new_stage = candidate / "new";
         auto new_backup = candidate / "backup";
-        fs::create_directories(destination.parent_path());
-        if (!fs::create_directory(candidate)) {
+        std::error_code ec;
+        fs::create_directories(destination.parent_path(), ec);
+        if (ec) {
+            throw std::runtime_error("Could not create the save parent directory");
+        }
+        if (!fs::create_directory(candidate, ec) || ec) {
             throw std::runtime_error("Save staging folder already exists");
         }
         stage = std::move(new_stage);
@@ -87,40 +91,68 @@ public:
 
     void CopyFrom(const fs::path& source) {
         Prepare();
-        fs::create_directory(stage);
-        for (const auto& entry : fs::recursive_directory_iterator(source)) {
+        std::error_code ec;
+        fs::create_directory(stage, ec);
+        if (ec) {
+            throw std::runtime_error("Could not create the staged save directory");
+        }
+        for (fs::recursive_directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto& entry = *it;
             const auto target = stage / entry.path().lexically_relative(source);
-            const auto type = entry.symlink_status().type();
+            const auto type = entry.symlink_status(ec).type();
+            if (ec) {
+                throw std::runtime_error("Could not inspect a save entry");
+            }
             if (IsSymlink(entry.path())) {
                 throw std::runtime_error("Save data contains a link");
             }
             if (type == fs::file_type::directory) {
-                fs::create_directory(target);
+                fs::create_directory(target, ec);
+                if (ec) {
+                    throw std::runtime_error("Could not create a staged save subdirectory");
+                }
             } else if (type == fs::file_type::regular) {
-                fs::copy_file(entry.path(), target);
+                fs::copy_file(entry.path(), target, ec);
+                if (ec) {
+                    throw std::runtime_error("Could not copy a save file into the stage");
+                }
             } else {
                 throw std::runtime_error("Save data contains a special file");
             }
+        }
+        if (ec) {
+            throw std::runtime_error("Could not read the source save directory");
         }
     }
 
     void LinkTo(const fs::path& source, RyujinxLinkCreator create_link) {
         Prepare();
         staged_link = true;
-        if (!create_link(source, stage) || !IsSymlink(stage) || !fs::equivalent(source, stage)) {
+        std::error_code ec;
+        if (!create_link(source, stage) || !IsSymlink(stage) || !fs::equivalent(source, stage, ec) ||
+            ec) {
             throw std::runtime_error("Could not create the temporary save link");
         }
     }
 
+    // Prefer error_code filesystem APIs and same-TU std::runtime_error. Under -fno-rtti,
+    // catch (const std::exception&) does not match libc++ std::filesystem::filesystem_error.
     void Publish() {
+        std::error_code ec;
         if (had_destination) {
-            fs::rename(destination, backup);
+            fs::rename(destination, backup, ec);
+            if (ec) {
+                throw std::runtime_error("Could not move the existing save aside");
+            }
             has_backup = true;
         }
         if (Exists(destination)) {
             throw std::runtime_error("The destination changed during save linking");
         }
-        fs::rename(stage, destination);
+        fs::rename(stage, destination, ec);
+        if (ec) {
+            throw std::runtime_error("Could not publish the staged save");
+        }
         published = true;
     }
 
@@ -130,7 +162,7 @@ public:
             fs::rename(destination, stage, ec);
         }
         if (ec) {
-            throw fs::filesystem_error("Could not roll back the new save", destination, ec);
+            throw std::runtime_error("Could not roll back the new save");
         }
         if (has_backup) {
             if (Exists(destination)) {
@@ -138,7 +170,7 @@ public:
             }
             fs::rename(backup, destination, ec);
             if (ec) {
-                throw fs::filesystem_error("Could not restore the old save", destination, ec);
+                throw std::runtime_error("Could not restore the old save");
             }
             has_backup = false;
         }
@@ -305,6 +337,22 @@ RyujinxSaveResult UpdateRyujinxSave(const fs::path& lichii, const fs::path& ryuj
                 } catch (const std::exception& rollback_error) {
                     result.error += "\n";
                     result.error += rollback_error.what();
+                } catch (...) {
+                    result.error += "\nUnknown rollback exception";
+                }
+            }
+        }
+    } catch (...) {
+        result.error = "Unknown exception";
+        for (auto* replacement : {&lichii_swap, &ryujinx_swap}) {
+            if (*replacement) {
+                try {
+                    (*replacement)->RollBack();
+                } catch (const std::exception& rollback_error) {
+                    result.error += "\n";
+                    result.error += rollback_error.what();
+                } catch (...) {
+                    result.error += "\nUnknown rollback exception";
                 }
             }
         }

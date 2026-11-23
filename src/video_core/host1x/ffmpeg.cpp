@@ -296,9 +296,10 @@ AVBufferRef* DownloadBufferPool::GetBuffer(size_t buffer_size) {
         return nullptr;
     }
     if (!m_pool) {
+        using BufferSize = decltype(AVBufferRef::size);
         m_remaining_allocations = std::min(max_buffers, max_bytes / buffer_size);
         // Only pool_get invokes the allocator. Frames can outlive this pool owner.
-        const auto allocate = [](void* opaque, size_t size) -> AVBufferRef* {
+        const auto allocate = [](void* opaque, BufferSize size) -> AVBufferRef* {
             auto& remaining = *static_cast<size_t*>(opaque);
             if (remaining == 0) {
                 return nullptr;
@@ -309,7 +310,8 @@ AVBufferRef* DownloadBufferPool::GetBuffer(size_t buffer_size) {
             }
             return buffer;
         };
-        m_pool = av_buffer_pool_init2(buffer_size, &m_remaining_allocations, allocate, nullptr);
+        m_pool = av_buffer_pool_init2(static_cast<BufferSize>(buffer_size),
+                                      &m_remaining_allocations, allocate, nullptr);
         if (!m_pool) {
             return nullptr;
         }

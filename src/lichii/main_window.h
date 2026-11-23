@@ -523,6 +523,7 @@ private:
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
     void UpdateMenuIcons();
+    void UpdateRefreshButtonIcon();
     void UpdateUISettings();
     void UpdateInputDrivers();
     void HideMouseCursor();
@@ -689,6 +690,8 @@ private:
     HotkeyRegistry hotkey_registry;
 
     QTranslator translator;
+    // Qt's own strings (macOS application menu, standard dialogs) live in qtbase_*.qm.
+    QTranslator qt_translator;
 
     // Install progress dialog
     QProgressDialog* install_progress = nullptr;

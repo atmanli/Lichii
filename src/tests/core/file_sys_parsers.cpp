@@ -23,9 +23,12 @@
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/crypto/key_manager.h"
+#include "core/crypto/xts_encryption_layer.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/errors.h"
+#include "core/file_sys/fssystem/fssystem_aes_ctr_storage.h"
+#include "core/file_sys/fssystem/fssystem_alignment_matching_storage.h"
 #include "core/file_sys/fssystem/fssystem_bucket_tree.h"
 #include "core/file_sys/fssystem/fssystem_compression_configuration.h"
 #include "core/file_sys/fssystem/fssystem_crypto_configuration.h"
@@ -39,6 +42,9 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/submission_package.h"
+#include "core/file_sys/vfs/vfs_concat.h"
+#include "core/file_sys/vfs/vfs_offset.h"
+#include "core/file_sys/vfs/vfs_static.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/loader/loader.h"
@@ -134,6 +140,57 @@ TEST_CASE("PFS0 rejects a table larger than the file without allocating it",
     Put(bytes, 8, u32{0xFFFFFFFF});
     PartitionFilesystem pfs{MakeFile(std::move(bytes))};
     REQUIRE(pfs.GetStatus() == Loader::ResultStatus::ErrorIncorrectPFSFileSize);
+}
+
+TEST_CASE("PFS0 reports an entry past the end of its file at its declared size",
+          "[core][file_sys]") {
+    auto bytes =
+        MakePfs0WithFiles({{"a", std::vector<u8>(0x100, 1)}, {"b", std::vector<u8>(0x100, 2)}});
+    bytes.pop_back();
+    const PartitionFilesystem truncated{MakeFile(std::move(bytes))};
+    REQUIRE(truncated.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(truncated.GetFile("a")->GetSize() == 0x100);
+    REQUIRE(truncated.GetFile("b")->GetSize() == 0x100);
+    REQUIRE(truncated.GetFileSizes().at("b") == 0x100);
+    REQUIRE(truncated.GetFile("a")->GetHeldSize() == 0x100);
+    REQUIRE(truncated.GetFile("b")->GetHeldSize() == 0xFF);
+}
+
+TEST_CASE("A range of a file holds only what its base holds from its offset", "[core][file_sys]") {
+    const auto base = MakeFile(std::vector<u8>(0x1000));
+    REQUIRE(OffsetVfsFile{base, 0x800, 0x400}.GetHeldSize() == 0x800);
+    REQUIRE(OffsetVfsFile{base, 0x2000, 0x400}.GetHeldSize() == 0xC00);
+    REQUIRE(OffsetVfsFile{base, 0x2000, 0x1000}.GetHeldSize() == 0);
+    REQUIRE(OffsetVfsFile{base, 0x2000, 0x3000}.GetHeldSize() == 0);
+    // Through a range of a range, as an NCA in a partition of an XCI is.
+    const auto outer = std::make_shared<OffsetVfsFile>(base, size_t{1} << 40, 0x100);
+    REQUIRE(outer->GetSize() == size_t{1} << 40);
+    REQUIRE(OffsetVfsFile{outer, size_t{1} << 39, 0x200}.GetHeldSize() == 0xD00);
+}
+
+TEST_CASE("Held size passes through concatenations, encryption layers and storages, and made-up "
+          "bytes hold nothing",
+          "[core][file_sys]") {
+    const auto claimed =
+        std::make_shared<OffsetVfsFile>(MakeFile(std::vector<u8>(0x200)), size_t{1} << 41, 0);
+    const auto zeros = std::make_shared<StaticVfsFile>(u8{0}, 0x1000);
+    REQUIRE(zeros->GetHeldSize() == 0);
+
+    const auto concat = ConcatenatedVfsFile::MakeConcatenatedFile(
+        "concat", std::vector<VirtualFile>{MakeFile(std::vector<u8>(0x100)), zeros, claimed});
+    REQUIRE(concat->GetSize() == 0x100 + 0x1000 + (size_t{1} << 41));
+    REQUIRE(concat->GetHeldSize() == 0x100 + 0x200);
+    // What parts hold is never more than the concatenation's size, whatever the parts claim.
+    REQUIRE(concat->GetHeldSize() <= concat->GetSize());
+
+    REQUIRE(Core::Crypto::XTSEncryptionLayer{claimed, {}}.GetHeldSize() == 0x200);
+
+    static constexpr std::array<u8, AesCtrStorage::KeySize> key{4};
+    std::array<u8, AesCtrStorage::IvSize> iv{};
+    const auto ctr = std::make_shared<AlignmentMatchingStorage<NcaHeader::CtrBlockSize, 1>>(
+        std::make_shared<AesCtrStorage>(claimed, key.data(), key.size(), iv.data(), iv.size()));
+    REQUIRE(ctr->GetSize() == size_t{1} << 41);
+    REQUIRE(ctr->GetHeldSize() == 0x200);
 }
 
 TEST_CASE("PFS0 with more than 65535 entries reads every entry", "[core][file_sys]") {

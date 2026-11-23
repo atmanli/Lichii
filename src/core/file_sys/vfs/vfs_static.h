@@ -27,6 +27,11 @@ public:
         return size;
     }
 
+    // Every byte is made up: none comes from stored data.
+    std::size_t GetHeldSize() const override {
+        return 0;
+    }
+
     bool Resize(std::size_t new_size) override {
         size = new_size;
         return true;

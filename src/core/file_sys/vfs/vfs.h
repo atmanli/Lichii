@@ -103,6 +103,11 @@ public:
     virtual std::string GetExtension() const;
     // Retrieves the size of the file.
     virtual std::size_t GetSize() const = 0;
+    // Retrieves how many of the file's bytes come from stored data. A file that is a range of
+    // another, as an entry of a container is, can claim more than its base holds, and bytes a
+    // file makes up, such as zero filling, hold nothing; code about to allocate by a size that a
+    // file's contents give bounds it by this. Defaults to GetSize().
+    virtual std::size_t GetHeldSize() const;
     // Resizes the file to new_size. Returns whether or not the operation was successful.
     virtual bool Resize(std::size_t new_size) = 0;
     // Gets a pointer to the directory containing this file, returning nullptr if there is none.

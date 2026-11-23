@@ -73,6 +73,10 @@ public:
     virtual size_t GetSize() const override {
         return m_base_storage->GetSize();
     }
+
+    virtual size_t GetHeldSize() const override {
+        return m_base_storage->GetHeldSize();
+    }
 };
 
 template <size_t BufferAlign_>
@@ -129,6 +133,10 @@ public:
 
     virtual size_t GetSize() const override {
         return m_base_storage->GetSize();
+    }
+
+    virtual size_t GetHeldSize() const override {
+        return m_base_storage->GetHeldSize();
     }
 };
 

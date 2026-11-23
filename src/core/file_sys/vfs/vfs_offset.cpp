@@ -21,6 +21,11 @@ std::size_t OffsetVfsFile::GetSize() const {
     return size;
 }
 
+std::size_t OffsetVfsFile::GetHeldSize() const {
+    const std::size_t held = file->GetHeldSize();
+    return offset < held ? std::min(size, held - offset) : 0;
+}
+
 bool OffsetVfsFile::Resize(std::size_t new_size) {
     if (offset + new_size < file->GetSize()) {
         size = new_size;

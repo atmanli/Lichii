@@ -113,4 +113,8 @@ size_t AesCtrStorage::GetSize() const {
     return m_base_storage->GetSize();
 }
 
+size_t AesCtrStorage::GetHeldSize() const {
+    return m_base_storage->GetHeldSize();
+}
+
 } // namespace FileSys

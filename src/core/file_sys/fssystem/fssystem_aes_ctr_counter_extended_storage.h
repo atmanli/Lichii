@@ -98,6 +98,10 @@ public:
         return offsets.end_offset;
     }
 
+    virtual size_t GetHeldSize() const override {
+        return std::min(this->GetSize(), m_data_storage->GetHeldSize());
+    }
+
     Result GetEntryList(Entry* out_entries, s32* out_entry_count, s32 entry_count, s64 offset,
                         s64 size);
 

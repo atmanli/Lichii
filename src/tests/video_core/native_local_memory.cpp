@@ -108,7 +108,7 @@ TEST_CASE("Native local memory maps the Fast Fusion stack inside its high alloca
 
 TEST_CASE("Native low and high local allocations occupy disjoint host words",
           "[video_core][native_local_memory]") {
-    for (const auto [address, word] : std::array<std::pair<u32, u32>, 4>{
+    for (const auto& [address, word] : std::array<std::pair<u32, u32>, 4>{
              {{0xffffe0, 0}, {0xfffffff0, 4}, {0, 8}, {12, 11}}}) {
         LocalMachine machine{16, 32};
         machine.StoreLoad(address, word);

@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <random>
 #include <span>
@@ -1244,11 +1245,13 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
     std::function<bool(std::size_t, std::size_t)> progress_callback) const {
     // Each member is read from its extent in chunks and hashed as it goes: a compressed one is
     // decoded on the way, as one zstd stream (the format has no dictionary or seek table), not
-    // through the decompression cache. Nothing is sized by a record's size, which a damaged file
-    // can set to anything, nothing is written to disk, and nothing a running game cached is
-    // evicted. The stream decoder keeps zstd's default window limit (128 MiB); a frame that asks
-    // for more is hashed through the reader instead, so a member verifies exactly when it can be
-    // read and its hash matches.
+    // through the game's decompression cache. Nothing is written to disk and nothing a running
+    // game cached is evicted. The stream decoder keeps zstd's default window limit (128 MiB) and
+    // sizes nothing by a record's size, which a damaged file can set to anything. A frame that
+    // asks for more is refused for a member the reader spills, as reading it is, and otherwise
+    // hashed through the reader with a cache of the verification's own, which holds the member
+    // whole (at most half the cache cap, whatever its record says) until it ends; so a member
+    // verifies exactly when it can be read and its hash matches.
     constexpr std::size_t InputChunk = 1 << 20;
     constexpr std::size_t ReportStep = 4 << 20;
     // Progress is in extent bytes, which the open checked against the file.
@@ -1312,6 +1315,13 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
         if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
             return fail("the hash could not be started");
         }
+        if (compressed && !dctx) {
+            // Freed by a large-window member before this one.
+            dctx.reset(ZSTD_createDCtx());
+            if (!dctx) {
+                return fail("a decoder could not be created");
+            }
+        }
         if (compressed && ZSTD_isError(ZSTD_DCtx_reset(dctx.get(), ZSTD_reset_session_only))) {
             return fail("the decoder could not be reset");
         }
@@ -1369,32 +1379,43 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
             }
         }
         if (through_reader) {
-            // A frame wants a window above the stream decoder's limit: hash what the reader reads,
-            // which accepts such a frame for a member it decodes in memory and refuses it
-            // otherwise, as it does when the member is read. It reads through a cache of its own
-            // with the container's cap, so it decides the same way, and evicts nothing a running
-            // game cached; what it decodes or spills is freed when the member ends.
+            // A frame wants a window above the stream decoder's limit. A member the reader spills
+            // keeps that limit and is refused at the same frame, so it fails here as reading it
+            // does, with nothing decoded to disk. One it decodes in memory accepts the frame: hash
+            // what the reader reads, through a cache of its own with the container's cap, so
+            // nothing a running game cached is evicted. That costs the member's size (at most half
+            // the cap) and a decoder beside the game's cache until the member ends; the stream
+            // decoder's window is freed first, and an allocation that fails fails the check.
+            if (cache->Spills(node.size)) {
+                return fail(fmt::format("{} (a member this large is refused when read)",
+                                        ZSTD_getErrorName(last_result)));
+            }
+            dctx.reset();
             if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
                 return fail("the hash could not be started");
             }
-            const auto own_cache = std::make_shared<NupDecompressCache>();
-            own_cache->cap = cache->cap;
-            own_cache->spill_dir = cache->spill_dir;
-            NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
-                            own_cache, i);
-            for (u64 offset = 0; offset < node.size;) {
-                const auto length =
-                    static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));
-                if (view.Read(input.data(), length, static_cast<std::size_t>(offset)) != length) {
-                    return fail("the reader could not read it");
+            try {
+                const auto own_cache = std::make_shared<NupDecompressCache>();
+                own_cache->cap = cache->cap;
+                NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
+                                own_cache, i);
+                for (u64 offset = 0; offset < node.size;) {
+                    const auto length =
+                        static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));
+                    if (view.Read(input.data(), length, static_cast<std::size_t>(offset)) !=
+                        length) {
+                        return fail("the reader could not read it");
+                    }
+                    offset += length;
+                    if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
+                        return fail("the hash could not be updated");
+                    }
+                    if (!poll_output(length)) {
+                        return cancelled();
+                    }
                 }
-                offset += length;
-                if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
-                    return fail("the hash could not be updated");
-                }
-                if (!poll_output(length)) {
-                    return cancelled();
-                }
+            } catch (const std::bad_alloc&) {
+                return fail("not enough memory to decode it");
             }
             produced = node.size;
             last_result = 0;

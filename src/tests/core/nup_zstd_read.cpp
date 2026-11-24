@@ -594,33 +594,71 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
         }
         return frame;
     };
-    const auto game = Content(300 * 1024, 41);
-    const auto wide = Content(500 * 1024, 42);
-    Member game_member = ZstdMember(game);
-    game_member.sha256 = Sha256(game);
-    const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
-    TempDir t;
+    const auto member_of = [](const std::vector<u8>& content) {
+        Member member = ZstdMember(content);
+        member.sha256 = Sha256(content);
+        return member;
+    };
     SECTION("in memory") {
-        // 1 MiB holds the game's 300 KiB member, but not that and the 500 KiB one with its
-        // decoder: read through the game's cache, the retry would evict the game's member.
-        const auto backing = std::make_shared<CountingFile>(BuildNup({game_member, wide_member}));
-        NupContainer nup{backing, std::size_t{1} << 20, t.path};
+        // 2 MiB holds the game's two 700 KiB members, but not those and a third 700 KiB one even
+        // with no decoder charged: read through the game's cache, the retry would evict one.
+        const auto first = Content(700 * 1024, 41);
+        const auto second = Content(700 * 1024, 43);
+        const auto wide = Content(700 * 1024, 42);
+        const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
+        const auto backing = std::make_shared<CountingFile>(
+            BuildNup({member_of(first), member_of(second), wide_member}));
+        TempDir t;
+        NupContainer nup{backing, std::size_t{2} << 20, t.path};
         REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
-        const auto file = nup.OpenFile(0);
-        REQUIRE(ReadMatches(file, game, 0, game.size()));
+        const auto first_file = nup.OpenFile(0);
+        const auto second_file = nup.OpenFile(1);
+        REQUIRE(ReadMatches(first_file, first, 0, first.size()));
+        REQUIRE(ReadMatches(second_file, second, 0, second.size()));
         REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
         backing->reads = 0;
-        REQUIRE(ReadMatches(file, game, 0, game.size()));
+        REQUIRE(ReadMatches(first_file, first, 0, first.size()));
+        REQUIRE(ReadMatches(second_file, second, 0, second.size()));
         REQUIRE(backing->reads == 0);
     }
     SECTION("spilled") {
-        // 64 KiB spills both; the reader refuses the large window there, and leaves no temporary
-        // file behind for the rest of the container's life.
-        NupContainer nup{Backing(BuildNup({game_member, wide_member})), std::size_t{64} << 10,
-                         t.path};
+        // 64 KiB spills both. The game has read the start of a normal member, which keeps its
+        // temporary file and decoder; the large window is refused as reading it is, without
+        // writing anything there, and the game's member reads on as if nothing had happened.
+        const auto game = Content(std::size_t{2} << 20, 44);
+        const auto wide = Content(700 * 1024, 42);
+        const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
+        const auto bytes = BuildNup({member_of(game), wide_member});
+        const auto entries = [](const fs::path& dir) {
+            std::vector<fs::path> names;
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                names.push_back(entry.path().filename());
+            }
+            return names;
+        };
+        // The same reads on a container nobody verifies, for the backing reads they take.
+        const auto backing = std::make_shared<CountingFile>(bytes);
+        const auto control_backing = std::make_shared<CountingFile>(bytes);
+        TempDir t;
+        TempDir control_dir;
+        NupContainer nup{backing, std::size_t{64} << 10, t.path};
+        NupContainer control{control_backing, std::size_t{64} << 10, control_dir.path};
         REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(control.GetStatus() == Loader::ResultStatus::Success);
+        const auto file = nup.OpenFile(0);
+        const auto control_file = control.OpenFile(0);
+        REQUIRE(ReadMatches(file, game, 0, 8 * 1024));
+        REQUIRE(ReadMatches(control_file, game, 0, 8 * 1024));
+        const auto before = entries(t.path);
+        REQUIRE(before.size() == 1);
         REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
-        REQUIRE(fs::is_empty(t.path));
+        REQUIRE(entries(t.path) == before);
+        backing->reads = 0;
+        control_backing->reads = 0;
+        REQUIRE(ReadMatches(file, game, 8 * 1024, 64 * 1024));
+        REQUIRE(ReadMatches(control_file, game, 8 * 1024, 64 * 1024));
+        REQUIRE(backing->reads == control_backing->reads);
+        REQUIRE(ReadMatches(file, game, 0, game.size()));
     }
 }
 

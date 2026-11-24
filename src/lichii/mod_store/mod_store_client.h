@@ -25,7 +25,6 @@ namespace ModStore {
 
 enum class ModType { Graphics, Fps, Cheats, Translation, Gameplay };
 enum class Sort { Updated, Name };
-enum class Source { Demo, Submission, GameBanana, GitHub };
 
 struct Game {
     QString title_id;

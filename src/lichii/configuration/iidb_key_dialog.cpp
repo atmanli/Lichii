@@ -5,8 +5,8 @@
 
 #include <utility>
 #include <QCheckBox>
-#include <QDialog>
-#include <QDialogButtonBox>
+#include <QFontDatabase>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -19,6 +19,10 @@
 #endif
 
 #include "lichii/game/iidb_client.h"
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/notice.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 namespace IiDB {
 namespace {
@@ -101,59 +105,99 @@ void ForgetKey() {
 #endif
 }
 
-class KeyDialog final : public QDialog {
+class KeyDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
-    explicit KeyDialog(QWidget* parent) : QDialog(parent), client{SessionRateLimits()} {
+    explicit KeyDialog(QWidget* parent) : Spotlight::Dialog(parent), client{SessionRateLimits()} {
         setWindowTitle(tr("iiDB API Key"));
+        SetIcon(u"key", Spotlight::Color::Accent());
+        SetSubtitle(tr("Enter a personal iiDB API key to search for artwork from game Properties."));
         auto* layout = new QVBoxLayout(this);
-        auto* introduction = new QLabel(
-            tr("Enter a personal iiDB API key to search for artwork from game Properties. "
-               "<a href=\"https://iisu.network/wiki/iidb-developers/getting-started\">Get a "
-               "key</a>."),
-            this);
-        introduction->setOpenExternalLinks(true);
-        introduction->setTextInteractionFlags(Qt::TextBrowserInteraction);
-        introduction->setWordWrap(true);
-        layout->addWidget(introduction);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(14);
 
+        auto* get_key = new QLabel(
+            tr("<a href=\"https://iisu.network/wiki/iidb-developers/getting-started\" "
+               "style=\"color: #8fb5ff; text-decoration: none\">Get a key</a>"),
+            this);
+        get_key->setFont(Spotlight::Font(13, 600));
+        get_key->setOpenExternalLinks(true);
+        get_key->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        auto* get_key_icon = new QLabel(this);
+        get_key_icon->setPixmap(Spotlight::IconPixmap(u"arrow-square-out", 14,
+                                                      Spotlight::Color::Info(),
+                                                      devicePixelRatioF()));
+        auto* link_row = new QHBoxLayout;
+        link_row->setSpacing(6);
+        link_row->addWidget(get_key);
+        link_row->addWidget(get_key_icon);
+        link_row->addStretch(1);
+        layout->addLayout(link_row);
+
+        auto* field = new QVBoxLayout;
+        field->setSpacing(8);
         auto* label = new QLabel(tr("Personal API key:"), this);
+        label->setFont(Spotlight::Font(13, 600));
+        Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
         edit = new QLineEdit(this);
         edit->setEchoMode(QLineEdit::Password);
         edit->setMaxLength(513);
+        edit->setFixedHeight(40);
+        QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        mono.setPixelSize(14);
+        edit->setFont(mono);
         label->setBuddy(edit);
-        layout->addWidget(label);
-        layout->addWidget(edit);
+        field->addWidget(label);
+        field->addWidget(edit);
+        layout->addLayout(field);
         remember = new QCheckBox(tr("Remember in Windows Credential Manager"), this);
+        remember->setFont(Spotlight::Font(14, 500));
 #ifdef _WIN32
         layout->addWidget(remember);
 #else
         remember->hide();
 #endif
 
-        storage_status = new QLabel(this);
-        storage_status->setWordWrap(true);
+        storage_status = new Spotlight::Notice(this);
         layout->addWidget(storage_status);
-        test_status = new QLabel(this);
-        test_status->setWordWrap(true);
+        test_status = new Spotlight::Notice(this);
         test_status->hide();
         layout->addWidget(test_status);
-        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-        auto* use = buttons->addButton(tr("Use Key"), QDialogButtonBox::ActionRole);
-        auto* test = buttons->addButton(tr("Test Connection"), QDialogButtonBox::ActionRole);
-        auto* forget = buttons->addButton(tr("Forget Key"), QDialogButtonBox::ActionRole);
-        for (auto* button : {use, test, forget, buttons->button(QDialogButtonBox::Close)}) {
+        const auto test_hint = tr("Test the entered key, or the current key if the field is blank. "
+                                  "Testing does not save it.");
+        auto* hint = new QLabel(test_hint + QLatin1Char(' ') +
+                                    tr("The key is not stored in regular config."),
+                                this);
+        hint->setWordWrap(true);
+        hint->setFont(Spotlight::Font(13, 400));
+        Spotlight::SetTextColor(hint, Spotlight::Color::TextSecondary());
+        layout->addWidget(hint);
+
+        auto* buttons = new QHBoxLayout;
+        buttons->setContentsMargins(0, 12, 0, 0);
+        buttons->setSpacing(10);
+        auto* forget = new QPushButton(tr("Forget Key"), this);
+        auto* test = new QPushButton(tr("Test Connection"), this);
+        auto* use = new QPushButton(tr("Use Key"), this);
+        auto* close = new QPushButton(tr("Close"), this);
+        buttons->addWidget(forget);
+        buttons->addWidget(test);
+        buttons->addStretch(1);
+        buttons->addWidget(use);
+        buttons->addWidget(close);
+        for (auto* button : {forget, test, use, close}) {
             button->setAutoDefault(false);
+            button->setMinimumHeight(34);
+            button->setFont(Spotlight::Font(12, 600));
         }
-        test->setToolTip(tr("Test the entered key, or the current key if the field is blank. "
-                            "Testing does not save it."));
+        test->setToolTip(test_hint);
         auto status_size_policy = test_status->sizePolicy();
         status_size_policy.setRetainSizeWhenHidden(true);
         test_status->setSizePolicy(status_size_policy);
         layout->setSizeConstraint(QLayout::SetMinimumSize);
-        layout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addLayout(buttons);
+        connect(close, &QPushButton::clicked, this, &QDialog::reject);
         connect(edit, &QLineEdit::textChanged, this, [this, use, test] {
             client.Cancel();
             test_status->hide();
@@ -178,11 +222,15 @@ public:
         });
         connect(test, &QPushButton::clicked, this, [this, test] {
             test->setEnabled(false);
+            test_status->SetTone(Spotlight::Notice::Tone::Neutral);
             test_status->setText(tr("Testing iiDB access…"));
             test_status->show();
             client.TestAccess(edit->text().trimmed().isEmpty() ? SessionKey() : EnteredKey(),
                               [this, test](Error error) {
                                   test->setEnabled(true);
+                                  test_status->SetTone(error == Error::None
+                                                           ? Spotlight::Notice::Tone::Success
+                                                           : Spotlight::Notice::Tone::Error);
                                   test_status->setText(error == Error::None
                                                            ? tr("iiDB accepted the key.")
                                                            : ErrorText(error));
@@ -190,7 +238,7 @@ public:
         });
         use->setEnabled(false);
         UpdateStorageStatus();
-        setMinimumWidth(540);
+        setFixedWidth(608);
         ensurePolished();
         adjustSize();
     }
@@ -205,6 +253,10 @@ private:
                                                         : tr("Enter a replacement key"));
         const auto storage = CurrentCredentials().storage;
         remember->setChecked(storage == Storage::Saved || storage == Storage::SaveFailed);
+        storage_status->SetTone(storage == Storage::Saved ? Spotlight::Notice::Tone::Success
+                                : storage == Storage::Empty || storage == Storage::SessionOnly
+                                    ? Spotlight::Notice::Tone::Neutral
+                                    : Spotlight::Notice::Tone::Warning);
         switch (storage) {
         case Storage::Empty:
             storage_status->setText(tr("No key set. You can use a key for this session only."));
@@ -235,8 +287,8 @@ private:
     Client client;
     QLineEdit* edit;
     QCheckBox* remember;
-    QLabel* storage_status;
-    QLabel* test_status;
+    Spotlight::Notice* storage_status;
+    Spotlight::Notice* test_status;
 };
 
 } // namespace

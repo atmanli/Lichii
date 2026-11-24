@@ -6,7 +6,6 @@
 
 #include <future>
 #include <QColor>
-#include <QImage>
 #include <QList>
 #include <QLocale>
 #include <QMessageBox>
@@ -17,15 +16,19 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/internal_network/network_interface.h"
-#include "network/announce_multiplayer_session.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_host_room.h"
-#include "qt_common/game_list/game_list_p.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/game/common.h"
 #include "lichii/main_window.h"
 #include "lichii/multiplayer/host_room.h"
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
+#include "network/announce_multiplayer_session.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/game_list_p.h"
+#include "ui_host_room.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/verify_user_jwt.h"
 #endif
@@ -33,9 +36,29 @@
 HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
                                std::shared_ptr<Core::AnnounceMultiplayerSession> session,
                                Core::System& system_)
-    : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
+    : Spotlight::Dialog(parent,
+                        Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
       ui(std::make_unique<Ui::HostRoom>()), announce_multiplayer_session(session), system{system_} {
     ui->setupUi(this);
+    SetIcon(u"plus", Spotlight::Color::Success());
+    setFixedWidth(712);
+    for (auto* label : {ui->label, ui->label_2, ui->label_3, ui->label_4, ui->label_5, ui->label_6,
+                        ui->label_7}) {
+        label->setFont(Spotlight::Font(13, 600));
+        Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    }
+    for (auto* hint : {ui->room_name_hint, ui->max_player_hint, ui->username_hint}) {
+        hint->setFont(Spotlight::Font(12, 400));
+        Spotlight::SetTextColor(hint, Spotlight::Color::TextMuted());
+    }
+    ui->game_grid->setColumnStretch(0, 1);
+    ui->user_grid->setColumnStretch(0, 1);
+    host_type = new Spotlight::SegmentedControl({tr("Public"), tr("Unlisted")},
+                                                Spotlight::SegmentedControl::Kind::Accent, 38, this);
+    host_type->SetCurrentIndex(0);
+    ui->options_row->insertWidget(0, host_type);
+    ui->host->setProperty("kind", QStringLiteral("primary"));
+    ui->host->setMinimumHeight(40);
 
     // set up validation for all of the fields
     ui->room_name->setValidator(validation.GetRoomName());
@@ -67,8 +90,8 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
     ui->port->setText(QString::number(UISettings::values.multiplayer_room_port.GetValue()));
     ui->max_player->setValue(UISettings::values.multiplayer_max_player.GetValue());
     int index = UISettings::values.multiplayer_host_type.GetValue();
-    if (index < ui->host_type->count()) {
-        ui->host_type->setCurrentIndex(index);
+    if (index >= 0 && index < 2) {
+        host_type->SetCurrentIndex(index);
     }
     index = ui->game_list->findData(UISettings::values.multiplayer_game_id.GetValue(),
                                     GameListItemPath::ProgramIdRole);
@@ -82,17 +105,16 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
 HostRoomWindow::~HostRoomWindow() = default;
 
 void HostRoomWindow::UpdateGameList(QStandardItemModel* list) {
-    game_list->clear();
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
+    Lichii::CopyLibraryGames(*game_list, *list);
+    for (int row = 0; row < game_list->rowCount(); ++row) {
+        auto* game = game_list->item(row);
+        game->setIcon(ArtworkImage::Icon(game->data(Qt::DecorationRole).value<QPixmap>(), 16, 4));
     }
 }
 
 void HostRoomWindow::RetranslateUi() {
     ui->retranslateUi(this);
+    host_type->SetOptions({tr("Public"), tr("Unlisted")});
 }
 
 std::unique_ptr<Network::VerifyUser::Backend> HostRoomWindow::CreateVerifyBackend(
@@ -157,7 +179,7 @@ void HostRoomWindow::Host() {
         const auto port =
             ui->port->isModified() ? ui->port->text().toInt() : Network::DefaultRoomPort;
         const auto password = ui->password->text().toStdString();
-        const bool is_public = ui->host_type->currentIndex() == 0;
+        const bool is_public = host_type->CurrentIndex() == 0;
         Network::Room::BanList ban_list{};
         if (ui->load_ban_list->isChecked()) {
             ban_list = UISettings::values.multiplayer_ban_list;
@@ -228,7 +250,7 @@ void HostRoomWindow::Host() {
             ui->game_list->currentData(GameListItemPath::ProgramIdRole).toLongLong();
         UISettings::values.multiplayer_max_player = ui->max_player->value();
 
-        UISettings::values.multiplayer_host_type = ui->host_type->currentIndex();
+        UISettings::values.multiplayer_host_type = host_type->CurrentIndex();
         if (ui->port->isModified() && !ui->port->text().isEmpty()) {
             UISettings::values.multiplayer_room_port = ui->port->text().toInt();
         } else {
@@ -244,11 +266,7 @@ void HostRoomWindow::Host() {
 
 QVariant ComboBoxProxyModel::data(const QModelIndex& idx, int role) const {
     if (role != Qt::DisplayRole) {
-        auto val = QSortFilterProxyModel::data(idx, role);
-        // If its the icon, shrink it to 16x16
-        if (role == Qt::DecorationRole)
-            val = val.value<QImage>().scaled(16, 16, Qt::KeepAspectRatio);
-        return val;
+        return QSortFilterProxyModel::data(idx, role);
     }
     std::string filename;
     Common::SplitPath(

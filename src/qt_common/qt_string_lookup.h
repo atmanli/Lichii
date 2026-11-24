@@ -75,15 +75,14 @@ static const constexpr frozen::map<StringKey, frozen::string, 28> strings = {
 
     // Key install
     // 5-9
-    {KeyInstallSuccess, QT_TR_NOOP("Decryption Keys were successfully installed")},
-    {KeyInstallInvalidDir, QT_TR_NOOP("Unable to read key directory, aborting")},
+    {KeyInstallSuccess, QT_TR_NOOP("Decryption Keys were successfully installed.")},
+    {KeyInstallInvalidDir, QT_TR_NOOP("Unable to read the key directory.")},
     {KeyInstallErrorFailedCopy, QT_TR_NOOP("One or more keys failed to copy.")},
     {KeyInstallErrorWrongFilename,
-     QT_TR_NOOP("Verify your keys file has a .keys extension and try again.")},
+     QT_TR_NOOP("Verify your key file has a .keys extension and try again.")},
     {KeyInstallErrorFailedInit,
-     QT_TR_NOOP(
-         "Decryption Keys failed to initialize. Check that your dumping tools are up to date and "
-         "re-dump keys.")},
+     QT_TR_NOOP("Decryption Keys failed to initialize. Update your dumping tools and dump the "
+                "keys again.")},
 
     // fw install
     // 10-14

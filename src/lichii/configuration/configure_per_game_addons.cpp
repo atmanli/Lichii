@@ -14,10 +14,12 @@
 #include <QHash>
 #include <QHeaderView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QString>
+#include <QStyle>
 #include <QTimer>
 #include <QTreeView>
 
@@ -126,7 +128,11 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
     disabled_addons = FileSys::StoredDisabledAddons(title_id, std::move(disabled_addons));
 
     std::sort(disabled_addons.begin(), disabled_addons.end());
-    Settings::values.disabled_addons[title_id] = disabled_addons;
+    if (disabled_addons.empty()) {
+        Settings::values.disabled_addons.erase(title_id);
+    } else {
+        Settings::values.disabled_addons[title_id] = disabled_addons;
+    }
     const QSignalBlocker block(item_model);
     for (const auto& row : list_items) {
         auto* const item = row.front();
@@ -180,8 +186,8 @@ void ConfigurePerGameAddons::InstallMods(const QStringList& mods) {
     }
 
     if (failed.empty()) {
-        QtCommon::Frontend::Information(tr("Mod Install Succeeded"),
-                                        tr("Successfully installed all mods."));
+        QtCommon::Frontend::Success(tr("Mod Install Succeeded"),
+                                    tr("Successfully installed all mods."));
 
         item_model->removeRows(0, item_model->rowCount());
         list_items.clear();
@@ -248,30 +254,36 @@ void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
         return;
     }
 
-    const auto header = tr("You are about to delete the following installed mods:\n");
-    QString selected_str;
+    QStringList lines{tr("You are about to delete the following installed mods:\n").trimmed()};
     for (const QModelIndex& index : filtered) {
-        selected_str = selected_str % index.data().toString() % QStringLiteral("\n");
+        lines << index.data().toString();
     }
+    lines << tr("\nOnce deleted, these can NOT be recovered. Are you 100% sure "
+                "you want to delete them?")
+                 .trimmed();
 
-    const auto footer = tr("\nOnce deleted, these can NOT be recovered. Are you 100% sure "
-                           "you want to delete them?");
-
-    QString caption = header % selected_str % footer;
-
-    auto choice = QtCommon::Frontend::Warning(tr("Delete add-on(s)?"), caption,
-                                              QtCommon::Frontend::StandardButton::Yes |
-                                                  QtCommon::Frontend::StandardButton::No);
-
-    if (choice == QtCommon::Frontend::StandardButton::No)
+    QString text;
+    for (const auto& line : lines) {
+        text += QStringLiteral("<p style=\"margin-top:%1px; margin-bottom:0\">%2</p>")
+                    .arg(text.isEmpty() ? 0 : 7)
+                    .arg(line.toHtmlEscaped());
+    }
+    QMessageBox prompt(QMessageBox::Warning, tr("Delete add-on(s)?"), text,
+                       QMessageBox::Yes | QMessageBox::No, this);
+    prompt.setTextFormat(Qt::RichText);
+    auto* yes = prompt.button(QMessageBox::Yes);
+    yes->setProperty("kind", QStringLiteral("destructive"));
+    yes->style()->unpolish(yes);
+    yes->style()->polish(yes);
+    if (prompt.exec() != QMessageBox::Yes)
         return;
 
     for (const QModelIndex& index : filtered) {
         std::filesystem::remove_all(index.data(PATCH_LOCATION).toString().toStdString());
     }
 
-    QtCommon::Frontend::Information(tr("Successfully deleted"),
-                                    tr("Successfully deleted all selected mods."));
+    QtCommon::Frontend::Success(tr("Successfully deleted"),
+                                tr("Successfully deleted all selected mods."));
 
     item_model->removeRows(0, item_model->rowCount());
     list_items.clear();
@@ -354,6 +366,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         const auto& nup = static_cast<const Loader::AppLoader_NUP&>(*loader);
         if (const auto version = nup.ReadContainerUpdateVersion()) {
             auto* const name = new QStandardItem(tr("Update (NUP)"));
+            name->setData(static_cast<int>(FileSys::PatchType::Update), PATCH_TYPE);
             name->setToolTip(tr("This update is part of the NUP and cannot be disabled here."));
             item_model->appendRow({name, new QStandardItem(QString::fromStdString(*version))});
         }
@@ -365,6 +378,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         auto* const first_item = new QStandardItem;
         first_item->setText(name);
         first_item->setCheckable(true);
+        first_item->setData(static_cast<int>(patch.type), PATCH_TYPE);
         if (!patch.description.empty()) {
             first_item->setToolTip(QString::fromStdString(patch.description));
         }

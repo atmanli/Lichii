@@ -4,13 +4,13 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class ConfigureTouchscreenAdvanced;
 }
 
-class ConfigureTouchscreenAdvanced : public QDialog {
+class ConfigureTouchscreenAdvanced : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

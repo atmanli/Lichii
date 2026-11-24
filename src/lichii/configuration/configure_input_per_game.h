@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 
 #include <QWidget>
@@ -30,6 +31,10 @@ public:
 
     /// Load and Save configurations to settings file.
     void ApplyConfiguration();
+
+    const std::array<QComboBox*, 8>& ProfileComboBoxes() const {
+        return profile_comboboxes;
+    }
 
 private:
     /// Load configuration from settings file.

@@ -9,6 +9,7 @@
 #include <memory>
 #include <QDialog>
 #include "core/frontend/applets/cabinet.h"
+#include "lichii/spotlight/dialog.h"
 
 class MainWindow;
 class QCheckBox;
@@ -29,7 +30,7 @@ namespace Service::NFC {
 class NfcDevice;
 } // namespace Service::NFC
 
-class QtAmiiboSettingsDialog final : public QDialog {
+class QtAmiiboSettingsDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

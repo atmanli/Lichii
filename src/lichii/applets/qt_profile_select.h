@@ -9,6 +9,7 @@
 #include <QDialog>
 #include <QList>
 #include "core/frontend/applets/profile_select.h"
+#include "lichii/spotlight/dialog.h"
 
 class ControllerNavigation;
 class MainWindow;
@@ -29,7 +30,7 @@ namespace Service::Account {
 class ProfileManager;
 }
 
-class QtProfileSelectionDialog final : public QDialog {
+class QtProfileSelectionDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -59,7 +60,7 @@ private:
     std::vector<QList<QStandardItem*>> list_items;
 
     QVBoxLayout* outer_layout;
-    QLabel* instruction_label;
+    QLabel* users_label;
     QScrollArea* scroll_area;
     QDialogButtonBox* buttons;
 

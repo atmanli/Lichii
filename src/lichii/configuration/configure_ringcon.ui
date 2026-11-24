@@ -2,354 +2,205 @@
 <ui version="4.0">
  <class>ConfigureRingController</class>
  <widget class="QDialog" name="ConfigureRingController">
-  <property name="geometry">
-   <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>315</width>
-    <height>400</height>
-   </rect>
-  </property>
-  <property name="windowTitle">
-   <string>Configure Ring Controller</string>
-  </property>
+  <property name="windowTitle"><string>Ring-Con</string></property>
+  <property name="styleSheet"><string notr="true">QLabel[row="true"] { font: 500 14px "Lexend"; color: #ffffff; }
+QLabel[rowStrong="true"] { font: 600 14px "Lexend"; color: #ffffff; }
+QLabel[sliderLabel="true"] { font: 400 13px "Lexend"; color: #9effffff; }
+QLabel[value="true"] { font: 600 13px "Lexend"; color: #ffffff; }
+QLabel[field="true"] { font: 600 13px "Lexend"; color: #9effffff; }
+QLabel[section="true"] { font: 600 12px "Lexend"; color: #8cffffff; }
+QLabel[hint="true"] { font: 400 12px "Lexend"; color: #9effffff; }
+QLabel[warning="true"] { font: 400 12px "Lexend"; color: #ffd37a; }
+QPushButton[ghost="true"] { font: 600 13px "Lexend"; background: transparent; border: none; border-radius: 18px;
+                            min-height: 36px; max-height: 36px; padding: 0 18px; color: #ffffff; }
+QPushButton[ghost="true"]:hover { background: #14ffffff; }
+QPushButton[outline="true"] { font: 600 13px "Lexend"; background: #1fffffff; border: 1px solid #2effffff;
+                              border-radius: 18px; min-height: 36px; max-height: 36px; padding: 0 18px; color: #ffffff; }
+QPushButton[outline="true"]:hover { background: #2effffff; }
+QPushButton[outline="true"]:disabled { color: #73ffffff; }
+QFrame[bindingRow="true"] { background: #0fffffff; border: 1px solid #14ffffff; border-radius: 12px; }
+QPushButton[chip="true"] { font: 600 12px "Lexend"; background: #1fffffff; border: none; border-radius: 8px;
+                           min-height: 24px; max-height: 24px; padding: 0 8px; color: #ffffff; }
+QPushButton[chip="true"]:hover { background: #2effffff; }
+QLineEdit#tas_path_edit { min-height: 38px; max-height: 38px; border-radius: 12px; padding: 0 14px;
+                          background: #08ffffff; border: 1px solid #14ffffff; font: 500 13px "Lexend"; color: #b8ffffff; }</string></property>
   <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="spacing"><number>20</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
    <item>
-    <widget class="QLabel" name="label_2">
-     <property name="minimumSize">
-      <size>
-       <width>280</width>
-       <height>0</height>
-      </size>
-     </property>
-     <property name="text">
-      <string>To use Ring-Con, configure player 1 as right Joy-Con (both physical and emulated), and player 2 as left Joy-Con (left physical and dual emulated) before starting the game.</string>
-     </property>
-     <property name="wordWrap">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <spacer name="verticalSpacer_2">
-     <property name="orientation">
-      <enum>Qt::Vertical</enum>
-     </property>
-     <property name="sizeType">
-      <enum>QSizePolicy::Fixed</enum>
-     </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>20</width>
-       <height>10</height>
-      </size>
-     </property>
-    </spacer>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="RingAnalog">
-     <property name="title">
-      <string>Virtual Ring Sensor Parameters</string>
-     </property>
-     <property name="alignment">
-      <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayout_1">
-      <property name="spacing">
-       <number>0</number>
-      </property>
-      <property name="sizeConstraint">
-       <enum>QLayout::SetDefaultConstraint</enum>
-      </property>
-      <property name="leftMargin">
-       <number>3</number>
-      </property>
-      <property name="topMargin">
-       <number>6</number>
-      </property>
-      <property name="rightMargin">
-       <number>3</number>
-      </property>
-      <property name="bottomMargin">
-       <number>0</number>
-      </property>
-      <item>
-       <layout class="QHBoxLayout" name="buttonRingAnalogPullHorizontaLayout">
-        <property name="spacing">
-         <number>3</number>
-        </property>
-        <item alignment="Qt::AlignHCenter">
-         <widget class="QGroupBox" name="buttonRingAnalogPullGroup">
-          <property name="title">
-           <string>Pull</string>
-          </property>
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <layout class="QVBoxLayout" name="buttonRingAnalogPullVerticalLayout">
-           <property name="spacing">
-            <number>3</number>
-           </property>
-           <property name="leftMargin">
-            <number>3</number>
-           </property>
-           <property name="topMargin">
-            <number>3</number>
-           </property>
-           <property name="rightMargin">
-            <number>3</number>
-           </property>
-           <property name="bottomMargin">
-            <number>3</number>
-           </property>
-           <item>
-            <widget class="QPushButton" name="buttonRingAnalogPull">
-             <property name="minimumSize">
-              <size>
-               <width>70</width>
-               <height>0</height>
-              </size>
-             </property>
-             <property name="maximumSize">
-              <size>
-               <width>68</width>
-               <height>16777215</height>
-              </size>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">min-width: 68px;</string>
-             </property>
-             <property name="text">
-              <string>Pull</string>
-             </property>
-            </widget>
-           </item>
-          </layout>
-         </widget>
-        </item>
-        <item alignment="Qt::AlignHCenter">
-         <widget class="QGroupBox" name="buttonRingAnalogPushGroup">
-          <property name="title">
-           <string>Push</string>
-          </property>
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <layout class="QVBoxLayout" name="buttonRingAnalogPushVerticalLayout">
-           <property name="spacing">
-            <number>3</number>
-           </property>
-           <property name="leftMargin">
-            <number>3</number>
-           </property>
-           <property name="topMargin">
-            <number>3</number>
-           </property>
-           <property name="rightMargin">
-            <number>3</number>
-           </property>
-           <property name="bottomMargin">
-            <number>3</number>
-           </property>
-           <item>
-            <widget class="QPushButton" name="buttonRingAnalogPush">
-             <property name="minimumSize">
-              <size>
-               <width>70</width>
-               <height>0</height>
-              </size>
-             </property>
-             <property name="maximumSize">
-              <size>
-               <width>68</width>
-               <height>16777215</height>
-              </size>
-             </property>
-             <property name="styleSheet">
-              <string notr="true">min-width: 68px;</string>
-             </property>
-             <property name="text">
-              <string>Push</string>
-             </property>
-            </widget>
-           </item>
-          </layout>
-         </widget>
-        </item>
-       </layout>
-      </item>
-      <item>
-       <layout class="QVBoxLayout" name="sliderRingAnalogDeadzoneVerticalLayout">
-        <property name="spacing">
-         <number>3</number>
-        </property>
-        <property name="sizeConstraint">
-         <enum>QLayout::SetDefaultConstraint</enum>
-        </property>
-        <property name="leftMargin">
-         <number>0</number>
-        </property>
-        <property name="topMargin">
-         <number>10</number>
-        </property>
-        <property name="rightMargin">
-         <number>0</number>
-        </property>
-        <property name="bottomMargin">
-         <number>3</number>
-        </property>
-        <item>
-         <layout class="QHBoxLayout" name="sliderRingAnalogDeadzoneHorizontalLayout">
-          <item>
-           <widget class="QLabel" name="labelRingAnalogDeadzone">
-            <property name="text">
-             <string>Deadzone: 0%</string>
-            </property>
-            <property name="alignment">
-             <set>Qt::AlignHCenter</set>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <widget class="QSlider" name="sliderRingAnalogDeadzone">
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="orientation">
-           <enum>Qt::Horizontal</enum>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="RingDriver">
-     <property name="title">
-      <string>Direct Joycon Driver</string>
-     </property>
-     <property name="alignment">
-      <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayout_2">
-      <property name="spacing">
-       <number>0</number>
-      </property>
-      <property name="sizeConstraint">
-       <enum>QLayout::SetDefaultConstraint</enum>
-      </property>
-      <property name="leftMargin">
-       <number>3</number>
-      </property>
-      <property name="topMargin">
-       <number>6</number>
-      </property>
-      <property name="rightMargin">
-       <number>3</number>
-      </property>
-      <property name="bottomMargin">
-       <number>10</number>
-      </property>
-      <item>
-       <layout class="QGridLayout" name="gridLayout">
-        <property name="leftMargin">
-         <number>10</number>
-        </property>
-        <property name="topMargin">
-         <number>6</number>
-        </property>
-        <property name="rightMargin">
-         <number>10</number>
-        </property>
-        <property name="bottomMargin">
-         <number>10</number>
-        </property>
-        <property name="verticalSpacing">
-         <number>10</number>
-        </property>
-        <item row="0" column="1">
-         <spacer name="horizontalSpacer">
-          <property name="orientation">
-           <enum>Qt::Horizontal</enum>
-          </property>
-          <property name="sizeType">
-           <enum>QSizePolicy::Fixed</enum>
-          </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>76</width>
-            <height>20</height>
-           </size>
-          </property>
-         </spacer>
-        </item>
-        <item row="0" column="0">
-         <widget class="QLabel" name="enable_ring_controller_label">
-          <property name="text">
-           <string>Enable Ring Input</string>
-          </property>
-         </widget>
-        </item>
-        <item row="0" column="2">
-         <widget class="QPushButton" name="enable_ring_controller_button">
-          <property name="text">
-           <string>Enable</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="0">
-         <widget class="QLabel" name="ring_controller_sensor_label">
-          <property name="text">
-           <string>Ring Sensor Value</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="2">
-         <widget class="QLabel" name="ring_controller_sensor_value">
-          <property name="text">
-           <string>Not connected</string>
-          </property>
-          <property name="alignment">
-           <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <spacer name="verticalSpacer">
-     <property name="orientation">
-      <enum>Qt::Vertical</enum>
-     </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>20</width>
-       <height>40</height>
-      </size>
-     </property>
-    </spacer>
-   </item>
-   <item>
-    <layout class="QHBoxLayout" name="horizontalLayout">
+    <layout class="QVBoxLayout" name="rows">
+     <property name="spacing"><number>14</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
      <item>
-      <widget class="QPushButton" name="restore_defaults_button">
-       <property name="text">
-        <string>Restore Defaults</string>
-       </property>
+      <widget class="QLabel" name="label_2">
+       <property name="text"><string>To use Ring-Con, configure player 1 as right Joy-Con (both physical and emulated), and player 2 as left Joy-Con (left physical and dual emulated) before starting the game.</string></property>
+       <property name="wordWrap"><bool>true</bool></property>
+       <property name="hint" stdset="0"><bool>true</bool></property>
+       <property name="minimumSize"><size><width>370</width><height>0</height></size></property>
       </widget>
      </item>
      <item>
+      <widget class="QFrame" name="buttonRingAnalogPullGroup">
+       <property name="bindingRow" stdset="0"><bool>true</bool></property>
+       <property name="minimumSize"><size><width>228</width><height>38</height></size></property>
+       <property name="maximumSize"><size><width>228</width><height>38</height></size></property>
+       <layout class="QHBoxLayout" name="buttonRingAnalogPullGroupLayout">
+        <property name="spacing"><number>10</number></property>
+        <property name="leftMargin"><number>12</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>12</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="QLabel" name="buttonRingAnalogPullGroupLabel">
+          <property name="text"><string>Pull</string></property>
+          <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="spacer1">
+          <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+          <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+          <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+         </spacer>
+        </item>
+        <item>
+         <widget class="QPushButton" name="buttonRingAnalogPull">
+          <property name="text"><string>Pull</string></property>
+          <property name="chip" stdset="0"><bool>true</bool></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QFrame" name="buttonRingAnalogPushGroup">
+       <property name="bindingRow" stdset="0"><bool>true</bool></property>
+       <property name="minimumSize"><size><width>228</width><height>38</height></size></property>
+       <property name="maximumSize"><size><width>228</width><height>38</height></size></property>
+       <layout class="QHBoxLayout" name="buttonRingAnalogPushGroupLayout">
+        <property name="spacing"><number>10</number></property>
+        <property name="leftMargin"><number>12</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>12</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="QLabel" name="buttonRingAnalogPushGroupLabel">
+          <property name="text"><string>Push</string></property>
+          <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="spacer2">
+          <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+          <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+          <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+         </spacer>
+        </item>
+        <item>
+         <widget class="QPushButton" name="buttonRingAnalogPush">
+          <property name="text"><string>Push</string></property>
+          <property name="chip" stdset="0"><bool>true</bool></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="deadzoneRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="labelRingAnalogDeadzone">
+         <property name="text"><string>Deadzone: 0%</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer3">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="sliderRingAnalogDeadzone">
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Deadzone</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="sensorRow">
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="ring_controller_sensor_label">
+         <property name="text"><string>Sensor</string></property>
+         <property name="section" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer4">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QLabel" name="ring_controller_sensor_value">
+         <property name="text"><string>Not connected</string></property>
+         <property name="value" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <widget class="QPushButton" name="enable_ring_controller_button">
+       <property name="text"><string>Enable Ring-Con with Joy-Con driver</string></property>
+       <property name="outline" stdset="0"><bool>true</bool></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayout">
+     <property name="spacing"><number>10</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
+     <item>
+      <widget class="QPushButton" name="restore_defaults_button">
+       <property name="text"><string>Defaults</string></property>
+       <property name="ghost" stdset="0"><bool>true</bool></property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="spacer5">
+       <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+       <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+       <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+      </spacer>
+     </item>
+     <item>
       <widget class="QDialogButtonBox" name="buttonBox">
-       <property name="standardButtons">
-        <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
-       </property>
+       <property name="standardButtons"><set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Save</set></property>
       </widget>
      </item>
     </layout>
@@ -358,17 +209,7 @@
  </widget>
  <resources/>
  <connections>
-  <connection>
-   <sender>buttonBox</sender>
-   <signal>accepted()</signal>
-   <receiver>ConfigureRingController</receiver>
-   <slot>accept()</slot>
-  </connection>
-  <connection>
-   <sender>buttonBox</sender>
-   <signal>rejected()</signal>
-   <receiver>ConfigureRingController</receiver>
-   <slot>reject()</slot>
-  </connection>
+  <connection><sender>buttonBox</sender><signal>accepted()</signal><receiver>ConfigureRingController</receiver><slot>accept()</slot></connection>
+  <connection><sender>buttonBox</sender><signal>rejected()</signal><receiver>ConfigureRingController</receiver><slot>reject()</slot></connection>
  </connections>
 </ui>

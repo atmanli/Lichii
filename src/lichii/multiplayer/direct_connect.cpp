@@ -22,14 +22,26 @@
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 enum class ConnectionType : u8 { TraversalServer, IP };
 
 DirectConnectWindow::DirectConnectWindow(Core::System& system_, QWidget* parent)
-    : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
+    : Spotlight::Dialog(parent,
+                        Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
       ui(std::make_unique<Ui::DirectConnect>()), system{system_} {
 
     ui->setupUi(this);
+    SetIcon(u"link", Spotlight::Color::Info());
+    setFixedWidth(531);
+    for (auto* label : {ui->label, ui->label_2, ui->label_3, ui->label_5}) {
+        label->setFont(Spotlight::Font(13, 600));
+        Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    }
+    ui->connect->setProperty("kind", QStringLiteral("primary"));
+    ui->connect->setMinimumHeight(40);
+    ui->connect->setIcon(Spotlight::Icon(u"link", Spotlight::Color::OnAccent(), 16));
 
     // setup the watcher for background connections
     watcher = new QFutureWatcher<void>;
@@ -121,11 +133,13 @@ void DirectConnectWindow::Connect() {
 void DirectConnectWindow::BeginConnecting() {
     ui->connect->setEnabled(false);
     ui->connect->setText(tr("Connecting"));
+    ui->connect->setIcon(Spotlight::Icon(u"circle-notch", Spotlight::Color::TextMuted(), 16));
 }
 
 void DirectConnectWindow::EndConnecting() {
     ui->connect->setEnabled(true);
     ui->connect->setText(tr("Connect"));
+    ui->connect->setIcon(Spotlight::Icon(u"link", Spotlight::Color::OnAccent(), 16));
 }
 
 void DirectConnectWindow::OnConnection() {

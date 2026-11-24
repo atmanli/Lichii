@@ -7,8 +7,16 @@
 #include <sstream>
 
 #include <QCloseEvent>
+#include <QFontDatabase>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPushButton>
 #include <QStringListModel>
+#include <QStyle>
+#include <QTimer>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -18,21 +26,59 @@
 #include "ui_configure_motion_touch.h"
 #include "lichii/configuration/configure_motion_touch.h"
 #include "lichii/configuration/configure_touch_from_button.h"
+#include "lichii/spotlight/theme.h"
+
+namespace {
+constexpr int StatusIconSize = 36;
+
+class ServerListModel : public QStringListModel {
+public:
+    using QStringListModel::QStringListModel;
+
+    QVariant data(const QModelIndex& index, int role) const override {
+        if (role == Qt::DecorationRole) {
+            return Spotlight::Icon(QStringLiteral("broadcast"), Spotlight::Color::Info(), 16);
+        }
+        return QStringListModel::data(index, role);
+    }
+};
+} // namespace
 
 CalibrationConfigurationDialog::CalibrationConfigurationDialog(QWidget* parent,
                                                                const std::string& host, u16 port)
     : QDialog(parent) {
-    layout = new QVBoxLayout(this);
+    Spotlight::AdoptDialogChrome(this, false);
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+    layout->setSizeConstraint(QLayout::SetFixedSize);
+    status_icon = new QLabel;
+    status_icon->setFixedSize(StatusIconSize, StatusIconSize);
     status_label = new QLabel(tr("Communicating with the server..."));
+    status_label->setFont(Spotlight::Font(14, 400));
+    status_label->setMinimumWidth(240);
     cancel_button = new QPushButton(tr("Cancel"));
+    cancel_button->setAutoDefault(false);
+    spinner = new QTimer(this);
+    spinner->setInterval(16);
+    connect(spinner, &QTimer::timeout, this, [this] {
+        spinner_angle = (spinner_angle + 6) % 360;
+        DrawSpinner();
+    });
+    spinner->start();
+    DrawSpinner();
     connect(cancel_button, &QPushButton::clicked, this, [this] {
         if (!completed) {
             job->Stop();
         }
         accept();
     });
-    layout->addWidget(status_label);
-    layout->addWidget(cancel_button);
+    auto* status_row = new QHBoxLayout;
+    status_row->setSpacing(14);
+    status_row->addWidget(status_icon, 0, Qt::AlignTop);
+    status_row->addWidget(status_label, 1);
+    layout->addLayout(status_row);
+    layout->addWidget(cancel_button, 0, Qt::AlignRight);
 
     using namespace InputCommon::CemuhookUDP;
     job = std::make_unique<CalibrationConfigurationJob>(
@@ -43,12 +89,15 @@ CalibrationConfigurationDialog::CalibrationConfigurationDialog(QWidget* parent,
                 switch (status) {
                 case CalibrationConfigurationJob::Status::Ready:
                     text = tr("Touch the top left corner <br>of your touchpad.");
+                    SetStatusIcon(QStringLiteral("arrow-up-left"), Spotlight::Color::Info());
                     break;
                 case CalibrationConfigurationJob::Status::Stage1Completed:
                     text = tr("Now touch the bottom right corner <br>of your touchpad.");
+                    SetStatusIcon(QStringLiteral("arrow-down-right"), Spotlight::Color::Info());
                     break;
                 case CalibrationConfigurationJob::Status::Completed:
                     text = tr("Configuration completed!");
+                    SetStatusIcon(QStringLiteral("check-circle"), Spotlight::Color::Success());
                     break;
                 default:
                     break;
@@ -56,7 +105,12 @@ CalibrationConfigurationDialog::CalibrationConfigurationDialog(QWidget* parent,
                 UpdateLabelText(text);
             });
             if (status == CalibrationConfigurationJob::Status::Completed) {
-                QMetaObject::invokeMethod(this, [this] { UpdateButtonText(tr("OK")); });
+                QMetaObject::invokeMethod(this, [this] {
+                    UpdateButtonText(tr("OK"));
+                    cancel_button->setProperty("kind", QStringLiteral("primary"));
+                    cancel_button->style()->unpolish(cancel_button);
+                    cancel_button->style()->polish(cancel_button);
+                });
             }
         },
         [this](u16 min_x_, u16 min_y_, u16 max_x_, u16 max_y_) {
@@ -78,11 +132,64 @@ void CalibrationConfigurationDialog::UpdateButtonText(const QString& text) {
     cancel_button->setText(text);
 }
 
+void CalibrationConfigurationDialog::SetStatusIcon(const QString& icon, const QColor& tint) {
+    spinner->stop();
+    const qreal ratio = devicePixelRatioF();
+    QPixmap tile(QSize(StatusIconSize, StatusIconSize) * ratio);
+    tile.setDevicePixelRatio(ratio);
+    tile.fill(Qt::transparent);
+    QPainter p(&tile);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(icon == QStringLiteral("check-circle") ? QColor(tint.red(), tint.green(), tint.blue(), 0x1f)
+                                                      : Spotlight::Color::Fill());
+    p.drawRoundedRect(QRectF(0, 0, StatusIconSize, StatusIconSize), 10, 10);
+    p.drawPixmap(9, 9, Spotlight::IconPixmap(icon, 18, tint, ratio));
+    p.end();
+    status_icon->setPixmap(tile);
+}
+
+void CalibrationConfigurationDialog::DrawSpinner() {
+    const qreal ratio = devicePixelRatioF();
+    QPixmap ring(QSize(StatusIconSize, StatusIconSize) * ratio);
+    ring.setDevicePixelRatio(ratio);
+    ring.fill(Qt::transparent);
+    QPainter p(&ring);
+    p.setRenderHint(QPainter::Antialiasing);
+    const QRectF bounds(2.5, 2.5, StatusIconSize - 5, StatusIconSize - 5);
+    p.setPen(QPen(Spotlight::Color::Stroke(), 3));
+    p.drawEllipse(bounds);
+    p.setPen(QPen(Spotlight::Color::Accent(), 3, Qt::SolidLine, Qt::RoundCap));
+    p.drawArc(bounds, (90 - spinner_angle) * 16, -100 * 16);
+    p.end();
+    status_icon->setPixmap(ring);
+}
+
 ConfigureMotionTouch::ConfigureMotionTouch(QWidget* parent,
                                            InputCommon::InputSubsystem* input_subsystem_)
-    : QDialog(parent), input_subsystem{input_subsystem_},
+    : Spotlight::Dialog(parent), input_subsystem{input_subsystem_},
       ui(std::make_unique<Ui::ConfigureMotionTouch>()) {
     ui->setupUi(this);
+    layout()->setSizeConstraint(QLayout::SetFixedSize);
+    SetIcon(QStringLiteral("hand-tap"), Spotlight::Color::Info());
+    for (auto* section : {ui->labelTouchSection, ui->labelUdpSection}) {
+        QFont font = section->font();
+        font.setCapitalization(QFont::AllUppercase);
+        font.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+        section->setFont(font);
+    }
+    const QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    for (QWidget* widget : {static_cast<QWidget*>(ui->touch_calibration),
+                            static_cast<QWidget*>(ui->udp_server),
+                            static_cast<QWidget*>(ui->udp_port)}) {
+        QFont font = mono;
+        font.setPixelSize(widget == ui->touch_calibration ? 13 : 14);
+        widget->setFont(font);
+    }
+    ui->udp_help->setMinimumHeight(
+        ui->udp_help->heightForWidth(ui->touch_group_box->minimumWidth() - 26));
+    ui->udp_add->setIcon(Spotlight::Icon(QStringLiteral("plus"), Spotlight::Color::Text(), 15));
+    ui->udp_remove->setIcon(Spotlight::Icon(QStringLiteral("minus"), Spotlight::Color::Text(), 15));
     SetConfiguration();
     UpdateUiDisplay();
     ConnectEvents();
@@ -107,7 +214,7 @@ void ConfigureMotionTouch::SetConfiguration() {
     ui->udp_server->setText(QString::fromStdString("127.0.0.1"));
     ui->udp_port->setText(QString::number(26760));
 
-    udp_server_list_model = new QStringListModel(this);
+    udp_server_list_model = new ServerListModel(this);
     udp_server_list_model->setStringList({});
     ui->udp_server_list->setModel(udp_server_list_model);
 
@@ -246,13 +353,15 @@ void ConfigureMotionTouch::closeEvent(QCloseEvent* event) {
 void ConfigureMotionTouch::ShowUDPTestResult(bool result) {
     udp_test_in_progress = false;
     if (result) {
-        QMessageBox::information(this, tr("Test Successful"),
-                                 tr("Successfully received data from the server."));
+        QMessageBox box(QMessageBox::Information, tr("Test Successful"),
+                        tr("Successfully received data from the server."), QMessageBox::Ok, this);
+        Spotlight::MarkSuccess(&box);
+        box.exec();
     } else {
-        QMessageBox::warning(this, tr("Test Failed"),
-                             tr("Could not receive valid data from the server.<br>Please verify "
-                                "that the server is set up correctly and "
-                                "the address and port are correct."));
+        QMessageBox::critical(this, tr("Test Failed"),
+                              tr("Could not receive valid data from the server.<br>Please verify "
+                                 "that the server is set up correctly and "
+                                 "the address and port are correct."));
     }
     ui->udp_test->setEnabled(true);
     ui->udp_test->setText(tr("Test"));

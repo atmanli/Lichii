@@ -10,15 +10,21 @@
 #include <utility>
 
 #include <QCloseEvent>
+#include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include "common/settings.h"
-#include "video_core/shader_warm/shader_warm_builder.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/spotlight/notice.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 
 namespace ShaderWarm = VideoCommon::ShaderWarm;
 
@@ -45,62 +51,148 @@ bool DeleteShaderWarmFiles(u64 title_id, std::string& error) {
 
 namespace {
 
-// The builder reports its stage in English; show the known ones translated.
-QString StageText(const std::string& stage) {
-    if (stage == "Reading game files") {
-        return ShaderWarmDialog::tr("Reading game files");
+constexpr int StageTile = 26;
+
+// The builder's stages in the order it runs them, with the names the dialog shows.
+struct StageName {
+    const char* builder;
+    const char* shown;
+};
+constexpr std::array<StageName, 5> StageNames{{
+    {"Reading game files", QT_TRANSLATE_NOOP("ShaderWarmDialog", "Reading game files")},
+    {"Extracting shaders", QT_TRANSLATE_NOOP("ShaderWarmDialog", "Extracting shaders")},
+    {"Converting", QT_TRANSLATE_NOOP("ShaderWarmDialog", "Converting shaders")},
+    {"Reading asset packs (MiB)", QT_TRANSLATE_NOOP("ShaderWarmDialog", "Reading asset packs")},
+    {"Writing", QT_TRANSLATE_NOOP("ShaderWarmDialog", "Writing the precache file")},
+}};
+
+// The position of a stage the builder reports, or -1 for one the dialog does not list.
+int StageIndex(const std::string& stage) {
+    for (std::size_t i = 0; i < StageNames.size(); ++i) {
+        if (stage == StageNames[i].builder) {
+            return static_cast<int>(i);
+        }
     }
-    if (stage == "Extracting shaders") {
-        return ShaderWarmDialog::tr("Extracting shaders");
+    return -1;
+}
+
+enum class StageState { Pending, Active, Done };
+
+// A round 26 px tile: a dot while the stage waits, a ring while it runs, a check when it is done.
+QPixmap StageIcon(StageState state, qreal ratio) {
+    QPixmap tile(QSize(StageTile, StageTile) * ratio);
+    tile.setDevicePixelRatio(ratio);
+    tile.fill(Qt::transparent);
+    QPainter painter(&tile);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    const QColor tint = state == StageState::Done     ? Spotlight::Color::Success()
+                        : state == StageState::Active ? Spotlight::Color::Accent()
+                                                      : Spotlight::Color::TextMuted();
+    QColor fill = state == StageState::Pending ? Spotlight::Color::Fill() : tint;
+    if (state != StageState::Pending) {
+        fill.setAlpha(state == StageState::Done ? 0x2e : 0x24);
     }
-    if (stage == "Converting") {
-        return ShaderWarmDialog::tr("Converting shaders");
+    painter.setBrush(fill);
+    painter.drawEllipse(QRectF(0, 0, StageTile, StageTile));
+    if (state == StageState::Pending) {
+        painter.setBrush(tint);
+        painter.drawEllipse(QRectF(10, 10, 6, 6));
+    } else {
+        painter.drawPixmap(
+            6, 6,
+            Spotlight::IconPixmap(state == StageState::Done ? u"check" : u"circle-notch", 14, tint,
+                                  ratio));
     }
-    if (stage == "Reading asset packs (MiB)") {
-        return ShaderWarmDialog::tr("Reading asset packs (MiB)");
-    }
-    if (stage == "Writing") {
-        return ShaderWarmDialog::tr("Writing the precache file");
-    }
-    return QString::fromStdString(stage);
+    return tile;
 }
 
 } // namespace
 
-/// Builds the stage label, progress bar, result text and the Cancel/Close button.
+/// Builds the stage list, progress bar, result notice and the Stop/Close button.
 ShaderWarmDialog::ShaderWarmDialog(Core::System& system_, std::filesystem::path game_path_,
                                    u64 title_id_, const QString& game_name, QWidget* parent)
-    : QDialog(parent), system{system_}, game_path{std::move(game_path_)}, title_id{title_id_} {
-    setWindowTitle(tr("Precache shaders: %1").arg(game_name));
-    setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+    : Spotlight::Dialog(parent), system{system_}, game_path{std::move(game_path_)},
+      title_id{title_id_} {
+    setWindowTitle(tr("Preparing shaders"));
+    SetSubtitle(tr("%1 \u00b7 fewer hitches the first time you play").arg(game_name));
+    SetIcon(u"sparkle", Spotlight::Color::Warning());
+    SetCardWidth(520);
     setModal(false);
-    setMinimumWidth(420);
-
-    stage_label = new QLabel(tr("Starting"), this);
-    progress_bar = new QProgressBar(this);
-    progress_bar->setRange(0, 0);
-    result_label = new QLabel(this);
-    result_label->setWordWrap(true);
-    result_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    result_label->setVisible(false);
-    button = new QPushButton(tr("Cancel"), this);
-    connect(button, &QPushButton::clicked, this, [this] {
-        if (running) {
-            RequestStop();
-        } else {
-            reject();
-        }
-    });
-
-    auto* buttons = new QHBoxLayout;
-    buttons->addStretch(1);
-    buttons->addWidget(button);
 
     auto* layout = new QVBoxLayout(this);
-    layout->addWidget(stage_label);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+
+    auto* list = new QVBoxLayout;
+    list->setSpacing(12);
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        auto* row = new QHBoxLayout;
+        row->setSpacing(12);
+        Stage& stage = stages[i];
+        stage.tile = new QLabel;
+        stage.tile->setFixedSize(StageTile, StageTile);
+        stage.name = new QLabel(tr(StageNames[i].shown));
+        stage.value = new QLabel;
+        stage.value->setFont(Spotlight::Font(12, 600));
+        Spotlight::SetTextColor(stage.value, Spotlight::Color::TextMuted());
+        row->addWidget(stage.tile);
+        row->addWidget(stage.name, 1);
+        row->addWidget(stage.value);
+        list->addLayout(row);
+    }
+    layout->addLayout(list);
+
+    progress_bar = new QProgressBar;
+    progress_bar->setTextVisible(false);
+    progress_bar->setRange(0, 0);
     layout->addWidget(progress_bar);
-    layout->addWidget(result_label);
-    layout->addLayout(buttons);
+
+    result_notice = new Spotlight::Notice;
+    result_notice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    result_notice->hide();
+    layout->addWidget(result_notice);
+
+    auto* bottom = new QHBoxLayout;
+    bottom->setContentsMargins(0, 6, 0, 0);
+    bottom->setSpacing(10);
+    footer = new QLabel(tr("Closing this stops the build"));
+    footer->setFont(Spotlight::Font(12, 400));
+    Spotlight::SetTextColor(footer, Spotlight::Color::TextMuted());
+    bottom->addWidget(footer, 1);
+    auto* buttons = new QDialogButtonBox;
+    button = buttons->addButton(tr("Stop"), QDialogButtonBox::RejectRole);
+    button->setProperty("kind", QStringLiteral("destructive"));
+    connect(buttons, &QDialogButtonBox::rejected, this, &ShaderWarmDialog::reject);
+    bottom->addWidget(buttons);
+    layout->addLayout(bottom);
+
+    SetStage(-1, {});
+}
+
+/// Marks the stages before `index` done, `index` running with `value`, and the rest waiting.
+void ShaderWarmDialog::SetStage(int index, const QString& value) {
+    const qreal ratio = devicePixelRatioF();
+    for (int i = 0; i < static_cast<int>(stages.size()); ++i) {
+        Stage& stage = stages[static_cast<std::size_t>(i)];
+        const StageState state = i < index    ? StageState::Done
+                                 : i == index ? StageState::Active
+                                              : StageState::Pending;
+        stage.tile->setPixmap(StageIcon(state, ratio));
+        stage.name->setFont(Spotlight::Font(14, state == StageState::Active ? 600 : 500));
+        Spotlight::SetTextColor(stage.name, state == StageState::Pending
+                                                ? Spotlight::Color::TextMuted()
+                                                : Spotlight::Color::Text());
+        if (state == StageState::Active) {
+            stage.value->setText(value);
+            Spotlight::SetTextColor(stage.value, Spotlight::Color::AccentLight());
+        } else if (state == StageState::Pending) {
+            stage.value->clear();
+        } else {
+            Spotlight::SetTextColor(stage.value, Spotlight::Color::TextMuted());
+        }
+    }
+    current_stage = index;
 }
 
 /// Stops and joins a running build.
@@ -134,7 +226,8 @@ void ShaderWarmDialog::Start() {
             last_stage = p.stage;
             QMetaObject::invokeMethod(
                 this,
-                [this, stage = StageText(p.stage), done = static_cast<qulonglong>(p.done),
+                [this, stage = QString::fromStdString(p.stage),
+                 done = static_cast<qulonglong>(p.done),
                  total = static_cast<qulonglong>(p.total)] { OnProgress(stage, done, total); },
                 Qt::QueuedConnection);
         };
@@ -164,7 +257,7 @@ void ShaderWarmDialog::RequestStop() {
     }
     stopping = true;
     worker.request_stop();
-    stage_label->setText(tr("Stopping"));
+    footer->setText(tr("Stopping\u2026"));
     button->setEnabled(false);
 }
 
@@ -173,13 +266,20 @@ void ShaderWarmDialog::OnProgress(const QString& stage, qulonglong done, qulongl
     if (stopping) {
         return;
     }
+    const int index = StageIndex(stage.toStdString());
+    QString value;
     if (total > 0) {
-        stage_label->setText(tr("%1: %L2 / %L3").arg(stage).arg(done).arg(total));
+        const auto permille = static_cast<int>((std::min<qulonglong>)(done * 1000 / total, 1000));
+        value = tr("%1%").arg(permille / 10);
         progress_bar->setRange(0, 1000);
-        progress_bar->setValue(static_cast<int>((std::min<qulonglong>)(done * 1000 / total, 1000)));
+        progress_bar->setValue(permille);
     } else {
-        stage_label->setText(done > 0 ? tr("%1: %L2").arg(stage).arg(done) : stage);
+        value = done > 0 ? tr("%L1").arg(done) : QString{};
         progress_bar->setRange(0, 0);
+    }
+    // A finished stage keeps the value it ended on.
+    if (index >= 0) {
+        SetStage(index, value);
     }
 }
 
@@ -194,15 +294,17 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
 
     QString text;
     if (result.ok) {
-        stage_label->setText(tr("Shader precache is ready."));
+        SetStage(static_cast<int>(stages.size()), {});
+        result_notice->SetTone(Spotlight::Notice::Tone::Success);
+        text = tr("Shader precache is ready.") + QLatin1Char('\n');
         if (result.compute_programs == 0) {
-            text = result.archives == 0 && result.packs == 0
-                       ? tr("This game keeps its shaders in a format Lichii can't read, so none "
-                            "are prepared from the game files.")
-                       : tr("The game files have no compute shaders to prepare.");
+            text += result.archives == 0 && result.packs == 0
+                        ? tr("This game keeps its shaders in a format Lichii can't read, so none "
+                             "are prepared from the game files.")
+                        : tr("The game files have no compute shaders to prepare.");
         } else {
-            text = tr("Compute programs: %L1")
-                       .arg(static_cast<qulonglong>(result.compute_programs));
+            text +=
+                tr("Compute programs: %L1").arg(static_cast<qulonglong>(result.compute_programs));
         }
         if (result.skipped > 0) {
             text += QLatin1Char('\n') +
@@ -217,17 +319,25 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
                      : tr("It is built on the loading screen when Precache shaders before game "
                           "start is on."));
     } else if (stopped) {
-        stage_label->setText(tr("Shader precache stopped."));
+        result_notice->SetTone(Spotlight::Notice::Tone::Neutral);
+        text = tr("Shader precache stopped.");
     } else {
-        stage_label->setText(tr("Shader precache could not be built."));
-        text = result.error.empty() ? tr("No details were given.")
-                                    : QString::fromStdString(result.error);
+        result_notice->SetTone(Spotlight::Notice::Tone::Error);
+        text = tr("Shader precache could not be built.") + QLatin1Char('\n') +
+               (result.error.empty() ? tr("No details were given.")
+                                     : QString::fromStdString(result.error));
     }
-    result_label->setText(text);
-    result_label->setVisible(!text.isEmpty());
+    result_notice->setText(text);
+    result_notice->setVisible(!text.isEmpty());
+    footer->clear();
     button->setText(tr("Close"));
+    button->setProperty("kind", QStringLiteral("primary"));
+    button->style()->unpolish(button);
+    button->style()->polish(button);
     button->setEnabled(true);
-    adjustSize();
+    button->setDefault(true);
+    button->setFocus();
+    resize(width(), (std::max)(sizeHint().height(), heightForWidth(width())));
     emit BuildFinished(result.ok);
 }
 
@@ -238,7 +348,7 @@ void ShaderWarmDialog::closeEvent(QCloseEvent* event) {
         event->ignore();
         return;
     }
-    QDialog::closeEvent(event);
+    Spotlight::Dialog::closeEvent(event);
 }
 
 /// Escape or Cancel while a build runs only asks it to stop.
@@ -247,5 +357,5 @@ void ShaderWarmDialog::reject() {
         RequestStop();
         return;
     }
-    QDialog::reject();
+    Spotlight::Dialog::reject();
 }

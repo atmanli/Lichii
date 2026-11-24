@@ -9,6 +9,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Test)
 add_executable(iidb_artwork_tests
     iidb_artwork.cpp
@@ -17,6 +18,11 @@ add_executable(iidb_artwork_tests
     ../../lichii/configuration/iidb_key_dialog.cpp
     ../../lichii/game/artwork_image.cpp
     ../../lichii/game/iidb_client.cpp
+    ../../lichii/spotlight/dialog.cpp
+    ../../lichii/spotlight/notice.cpp
+    ../../lichii/spotlight/theme.cpp
+    ../../lichii/spotlight/widgets.cpp
+    ../../../dist/qt_themes/lichii/spotlight.qrc
 )
 target_compile_features(iidb_artwork_tests PRIVATE cxx_std_20)
 target_compile_definitions(iidb_artwork_tests PRIVATE

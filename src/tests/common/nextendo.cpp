@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <ctime>
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <random>
@@ -1169,4 +1171,111 @@ TEST_CASE("Nextendo: the heartbeat runs for the profile in use only", "[common]"
     REQUIRE_FALSE(Nextendo::LoadAccount(OtherProfile).has_value());
     REQUIRE(Nextendo::LastSignOutReason(Profile) == Nextendo::SignOutReason::None);
     REQUIRE(Nextendo::LoadAccount(Profile)->nex_token == "nx2.old");
+}
+
+TEST_CASE("Nextendo: online counts from a saved nextendo.network response", "[common]") {
+    std::ifstream file{LICHII_NEXTENDO_FIXTURE_DIR "/online-counts.json"};
+    REQUIRE(file.good());
+    const std::string body{std::istreambuf_iterator<char>{file}, {}};
+    const auto games = Nextendo::ParseOnlineCounts(body);
+    REQUIRE(games.has_value());
+    REQUIRE(games->size() == 48);
+    u32 players = 0;
+    std::size_t titles = 0;
+    for (const auto& game : *games) {
+        players += game.players;
+        titles += game.titles.size();
+    }
+    // Scarlet and Violet share one count, so the sum of "counts" (93) would count it twice.
+    REQUIRE(players == 82);
+    REQUIRE(titles == 52);
+    REQUIRE(games->front().name == "Pokémon Legends: Z-A");
+    REQUIRE(games->front().players == 17);
+    REQUIRE(games->front().titles == std::vector<u64>{0x0100F43008C44000});
+    const auto scarlet =
+        std::ranges::find(*games, std::string{"Pokémon Scarlet"}, &Nextendo::OnlineGame::name);
+    REQUIRE(scarlet != games->end());
+    REQUIRE(scarlet->players == 11);
+    REQUIRE(scarlet->titles == std::vector<u64>{0x0100A3D008C5C000, 0x01008F6008C5E000});
+}
+
+TEST_CASE("Nextendo: online counts keep titles only the count map lists", "[common]") {
+    const auto games = Nextendo::ParseOnlineCounts(
+        R"({"counts":{"0100152000022000":5,"010015100b514000":2},)"
+        R"("jeux":[{"nom":"Mario Kart 8 Deluxe","joueurs":5,"titres":["0100152000022000"]}],)"
+        R"("noms":{"010015100b514000":"Super Mario Bros. Wonder"}})");
+    REQUIRE(games.has_value());
+    REQUIRE(games->size() == 2);
+    REQUIRE(games->at(1).name == "Super Mario Bros. Wonder");
+    REQUIRE(games->at(1).players == 2);
+    REQUIRE(games->at(1).titles == std::vector<u64>{0x010015100B514000});
+
+    REQUIRE_FALSE(Nextendo::ParseOnlineCounts(R"({"error":"down"})").has_value());
+    REQUIRE_FALSE(Nextendo::ParseOnlineCounts("<html>").has_value());
+}
+
+namespace {
+
+// The shape the site's Status page reads from /api/status/live.
+constexpr std::string_view LiveStatus =
+    R"({"updated":1795400000,"games":[)"
+    R"({"titles":["0100152000022000"],"lobbies":[{"kind":"mk8-world-race","mode":"Worldwide",)"
+    R"("state":"open","count":2,"max":12,"players":[]},{"kind":"friend-room","state":"full",)"
+    R"("count":2,"max":2,"players":[]}],"players":[)"
+    R"({"pid":1,"name":"tester","friend":false,"you":true,"lobby":0},)"
+    R"({"pid":11,"name":"Amy","friend":true,"you":false,"lobby":0},)"
+    R"({"pid":12,"name":"Cleo","friend":false,"lobby":1}]},)"
+    R"({"titles":[],"lobbies":[],"players":[]}]})";
+
+} // namespace
+
+TEST_CASE("Nextendo: live status", "[common]") {
+    const auto games = Nextendo::ParseLiveStatus(LiveStatus);
+    REQUIRE(games.has_value());
+    REQUIRE(games->size() == 1);
+    REQUIRE(games->front().titles == std::vector<u64>{0x0100152000022000});
+    REQUIRE(games->front().lobbies == 2);
+    REQUIRE(games->front().friends == std::vector<std::string>{"Amy"});
+
+    const auto keyed = Nextendo::ParseLiveStatus(
+        R"({"games":{"01006a800016e000":{"lobbies":[{}],"players":[]}}})");
+    REQUIRE(keyed.has_value());
+    REQUIRE(keyed->front().titles == std::vector<u64>{0x01006A800016E000});
+    REQUIRE(keyed->front().lobbies == 1);
+
+    REQUIRE_FALSE(Nextendo::ParseLiveStatus(R"({"error":"Session invalide"})").has_value());
+}
+
+TEST_CASE("Nextendo: player counts and live status from the API", "[common]") {
+    FakeNextendo fake;
+    fake.Answer(std::string{Nextendo::OnlineCountsPath}, 200,
+                R"({"counts":{"0100152000022000":5},"jeux":[{"nom":"Mario Kart 8 Deluxe",)"
+                R"("joueurs":5,"titres":["0100152000022000"]}]})");
+    const auto counts = Nextendo::FetchOnlineCounts(ClientId);
+    REQUIRE(counts.has_value());
+    REQUIRE(counts->front().players == 5);
+    REQUIRE(fake.Authorization(std::string{Nextendo::OnlineCountsPath}).empty());
+
+    const std::string live{Nextendo::LiveStatusPath};
+    SECTION("signed in with friends") {
+        fake.Answer(live, 200, std::string{LiveStatus});
+        Nextendo::SaveAccount(Profile, SocialSignedIn());
+        const auto games = Nextendo::FetchLiveStatus(ClientId, Profile);
+        REQUIRE(games.has_value());
+        REQUIRE(games->front().friends.size() == 1);
+        REQUIRE(fake.Authorization(live) == "Bearer access.old");
+    }
+    SECTION("not without the friends scope") {
+        Nextendo::SaveAccount(Profile, SignedIn(2 * 60 * 60, 30 * 60));
+        REQUIRE_FALSE(Nextendo::FetchLiveStatus(ClientId, Profile).has_value());
+        REQUIRE_FALSE(Nextendo::FetchLiveStatus(ClientId, OtherProfile).has_value());
+        REQUIRE(fake.Hits(live) == 0);
+    }
+    SECTION("a refusal keeps the sign-in's scopes") {
+        fake.Answer(live, 401, R"({"error":"Session invalide ou expirée."})");
+        Nextendo::SaveAccount(Profile, SocialSignedIn());
+        REQUIRE_FALSE(Nextendo::FetchLiveStatus(ClientId, Profile).has_value());
+        REQUIRE(fake.Hits(live) == 1);
+        REQUIRE(Nextendo::HasSocialScopes(*Nextendo::LoadAccount(Profile)));
+    }
 }

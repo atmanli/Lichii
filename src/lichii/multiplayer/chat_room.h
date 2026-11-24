@@ -36,7 +36,7 @@ public:
     void RetranslateUi();
     void SetPlayerList(const Network::RoomMember::MemberList& member_list);
     void Clear();
-    void AppendStatusMessage(const QString& msg);
+    void AppendStatusMessage(const QString& msg, bool success = false);
     ~ChatRoom();
 
     void SetModPerms(bool is_mod);
@@ -60,6 +60,7 @@ signals:
 private:
     static constexpr u32 max_chat_lines = 1000;
     void AppendChatMessage(const QString&);
+    void AddIconResources();
     bool ValidateMessage(const std::string&);
     void SendModerationRequest(Network::RoomMessageTypes type, const std::string& nickname);
 

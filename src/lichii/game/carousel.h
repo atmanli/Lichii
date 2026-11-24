@@ -3,25 +3,9 @@
 
 #pragma once
 
-#include <QListView>
-#include <QString>
+#include "lichii/game/game_grid.h"
 
-class GameCard;
-class GameListModel;
-class QResizeEvent;
-
-class GameCarousel : public QListView {
-    Q_OBJECT
-
+class GameCarousel final : public GameGrid {
 public:
     explicit GameCarousel(QWidget* parent = nullptr);
-
-    void SetModel(GameListModel* model);
-    void ApplyFilter(const QString& edit_filter_text, GameListModel* model);
-    void UpdateIconSize();
-
-    QModelIndex indexAt(const QPoint& point) const override;
-
-private:
-    GameCard* m_gameCard = nullptr;
 };

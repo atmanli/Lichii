@@ -14,7 +14,6 @@ class QLabel;
 // Widget for representing touchscreen coordinates
 class TouchScreenPreview : public QFrame {
     Q_OBJECT
-    Q_PROPERTY(QColor dotHighlightColor MEMBER dot_highlight_color)
 
 public:
     explicit TouchScreenPreview(QWidget* parent);
@@ -32,7 +31,6 @@ signals:
     void DotMoved(int dot_id, const QPoint& pos);
 
 protected:
-    void resizeEvent(QResizeEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void leaveEvent(QEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -41,13 +39,12 @@ protected:
 private:
     std::optional<QPoint> MapToDeviceCoords(int screen_x, int screen_y) const;
     void PositionDot(QLabel* dot, int device_x = -1, int device_y = -1) const;
+    void NumberDots() const;
 
-    bool ignore_resize = false;
     QPointer<QLabel> coord_label;
 
     std::vector<std::pair<int, QLabel*>> dots;
     int max_dot_id = 0;
-    QColor dot_highlight_color;
     static constexpr char PropId[] = "dot_id";
     static constexpr char PropX[] = "device_x";
     static constexpr char PropY[] = "device_y";

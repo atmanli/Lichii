@@ -28,6 +28,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "configuration/system/new_user_dialog.h"
+#include "lichii/spotlight/theme.h"
 #include "core/constants.h"
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
@@ -249,6 +250,26 @@ void ConfigureProfileManager::SelectUser(const QModelIndex& index) {
         std::clamp<s32>(index.row(), 0, static_cast<s32>(profile_manager.GetUserCount() - 1));
 
     UpdateCurrentUser();
+    emit CurrentUserChanged();
+}
+
+bool ConfigureProfileManager::CanAddUser() const {
+    return ui->pm_add->isEnabled();
+}
+
+void ConfigureProfileManager::SelectUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    SelectUser(item_model->index(row, 0));
+}
+
+void ConfigureProfileManager::EditUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    EditUser();
+}
+
+void ConfigureProfileManager::ConfirmDeleteUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    ConfirmDeleteUser();
 }
 
 void ConfigureProfileManager::AddUser() {
@@ -290,7 +311,8 @@ void ConfigureProfileManager::EditUser() {
     std::ranges::copy_if(profile.username, std::back_inserter(username),
                          [](u8 byte) { return byte != 0; });
 
-    NewUserDialog* dialog = new NewUserDialog(uuid.value(), username, tr("Edit User"), this);
+    NewUserDialog* dialog = new NewUserDialog(uuid.value(), username, tr("Edit profile"), this);
+    connect(dialog, &NewUserDialog::deleteRequested, this, &ConfigureProfileManager::ConfirmDeleteUser);
 
     connect(dialog, &NewUserDialog::userAdded, this,
             [dialog, profile, user_idx, uuid, this](User user) mutable {
@@ -330,7 +352,7 @@ void ConfigureProfileManager::ConfirmDeleteUser() {
     ASSERT(uuid);
     const auto username = GetAccountUsername(profile_manager, *uuid);
 
-    confirm_dialog->SetInfo(username, *uuid, index);
+    confirm_dialog->SetInfo(username, index);
     confirm_dialog->show();
 }
 
@@ -361,39 +383,20 @@ void ConfigureProfileManager::DeleteUser(const int index) {
 }
 
 ConfigureProfileManagerDeleteDialog::ConfigureProfileManagerDeleteDialog(QWidget* parent)
-    : QDialog{parent} {
-    auto dialog_vbox_layout = new QVBoxLayout(this);
-    dialog_button_box =
-        new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No, Qt::Horizontal, parent);
-    auto label_message =
-        new QLabel(tr("Delete this user? All of the user's save data will be deleted."), this);
-    label_info = new QLabel(this);
-    auto dialog_hbox_layout_widget = new QWidget(this);
-    auto dialog_hbox_layout = new QHBoxLayout(dialog_hbox_layout_widget);
-    icon_scene = new QGraphicsScene(0, 0, 64, 64, this);
-    auto icon_view = new QGraphicsView(icon_scene, this);
+    : Spotlight::Dialog{parent} {
+    SetIcon(QStringLiteral("warning-circle"), Spotlight::Color::Destructive());
+    SetSubtitle(tr("Every game save of this profile is deleted from this PC. This cannot be undone."));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+    auto* delete_button = buttons->addButton(tr("Delete profile"), QDialogButtonBox::AcceptRole);
+    delete_button->setDefault(true);
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSizeConstraint(QLayout::SetFixedSize);
+    layout->addWidget(buttons);
+    buttons->setMinimumWidth(370);
 
-    dialog_hbox_layout_widget->setLayout(dialog_hbox_layout);
-    icon_view->setMinimumSize(64, 64);
-    icon_view->setMaximumSize(64, 64);
-    icon_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    icon_view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    icon_view->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-
-    this->setLayout(dialog_vbox_layout);
-    this->setWindowTitle(tr("Confirm Delete"));
-    this->setSizeGripEnabled(false);
-
-    dialog_vbox_layout->addWidget(label_message);
-    dialog_vbox_layout->addWidget(dialog_hbox_layout_widget);
-    dialog_vbox_layout->addWidget(dialog_button_box);
-    dialog_hbox_layout->addWidget(icon_view);
-    dialog_hbox_layout->addWidget(label_info);
-
-    setMinimumSize(380, 160);
-
-    connect(dialog_button_box, &QDialogButtonBox::rejected, this, [this]() { close(); });
-    connect(dialog_button_box, &QDialogButtonBox::accepted, this, [this]() {
+    connect(buttons, &QDialogButtonBox::rejected, this, [this]() { close(); });
+    connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
         close();
         emit deleteUser(m_index);
     });
@@ -401,12 +404,7 @@ ConfigureProfileManagerDeleteDialog::ConfigureProfileManagerDeleteDialog(QWidget
 
 ConfigureProfileManagerDeleteDialog::~ConfigureProfileManagerDeleteDialog() = default;
 
-void ConfigureProfileManagerDeleteDialog::SetInfo(const QString& username, const Common::UUID& uuid,
-                                                  int index) {
-    label_info->setText(
-        tr("Name: %1\nUUID: %2").arg(username, QString::fromStdString(uuid.FormattedString())));
-    icon_scene->clear();
-    icon_scene->addPixmap(GetIcon(uuid));
-
+void ConfigureProfileManagerDeleteDialog::SetInfo(const QString& username, int index) {
+    setWindowTitle(tr("Delete %1?").arg(username));
     m_index = index;
 }

@@ -6,7 +6,6 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include <QFutureWatcher>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
@@ -14,6 +13,7 @@
 #include "network/announce_multiplayer_session.h"
 #include "network/network.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class Lobby;
@@ -30,7 +30,7 @@ class System;
  * Listing of all public games pulled from services. The lobby should be simple enough for users to
  * find the game they want to play, and join it.
  */
-class Lobby : public QDialog {
+class Lobby : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

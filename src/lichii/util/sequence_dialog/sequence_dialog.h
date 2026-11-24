@@ -3,21 +3,19 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QKeySequenceEdit;
 
-class SequenceDialog : public QDialog {
+class SequenceDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
-    explicit SequenceDialog(QWidget* parent = nullptr);
-    ~SequenceDialog() override;
+    explicit SequenceDialog(QWidget* parent, const QString& action);
 
     QKeySequence GetSequence() const;
-    void closeEvent(QCloseEvent*) override;
 
 private:
     QKeySequenceEdit* key_sequence;
-    bool focusNextPrevChild(bool next) override;
+    void keyPressEvent(QKeyEvent* event) override;
 };

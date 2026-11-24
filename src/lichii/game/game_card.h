@@ -5,31 +5,36 @@
 
 #include <QStyledItemDelegate>
 
-/**
- * A stylized "card"-like delegate for the game grid view.
- * Adapted from QML
- */
+#include "common/common_types.h"
+
 class GameCard : public QStyledItemDelegate {
     Q_OBJECT
 public:
     explicit GameCard(QObject* parent = nullptr);
 
+    static constexpr int GlowBlur = 32;
+    /// Where a tile starts in its cell, leaving the first row and column room for the glow. A tile
+    /// reaches up to HitShift past its cell's right and bottom edges.
+    static constexpr int TileOffset = 36;
+    static constexpr int HitShift = 20;
+    /// How far the glow and the hover shadow reach outside a cell.
+    static constexpr int EffectMargin = 48 + TileOffset;
+
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
 
-    QRect getCardRect(const QStyleOptionViewItem &option, const QModelIndex &index) const;
-
-    bool hitTest(const QPoint& point, const QModelIndex& index,
-                 const QWidget* widget, const QRect& cellRect) const;
-
+    QRect CardRect(const QRect& cell) const;
+    QRect PlayRect(const QRect& cell) const;
+    bool HitTest(const QPoint& point, const QRect& cell) const;
+    /// The Nextendo player pill in the tile's top-right corner; empty when it shows none.
+    QRect OnlineBadgeRect(const QRect& tile, u64 program_id, bool favorite) const;
+    QString OnlineToolTip(const QPoint& point, const QRect& cell, const QModelIndex& index) const;
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
-    void setSize(const QSize& newSize, const QSize& contentSize, const int padding, const int columns);
+    QSize UpdateSize(int viewport_height = 0);
 
 private:
-    static constexpr int cardMargin = 8;
-
-    QSize m_size;
-    QSize m_contentSize;
-    int m_padding;
-    int m_columns;
+    QSize cell_size;
+    int tile_size = 132;
+    int icon_size = 124;
+    bool show_name = false;
 };

@@ -3,25 +3,27 @@
 
 #pragma once
 
-#include <QDialog>
-#include <QStandardItemModel>
+#include <QList>
+#include <QStringList>
 
-namespace Ui {
-class ModSelectDialog;
-}
+#include "lichii/spotlight/dialog.h"
 
-class ModSelectDialog : public QDialog {
+class QCheckBox;
+
+class ModSelectDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
     explicit ModSelectDialog(const QStringList& mods, QWidget* parent = nullptr);
-    ~ModSelectDialog();
+    ~ModSelectDialog() override;
 
 signals:
     void modsSelected(const QStringList& mods);
 
-private:
-    Ui::ModSelectDialog* ui;
+protected:
+    void keyPressEvent(QKeyEvent* event) override;
 
-    QStandardItemModel* item_model;
+private:
+    QStringList mods;
+    QList<QCheckBox*> checks;
 };

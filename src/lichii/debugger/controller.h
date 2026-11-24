@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <QWidget>
+#include "lichii/spotlight/dialog.h"
 
 class QAction;
 class QHideEvent;
@@ -20,7 +20,7 @@ class EmulatedController;
 enum class ControllerTriggerType;
 } // namespace Core::HID
 
-class ControllerDialog : public QWidget {
+class ControllerDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

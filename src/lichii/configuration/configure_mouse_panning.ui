@@ -1,212 +1,318 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
  <class>ConfigureMousePanning</class>
- <widget class="QDialog" name="configure_mouse_panning">
-  <property name="windowTitle">
-   <string>Configure mouse panning</string>
-  </property>
-  <layout class="QVBoxLayout">
+ <widget class="QDialog" name="ConfigureMousePanning">
+  <property name="windowTitle"><string>Mouse panning</string></property>
+  <property name="styleSheet"><string notr="true">QLabel[row="true"] { font: 500 14px "Lexend"; color: #ffffff; }
+QLabel[rowStrong="true"] { font: 600 14px "Lexend"; color: #ffffff; }
+QLabel[sliderLabel="true"] { font: 400 13px "Lexend"; color: #9effffff; }
+QLabel[value="true"] { font: 600 13px "Lexend"; color: #ffffff; }
+QLabel[field="true"] { font: 600 13px "Lexend"; color: #9effffff; }
+QLabel[section="true"] { font: 600 12px "Lexend"; color: #8cffffff; }
+QLabel[hint="true"] { font: 400 12px "Lexend"; color: #9effffff; }
+QLabel[warning="true"] { font: 400 12px "Lexend"; color: #ffd37a; }
+QPushButton[ghost="true"] { font: 600 13px "Lexend"; background: transparent; border: none; border-radius: 18px;
+                            min-height: 36px; max-height: 36px; padding: 0 18px; color: #ffffff; }
+QPushButton[ghost="true"]:hover { background: #14ffffff; }
+QPushButton[outline="true"] { font: 600 13px "Lexend"; background: #1fffffff; border: 1px solid #2effffff;
+                              border-radius: 18px; min-height: 36px; max-height: 36px; padding: 0 18px; color: #ffffff; }
+QPushButton[outline="true"]:hover { background: #2effffff; }
+QPushButton[outline="true"]:disabled { color: #73ffffff; }
+QFrame[bindingRow="true"] { background: #0fffffff; border: 1px solid #14ffffff; border-radius: 12px; }
+QPushButton[chip="true"] { font: 600 12px "Lexend"; background: #1fffffff; border: none; border-radius: 8px;
+                           min-height: 24px; max-height: 24px; padding: 0 8px; color: #ffffff; }
+QPushButton[chip="true"]:hover { background: #2effffff; }
+QLineEdit#tas_path_edit { min-height: 38px; max-height: 38px; border-radius: 12px; padding: 0 14px;
+                          background: #08ffffff; border: 1px solid #14ffffff; font: 500 13px "Lexend"; color: #b8ffffff; }</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>20</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
    <item>
-    <widget class="QCheckBox" name="enable">
-     <property name="text">
-      <string>Enable mouse panning</string>
-     </property>
-     <property name="toolTip">
-      <string>Can be toggled via a hotkey. Default hotkey is Ctrl + F9</string>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout">
+    <layout class="QVBoxLayout" name="rows">
+     <property name="spacing"><number>14</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
      <item>
-      <widget class="QGroupBox" name="sensitivity_box">
-       <property name="title">
-        <string>Sensitivity</string>
-       </property>
-       <layout class="QGridLayout">
-        <item row="0" column="0">
-         <widget class="QLabel" name="x_sensitivity_label">
-          <property name="text">
-           <string>Horizontal</string>
-          </property>
-         </widget>
-        </item>
-        <item row="0" column="1">
-         <widget class="QSpinBox" name="x_sensitivity">
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <property name="suffix">
-           <string>%</string>
-          </property>
-          <property name="minimum">
-           <number>1</number>
-          </property>
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="value">
-           <number>50</number>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="0">
-         <widget class="QLabel" name="y_sensitivity_label">
-          <property name="text">
-           <string>Vertical</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="1">
-         <widget class="QSpinBox" name="y_sensitivity">
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <property name="suffix">
-           <string>%</string>
-          </property>
-          <property name="minimum">
-           <number>1</number>
-          </property>
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="value">
-           <number>50</number>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </widget>
+      <layout class="QHBoxLayout" name="enableRow">
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="enableLabel">
+         <property name="text"><string>Mouse panning</string></property>
+         <property name="rowStrong" stdset="0"><bool>true</bool></property>
+         <property name="toolTip"><string>Can be toggled via a hotkey. Default hotkey is Ctrl + F9</string></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer1">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="Spotlight::ToggleSwitch" name="enable">
+         <property name="accessibleName"><string>Mouse panning</string></property>
+         <property name="toolTip"><string>Can be toggled via a hotkey. Default hotkey is Ctrl + F9</string></property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item>
-      <widget class="QGroupBox" name="deadzone_counterweight_box">
-       <property name="title">
-        <string>Deadzone counterweight</string>
-       </property>
-       <property name="toolTip">
-        <string>Counteracts a game's built-in deadzone</string>
-       </property>
-       <layout class="QGridLayout">
-        <item row="0" column="0">
-         <widget class="QLabel" name="deadzone_counterweight_label">
-          <property name="text">
-           <string>Deadzone</string>
-          </property>
-         </widget>
-        </item>
-        <item row="0" column="1">
-         <widget class="QSpinBox" name="deadzone_counterweight">
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <property name="suffix">
-           <string>%</string>
-          </property>
-          <property name="minimum">
-           <number>0</number>
-          </property>
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="value">
-           <number>0</number>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </widget>
+      <layout class="QHBoxLayout" name="x_sensitivityRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="x_sensitivity_label">
+         <property name="text"><string>Horizontal sensitivity</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>150</width><height>0</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer2">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="x_sensitivity">
+         <property name="minimum"><number>1</number></property>
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Horizontal sensitivity</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="x_sensitivity_value">
+         <property name="value" stdset="0"><bool>true</bool></property>
+         <property name="alignment"><set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignVCenter</set></property>
+         <property name="minimumSize"><size><width>44</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>44</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item>
-      <widget class="QGroupBox" name="decay_box">
-       <property name="title">
-        <string>Stick decay</string>
-       </property>
-       <layout class="QGridLayout">
-        <item row="0" column="0">
-         <widget class="QLabel" name="decay_strength_label">
-          <property name="text">
-           <string>Strength</string>
-          </property>
-         </widget>
-        </item>
-        <item row="0" column="1">
-         <widget class="QSpinBox" name="decay_strength">
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <property name="suffix">
-           <string>%</string>
-          </property>
-          <property name="minimum">
-           <number>0</number>
-          </property>
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="value">
-           <number>22</number>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="0">
-         <widget class="QLabel" name="min_decay_label">
-          <property name="text">
-           <string>Minimum</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="1">
-         <widget class="QSpinBox" name="min_decay">
-          <property name="alignment">
-           <set>Qt::AlignCenter</set>
-          </property>
-          <property name="suffix">
-           <string>%</string>
-          </property>
-          <property name="minimum">
-           <number>0</number>
-          </property>
-          <property name="maximum">
-           <number>100</number>
-          </property>
-          <property name="value">
-           <number>5</number>
-          </property>
-         </widget>
-        </item>
-       </layout>
+      <layout class="QHBoxLayout" name="y_sensitivityRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="y_sensitivity_label">
+         <property name="text"><string>Vertical sensitivity</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>150</width><height>0</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer3">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="y_sensitivity">
+         <property name="minimum"><number>1</number></property>
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Vertical sensitivity</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="y_sensitivity_value">
+         <property name="value" stdset="0"><bool>true</bool></property>
+         <property name="alignment"><set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignVCenter</set></property>
+         <property name="minimumSize"><size><width>44</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>44</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="deadzone_counterweightRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="deadzone_counterweight_label">
+         <property name="text"><string>Deadzone</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>150</width><height>0</height></size></property>
+         <property name="toolTip"><string>Counteracts a game's built-in deadzone</string></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer4">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="deadzone_counterweight">
+         <property name="minimum"><number>0</number></property>
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Deadzone</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="toolTip"><string>Counteracts a game's built-in deadzone</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="deadzone_counterweight_value">
+         <property name="value" stdset="0"><bool>true</bool></property>
+         <property name="alignment"><set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignVCenter</set></property>
+         <property name="minimumSize"><size><width>44</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>44</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="decay_strengthRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="decay_strength_label">
+         <property name="text"><string>Stick decay</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>150</width><height>0</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer5">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="decay_strength">
+         <property name="minimum"><number>0</number></property>
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Stick decay</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="decay_strength_value">
+         <property name="value" stdset="0"><bool>true</bool></property>
+         <property name="alignment"><set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignVCenter</set></property>
+         <property name="minimumSize"><size><width>44</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>44</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="min_decayRow">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="min_decay_label">
+         <property name="text"><string>Minimum decay</string></property>
+         <property name="sliderLabel" stdset="0"><bool>true</bool></property>
+         <property name="minimumSize"><size><width>150</width><height>0</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="spacer6">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+         <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QSlider" name="min_decay">
+         <property name="minimum"><number>0</number></property>
+         <property name="maximum"><number>100</number></property>
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="accessibleName"><string>Minimum decay</string></property>
+         <property name="minimumSize"><size><width>140</width><height>18</height></size></property>
+         <property name="maximumSize"><size><width>140</width><height>18</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="min_decay_value">
+         <property name="value" stdset="0"><bool>true</bool></property>
+         <property name="alignment"><set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignVCenter</set></property>
+         <property name="minimumSize"><size><width>44</width><height>0</height></size></property>
+         <property name="maximumSize"><size><width>44</width><height>16777215</height></size></property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <widget class="QLabel" name="warning_label">
+       <property name="wordWrap"><bool>true</bool></property>
+       <property name="warning" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
     </layout>
    </item>
    <item>
-    <widget class="QLabel" name="warning_label">
-     <property name="text">
-      <string/>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout">
+    <layout class="QHBoxLayout" name="buttonRow">
+     <property name="spacing"><number>10</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
      <item>
       <widget class="QPushButton" name="default_button">
-       <property name="text">
-        <string>Default</string>
-       </property>
+       <property name="text"><string>Defaults</string></property>
+       <property name="ghost" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
      <item>
+      <spacer name="spacer7">
+       <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+       <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+       <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+      </spacer>
+     </item>
+     <item>
       <widget class="QDialogButtonBox" name="button_box">
-       <property name="standardButtons">
-        <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
-       </property>
+       <property name="standardButtons"><set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Save</set></property>
       </widget>
      </item>
     </layout>
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget><class>Spotlight::ToggleSwitch</class><extends>QAbstractButton</extends><header>lichii/spotlight/widgets.h</header></customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

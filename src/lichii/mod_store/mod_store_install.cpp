@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
@@ -21,6 +22,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QScopeGuard>
 #include <QSet>
 #include <QStringList>
@@ -43,6 +45,14 @@ constexpr int MaxEntries = 4096;
 constexpr qint64 MaxManifestBytes = 16 * 1024;
 constexpr qint64 ChunkSize = 64 * 1024;
 const QString ManifestName = u".lichii-mod-store.json"_s;
+const QString ThumbnailName = u".lichii-mod-store-thumbnail.jpg"_s;
+const QString UpdateCheckName = u".lichii-mod-store-update.json"_s;
+constexpr qint64 MaxThumbnailBytes = 1024 * 1024;
+constexpr qint64 MaxUpdateCheckBytes = 4 * 1024;
+constexpr std::array SourceKeys{std::pair{Source::Demo, std::string_view{"sample"}},
+                                std::pair{Source::Submission, std::string_view{"catalog"}},
+                                std::pair{Source::GameBanana, std::string_view{"gamebanana"}},
+                                std::pair{Source::GitHub, std::string_view{"github"}}};
 const QString StagingTemplate = u".lichii-mod-store-XXXXXX"_s;
 
 std::mutex install_mutex;
@@ -66,6 +76,18 @@ bool IsModId(const QString& mod_id) {
 bool IsDisplayMetadata(const QString& name, const QString& version) {
     return !name.trimmed().isEmpty() && name.size() <= 512 && !version.trimmed().isEmpty() &&
            version.size() <= 256;
+}
+
+QString SourceKey(Source source) {
+    const auto it =
+        std::ranges::find_if(SourceKeys, [&](const auto& entry) { return entry.first == source; });
+    return QString::fromLatin1(it->second);
+}
+
+std::optional<Source> ParseSource(const QString& key) {
+    const auto it = std::ranges::find_if(
+        SourceKeys, [&](const auto& entry) { return QLatin1StringView(entry.second) == key; });
+    return it == SourceKeys.end() ? std::nullopt : std::optional{it->first};
 }
 
 bool IsInstallInfo(const QString& root, const QString& title_id, const QString& mod_id,
@@ -133,7 +155,23 @@ std::optional<InstalledMod> ReadOwnedMod(const QString& path, const QString& tit
         }
         mod.sha256 = QByteArray::fromHex(hex.toLatin1());
     }
+    if (const QString author = object[u"author"_s].toString(); author.size() <= 256) {
+        mod.author = author.trimmed();
+    }
+    mod.source = ParseSource(object[u"source"_s].toString());
+    mod.file_date = QDateTime::fromString(object[u"file_date"_s].toString(), Qt::ISODate);
+    if (const QJsonValue verified = object[u"verified"_s]; verified.isBool()) {
+        mod.verified = verified.toBool();
+    }
     return mod;
+}
+
+QJsonObject ReadSmallJson(const QString& path, qint64 limit) {
+    QFile file(path);
+    if (!IsRegularFile(path) || !file.open(QIODevice::ReadOnly) || file.size() > limit) {
+        return {};
+    }
+    return QJsonDocument::fromJson(file.read(limit)).object();
 }
 
 bool HasSafeContents(const QString& path) {
@@ -798,7 +836,8 @@ bool WriteNewFile(const QString& path, const QByteArray& bytes) {
 template <typename StagePayload>
 QString InstallPreparedMod(const QString& root, const QString& title, const QString& mod_id,
                            const QString& name, const QString& version, const QByteArray& sha256,
-                           const QString& stage_error, StagePayload stage_payload) {
+                           const InstallDetails& details, const QString& stage_error,
+                           StagePayload stage_payload) {
     QDir mods_dir(QDir(root).absolutePath());
     const QDir title_dir(mods_dir.filePath(title));
     const QString destination = title_dir.filePath(mod_id);
@@ -818,15 +857,31 @@ QString InstallPreparedMod(const QString& root, const QString& title, const QStr
     if (!QDir().mkdir(stage.path()) || !stage_payload(stage)) {
         return stage_error;
     }
+    for (const QString& reserved : {ThumbnailName, UpdateCheckName}) {
+        const QString path = stage.filePath(reserved);
+        if (!IsAbsent(path) && (!IsRegularFile(path) || !QFile::remove(path))) {
+            return stage_error;
+        }
+    }
+    if (!details.thumbnail_jpeg.isEmpty() && details.thumbnail_jpeg.size() <= MaxThumbnailBytes &&
+        !WriteNewFile(stage.filePath(ThumbnailName), details.thumbnail_jpeg)) {
+        return u"Could not write the mod thumbnail."_s;
+    }
 
-    const QJsonObject object{
+    QJsonObject object{
         {u"schema"_s, 1},
         {u"title_id"_s, title},
         {u"id"_s, mod_id},
         {u"name"_s, name},
         {u"version"_s, version},
         {u"sha256"_s, QString::fromLatin1(sha256.toHex())},
+        {u"author"_s, details.author.left(256)},
+        {u"source"_s, SourceKey(details.source)},
+        {u"verified"_s, details.verified},
     };
+    if (details.file_date.isValid()) {
+        object.insert(u"file_date"_s, details.file_date.toUTC().toString(Qt::ISODate));
+    }
     if (!WriteNewFile(stage.filePath(ManifestName),
                       QJsonDocument(object).toJson(QJsonDocument::Compact))) {
         return u"Could not write the mod ownership manifest."_s;
@@ -880,7 +935,7 @@ bool MatchesGitHubIpsFilename(const QString& filename, QStringView build_id) {
 
 QString InstallMod(const QString& root, const QString& title_id, const QString& mod_id,
                    const QString& name, const QString& version, const QString& archive_path,
-                   const QByteArray& sha256, bool external) {
+                   const QByteArray& sha256, bool external, const InstallDetails& details) {
     if (!IsInstallInfo(root, title_id, mod_id, name, version, sha256)) {
         return u"The mod installation information is invalid."_s;
     }
@@ -898,14 +953,15 @@ QString InstallMod(const QString& root, const QString& title_id, const QString& 
     if (!PlanExtraction(entries, title, external)) {
         return u"The ZIP does not contain a single supported mod layout for this title."_s;
     }
-    return InstallPreparedMod(root, title, mod_id, name, version, sha256,
+    return InstallPreparedMod(root, title, mod_id, name, version, sha256, details,
                               u"Could not extract the mod ZIP safely."_s,
                               [&](const QDir& stage) { return ExtractArchive(zip, entries, stage); });
 }
 
 QString InstallGitHubPatch(const QString& root, const QString& title_id, const QString& mod_id,
                            const QString& name, const QString& version, const QString& archive_path,
-                           const QByteArray& sha256, const GitHubPatch& patch) {
+                           const QByteArray& sha256, const GitHubPatch& patch,
+                           const InstallDetails& details) {
     const bool cheat = patch.kind == GitHubPatchKind::Cheat;
     const QString build_id = NormalizedBuildId(patch.build_id, cheat);
     if (!IsInstallInfo(root, title_id, mod_id, name, version, sha256) || build_id.isEmpty() ||
@@ -963,7 +1019,7 @@ QString InstallGitHubPatch(const QString& root, const QString& title_id, const Q
 
     const QString folder = cheat ? u"cheats"_s : u"exefs"_s;
     const QString filename = patch.build_id.toUpper() + extension;
-    return InstallPreparedMod(root, title, mod_id, name, version, sha256,
+    return InstallPreparedMod(root, title, mod_id, name, version, sha256, details,
                               u"Could not stage the downloaded patch safely."_s,
                               [&](const QDir& stage) {
                                   return stage.mkdir(folder) &&
@@ -1028,12 +1084,65 @@ QList<InstalledMod> ReadInstalledMods(const QString& root, const QString& title_
     QList<InstalledMod> installed;
     for (const QString& id : title_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
         if (IsModId(id)) {
-            if (auto mod = ReadOwnedMod(title_dir.filePath(id), title, id)) {
-                installed.append(std::move(*mod));
+            const QDir mod_dir(title_dir.filePath(id));
+            auto mod = ReadOwnedMod(mod_dir.path(), title, id);
+            if (!mod) {
+                continue;
             }
+            if (const QString thumbnail = mod_dir.filePath(ThumbnailName);
+                IsRegularFile(thumbnail) && QFileInfo(thumbnail).size() <= MaxThumbnailBytes) {
+                mod->thumbnail_path = thumbnail;
+            }
+            const QJsonObject check =
+                ReadSmallJson(mod_dir.filePath(UpdateCheckName), MaxUpdateCheckBytes);
+            if (check[u"schema"_s] == QJsonValue(1) &&
+                check[u"installed"_s].toString() == mod->version && check[u"update"_s].isBool()) {
+                mod->update_available = check[u"update"_s].toBool();
+                mod->update_checked =
+                    QDateTime::fromString(check[u"checked"_s].toString(), Qt::ISODate);
+            }
+            installed.append(std::move(*mod));
         }
     }
     return installed;
+}
+
+bool RecordUpdateCheck(const QString& root, const QString& title_id, const QString& mod_id,
+                       const QString& installed_version, bool update_available) {
+    if (root.isEmpty() || !IsTitleId(title_id) || !IsModId(mod_id)) {
+        return false;
+    }
+    const std::scoped_lock lock(install_mutex);
+    const QString title = title_id.toUpper();
+    const QDir mod_dir(QDir(QDir(root).absolutePath()).filePath(title + u'/' + mod_id));
+    const auto mod = ReadOwnedMod(mod_dir.path(), title, mod_id);
+    const QString path = mod_dir.filePath(UpdateCheckName);
+    if (!mod || mod->version != installed_version || (!IsAbsent(path) && !IsRegularFile(path))) {
+        return false;
+    }
+    const QJsonObject object{
+        {u"schema"_s, 1},
+        {u"installed"_s, installed_version},
+        {u"update"_s, update_available},
+        {u"checked"_s, QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+    };
+    QSaveFile file(path);
+    return file.open(QIODevice::WriteOnly) &&
+           file.write(QJsonDocument(object).toJson(QJsonDocument::Compact)) >= 0 && file.commit();
+}
+
+QString SourceName(Source source) {
+    switch (source) {
+    case Source::GameBanana:
+        return QCoreApplication::translate("ModStore", "GameBanana");
+    case Source::GitHub:
+        return QCoreApplication::translate("ModStore", "GitHub");
+    case Source::Demo:
+        return QCoreApplication::translate("ModStore", "Sample");
+    case Source::Submission:
+        return QCoreApplication::translate("ModStore", "Lichii catalog");
+    }
+    return {};
 }
 
 } // namespace ModStore

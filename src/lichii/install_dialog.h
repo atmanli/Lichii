@@ -2,16 +2,16 @@
 
 #pragma once
 
-#include <QDialog>
+#include <vector>
+#include "lichii/spotlight/dialog.h"
 
 class QCheckBox;
-class QDialogButtonBox;
-class QHBoxLayout;
 class QLabel;
-class QListWidget;
+class QPushButton;
 class QVBoxLayout;
+class QWidget;
 
-class InstallDialog : public QDialog {
+class InstallDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -22,12 +22,19 @@ public:
     [[nodiscard]] int GetMinimumWidth() const;
 
 private:
-    QListWidget* file_list;
+    struct Entry {
+        QString path;
+        qint64 size;
+        QCheckBox* check;
+    };
 
-    QVBoxLayout* vbox_layout;
-    QHBoxLayout* hbox_layout;
+    void AddFile(const QString& path);
+    void AddMoreFiles();
+    void UpdateSummary();
 
-    QLabel* description;
-    QLabel* update_description;
-    QDialogButtonBox* buttons;
+    std::vector<Entry> entries;
+    QWidget* file_list;
+    QVBoxLayout* rows;
+    QLabel* summary;
+    QPushButton* install;
 };

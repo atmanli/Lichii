@@ -9,8 +9,12 @@
 
 #include <QWidget>
 
-class QLabel;
-class QPushButton;
+namespace GraphicsPanel {
+class Notice;
+}
+namespace Spotlight {
+class PillButton;
+}
 
 /// Shows the model's licence and downloads it on Accept. True when the model is there afterwards.
 bool DownloadFlyHighModel(QWidget* parent);
@@ -31,8 +35,6 @@ protected:
 private:
     void Download();
 
-    QLabel* icon_label;
-    QLabel* status_label;
-    QPushButton* download_button;
-    QPushButton* folder_button;
+    GraphicsPanel::Notice* status;
+    Spotlight::PillButton* download_button;
 };

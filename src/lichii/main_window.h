@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -67,10 +68,17 @@ class NupProgressDialog;
 class ShaderWarmDialog;
 class WhatsNewDialog;
 class NxTools;
-class QSlider;
+class QAbstractSlider;
+class QMenu;
 class QHBoxLayout;
 class WaitTreeWidget;
 class PerformanceOverlay;
+namespace Spotlight {
+class FullscreenHint;
+class InGameBar;
+class InGameMenu;
+class StoppingOverlay;
+} // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
 #endif
@@ -144,6 +152,11 @@ namespace Ui {
 class MainWindow;
 }
 
+namespace Spotlight {
+class Launcher;
+class RunningTitleBar;
+} // namespace Spotlight
+
 enum class EmulatedDirectoryTarget {
     NAND,
     SDMC,
@@ -153,28 +166,6 @@ namespace VkDeviceInfo {
 class Record;
 }
 
-class VolumeButton : public QPushButton {
-    Q_OBJECT
-public:
-    explicit VolumeButton(QWidget* parent = nullptr) : QPushButton(parent), scroll_multiplier(1) {
-        connect(&scroll_timer, &QTimer::timeout, this, &VolumeButton::ResetMultiplier);
-    }
-
-signals:
-    void VolumeChanged();
-
-protected:
-    void wheelEvent(QWheelEvent* event) override;
-
-private slots:
-    void ResetMultiplier();
-
-private:
-    int scroll_multiplier;
-    QTimer scroll_timer;
-    constexpr static int MaxMultiplier = 8;
-};
-
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -182,7 +173,6 @@ class MainWindow : public QMainWindow {
     static const int max_recent_files_item = 10;
 
 public:
-    void filterBarSetChecked(bool state);
     void UpdateUITheme();
     explicit MainWindow(bool has_broken_vulkan);
     ~MainWindow() override;
@@ -301,7 +291,8 @@ private:
     void BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                   StartGameType with_config = StartGameType::Normal);
     void BootGameFromList(const QString& filename, StartGameType with_config);
-    void ShutdownGame();
+    /// Ends the session and waits for it; next says on the stopping overlay what follows.
+    void ShutdownGame(const QString& next = {});
     void ExitIfEmulationThreadStuck();
 
     void SetDiscordEnabled(bool state);
@@ -344,6 +335,7 @@ private:
     void changeEvent(QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
 
     std::string CreateTASFramesString(
@@ -433,7 +425,7 @@ private slots:
     void OnApplyRecommendedSettings();
     void OnRestorePreviousSettings();
     void OnDataDialog();
-    void OnToggleFilterBar();
+    void OnFocusLibrarySearch();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
 #ifdef HAS_RESHADE
@@ -472,7 +464,7 @@ private slots:
     void OnLanguageChanged(const QString& locale);
     void OnMouseActivity();
     bool OnShutdownBegin();
-    void OnShutdownBeginDialog();
+    void OnShutdownBeginDialog(const QString& next);
     void OnEmulationStopped();
     void OnEmulationStopTimeExpired();
     void OnEmulationStopTimeout();
@@ -498,11 +490,31 @@ private slots:
     void SyncNextendoProfile(bool force);
 
 private:
+    using NupJobProgress =
+        std::function<void(const QString& step, const FileSys::Nup::PackProgress& progress)>;
+    /// Runs a NUP job on a worker behind the progress card. work reports its progress and
+    /// returns what to run on the UI thread when it is done.
+    void StartNupJob(
+        const std::string& game_path, const QString& operation, const QString& title,
+        const QPixmap& icon,
+        std::function<std::function<void()>(const NupJobProgress&, const std::atomic_bool*)> work);
+    void ConvertDumpToNup(const std::filesystem::path& root, const std::string& game_path);
+    void ConvertPackageToNup(const std::string& game_path);
+    /// Whether the game file may be rewritten now: not while its game runs or another job does.
+    bool CanRewriteArchive(const std::string& game_path, const QString& title);
+    /// Writes the edit into the NUP behind the progress card; the original is replaced only when
+    /// the new file is complete.
+    void WriteNupMetadata(const std::string& game_path, FileSys::Nup::MetadataEdit edit,
+                          const QString& title, const QPixmap& icon,
+                          std::function<void()> on_success = {});
+    /// An icon picked in Game Settings goes into the NUP or NX file; edit opens the file's editor.
+    void WriteArchiveFromSettings(u64 title_id, const std::string& game_path,
+                                  const std::optional<QByteArray>& icon, bool edit);
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
     void OnGameListEditNxMetadata(const std::string& game_path);
+    bool CanWriteNxMetadata();
+    bool PrepareNxMetadataWrite();
     void RemovePlayTimeData(u64 program_id);
-    bool SelectRomFSDumpTarget(const FileSys::ContentProvider&, u64 program_id,
-                               u64* selected_title_id, u8* selected_content_record_type);
     ContentManager::InstallResult InstallNCA(const QString& filename);
     void UpdateWindowTitle(std::string_view title_name = {}, std::string_view title_version = {},
                            std::string_view gpu_vendor = {});
@@ -516,8 +528,11 @@ private:
 
     void UpdateVolumeUI();
     void UpdateStatusBar();
+    void ToggleInGameMenu();
+    void UpdateInGameGraphicsSummary();
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
+    void UpdateLetterboxBars();
     void UpdateMenuIcons();
     void UpdateUISettings();
     void UpdateInputDrivers();
@@ -578,6 +593,8 @@ private:
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
+    Spotlight::Launcher* launcher = nullptr;
+    Spotlight::RunningTitleBar* running_title_bar = nullptr;
     LoadingScreen* loading_screen = nullptr;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
@@ -597,7 +614,7 @@ private:
     Common::UUID nextendo_profile_user;
     // A forced pull that has to wait for the game to stop or for the running pull.
     bool nextendo_profile_force{};
-    OverlayDialog* shutdown_dialog{};
+    Spotlight::StoppingOverlay* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
 #ifdef HAS_RESHADE
@@ -608,24 +625,31 @@ private:
 
     std::vector<VkDeviceInfo::Record> vk_device_records;
 
-    // Status bar elements
-    QLabel* message_label = nullptr;
-    QLabel* shader_building_label = nullptr;
-    QLabel* res_scale_label = nullptr;
-    QLabel* emu_speed_label = nullptr;
-    QLabel* game_fps_label = nullptr;
-    QLabel* dlss_status_label = nullptr;
-    QLabel* emu_frametime_label = nullptr;
-    QLabel* tas_label = nullptr;
-    QLabel* firmware_label = nullptr;
-    QPushButton* gpu_accuracy_button = nullptr;
-    QPushButton* renderer_status_button = nullptr;
-    QPushButton* refresh_button = nullptr;
-    QPushButton* dock_status_button = nullptr;
-    QPushButton* filter_status_button = nullptr;
-    QPushButton* aa_status_button = nullptr;
-    QPushButton* post_shader_status_button = nullptr;
-    QPushButton* frame_gen_status_button = nullptr;
+    Spotlight::InGameBar* ingame_bar = nullptr;
+    Spotlight::InGameMenu* ingame_menu = nullptr;
+    Spotlight::FullscreenHint* fullscreen_hint = nullptr;
+    Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
+    QMenu* quick_controls = nullptr;
+    QAction* ingame_menu_action = nullptr;
+    QAction* tas_action = nullptr;
+    QAction* firmware_action = nullptr;
+    QAction* gpu_accuracy_action = nullptr;
+    QAction* renderer_status_action = nullptr;
+    QAction* refresh_action = nullptr;
+    QAction* dock_status_action = nullptr;
+    QAction* filter_status_action = nullptr;
+    QAction* aa_status_action = nullptr;
+    QAction* post_shader_status_action = nullptr;
+    QAction* frame_gen_status_action = nullptr;
+    QAction* mute_action = nullptr;
+    QAction* speed_limit_action = nullptr;
+    QAction* turbo_action = nullptr;
+    QAction* slow_action = nullptr;
+    QString frame_gen_status_text;
+    QString session_status_text;
+    bool ingame_fullscreen = false;
+    bool fullscreen_hint_shown = false;
+    bool fullscreen_shader_active = false;
 
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;
@@ -634,9 +658,7 @@ private:
     bool frame_gen_generating = false;
     double frame_gen_fps = 0.0;
     QElapsedTimer frame_gen_fps_timer;
-    VolumeButton* volume_button = nullptr;
-    QWidget* volume_popup = nullptr;
-    QSlider* volume_slider = nullptr;
+    QAbstractSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
 
     // Stores what suffix to add to the FPS counter, e.g. Unlocked.
@@ -654,6 +676,7 @@ private:
     bool close_pending = false;
     // The path to the game currently running
     QString current_game_path;
+    QString current_game_title;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
     bool user_flag_cmd_line = false;
 
@@ -692,6 +715,8 @@ private:
     bool startup_whats_new_pending{};
     NxTools* nx_tools = nullptr;
     bool nx_metadata_write_in_progress = false;
+    /// The game whose local artwork goes once its icon is written into its NX archive.
+    u64 nx_artwork_title_id{};
     std::string nup_source_path;
 
     // Last game booted, used for multi-process apps

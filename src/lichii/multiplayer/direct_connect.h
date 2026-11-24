@@ -6,9 +6,9 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include <QFutureWatcher>
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class DirectConnect;
@@ -18,7 +18,7 @@ namespace Core {
 class System;
 }
 
-class DirectConnectWindow : public QDialog {
+class DirectConnectWindow : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

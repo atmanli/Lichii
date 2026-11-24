@@ -29,9 +29,12 @@ namespace fs = std::filesystem;
 using FileSys::NupContainer;
 
 struct TempDir {
+    // The counter keeps two directories made within one clock tick apart.
+    inline static std::atomic<unsigned> made{};
     fs::path path = fs::temp_directory_path() /
                     ("nup-read-test-" +
-                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(made++));
     TempDir() {
         fs::create_directories(path);
     }
@@ -606,8 +609,13 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
         const auto second = Content(700 * 1024, 43);
         const auto wide = Content(700 * 1024, 42);
         const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
-        const auto backing = std::make_shared<CountingFile>(
-            BuildNup({member_of(first), member_of(second), wide_member}));
+        // After the wide member, whose retry frees the stream decoder, a stored member and a
+        // compressed one, which verifies with the decoder made again.
+        const auto stored = Content(4096, 45);
+        const auto after = Content(300 * 1024, 46);
+        const Member stored_member{stored, stored.size(), 0, {}, Sha256(stored)};
+        const auto backing = std::make_shared<CountingFile>(BuildNup(
+            {member_of(first), member_of(second), wide_member, stored_member, member_of(after)}));
         TempDir t;
         NupContainer nup{backing, std::size_t{2} << 20, t.path};
         REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
@@ -620,6 +628,14 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
         REQUIRE(ReadMatches(first_file, first, 0, first.size()));
         REQUIRE(ReadMatches(second_file, second, 0, second.size()));
         REQUIRE(backing->reads == 0);
+        // The compressed member after the wide one is checked, not skipped.
+        Member broken = member_of(after);
+        broken.sha256[0] ^= 1;
+        NupContainer changed{Backing(BuildNup({wide_member, broken})), std::size_t{2} << 20,
+                             t.path};
+        REQUIRE(changed.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(changed.VerifyIntegrity({}) ==
+                Loader::ResultStatus::ErrorIntegrityVerificationFailed);
     }
     SECTION("spilled") {
         // 64 KiB spills both. The game has read the start of a normal member, which keeps its

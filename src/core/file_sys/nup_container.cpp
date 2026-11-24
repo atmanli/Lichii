@@ -220,7 +220,8 @@ struct NupMember {
 
 /// Members of one container, shared by all files opened from it. In-memory members are charged
 /// their full size, plus DecoderCharge while partly decoded, against `cap` and evicted least
-/// recently used first; spilled members last as long as the container.
+/// recently used first; spilled members last as long as the container. VerifyIntegrity builds a
+/// private one for a member it reads through the reader, so it evicts nothing the game cached.
 struct NupDecompressCache {
     struct Entry {
         std::size_t file_index;
@@ -307,7 +308,7 @@ struct NupDecompressCache {
 namespace {
 
 /// A member file whose extent is zstd-compressed, decoded from its start as reads need it and
-/// shared through the container's cache.
+/// shared through the container's cache, or through VerifyIntegrity's private one.
 class NupVfsFile final : public VfsFile {
 public:
     NupVfsFile(VirtualFile backing_, u64 extent_offset_, u64 extent_size_, u64 uncompressed_size_,
@@ -1251,8 +1252,14 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
     // asks for more is refused for a member the reader spills, as reading it is, and otherwise
     // hashed through the reader with a cache of the verification's own, which holds the member
     // whole (at most half the cache cap, whatever its record says) until it ends; so a member
-    // verifies exactly when it can be read and its hash matches.
+    // verifies when it can be read and its hash matches. One exception: zstd decodes a frame
+    // with a known content size that fits the output in one pass, without the window limit,
+    // when the whole frame is in the input it is given; a small large-window frame that lies
+    // across a reader chunk but inside one of ours verifies, where a spilled read refuses it.
     constexpr std::size_t InputChunk = 1 << 20;
+    // Our chunks end where the reader's do, so a frame the stream decoder refuses for its window
+    // the reader also gets in pieces and refuses: the refusal below for a spilled member holds.
+    static_assert(InputChunk % DecodeInputChunk == 0);
     constexpr std::size_t ReportStep = 4 << 20;
     // Progress is in extent bytes, which the open checked against the file.
     u64 total = 0;
@@ -1394,28 +1401,36 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
             if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
                 return fail("the hash could not be started");
             }
+            const auto out_of_memory = [&] { return fail("not enough memory to decode it"); };
+            std::optional<NupVfsFile> view;
             try {
                 const auto own_cache = std::make_shared<NupDecompressCache>();
+                // No spill_dir: the Spills check above keeps this member in memory.
                 own_cache->cap = cache->cap;
-                NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
-                                own_cache, i);
-                for (u64 offset = 0; offset < node.size;) {
-                    const auto length =
-                        static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));
-                    if (view.Read(input.data(), length, static_cast<std::size_t>(offset)) !=
-                        length) {
-                        return fail("the reader could not read it");
-                    }
-                    offset += length;
-                    if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
-                        return fail("the hash could not be updated");
-                    }
-                    if (!poll_output(length)) {
-                        return cancelled();
-                    }
-                }
+                view.emplace(file, node.extent_offset, node.extent_size, node.size, node.name,
+                             own_cache, i);
             } catch (const std::bad_alloc&) {
-                return fail("not enough memory to decode it");
+                return out_of_memory();
+            }
+            for (u64 offset = 0; offset < node.size;) {
+                const auto length =
+                    static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));
+                std::size_t read = 0;
+                try {
+                    read = view->Read(input.data(), length, static_cast<std::size_t>(offset));
+                } catch (const std::bad_alloc&) {
+                    return out_of_memory();
+                }
+                if (read != length) {
+                    return fail("the reader could not read it");
+                }
+                offset += length;
+                if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
+                    return fail("the hash could not be updated");
+                }
+                if (!poll_output(length)) {
+                    return cancelled();
+                }
             }
             produced = node.size;
             last_result = 0;

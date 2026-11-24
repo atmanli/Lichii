@@ -1371,12 +1371,17 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
         if (through_reader) {
             // A frame wants a window above the stream decoder's limit: hash what the reader reads,
             // which accepts such a frame for a member it decodes in memory and refuses it
-            // otherwise, as it does when the member is read.
+            // otherwise, as it does when the member is read. It reads through a cache of its own
+            // with the container's cap, so it decides the same way, and evicts nothing a running
+            // game cached; what it decodes or spills is freed when the member ends.
             if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
                 return fail("the hash could not be started");
             }
+            const auto own_cache = std::make_shared<NupDecompressCache>();
+            own_cache->cap = cache->cap;
+            own_cache->spill_dir = cache->spill_dir;
             NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
-                            cache, i);
+                            own_cache, i);
             for (u64 offset = 0; offset < node.size;) {
                 const auto length =
                     static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));

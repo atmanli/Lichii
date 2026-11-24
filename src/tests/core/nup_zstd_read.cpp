@@ -567,6 +567,63 @@ TEST_CASE("Verifying a NUP accepts a frame with a large window exactly when read
     }
 }
 
+TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was",
+          "[nup][nup-read]") {
+    // A backing file that counts its reads: a game member still cached is read without it.
+    struct CountingFile : FileSys::VectorVfsFile {
+        using VectorVfsFile::VectorVfsFile;
+        std::size_t Read(u8* out, std::size_t length, std::size_t offset) const override {
+            ++reads;
+            return VectorVfsFile::Read(out, length, offset);
+        }
+        mutable std::atomic<std::size_t> reads{};
+    };
+    // A frame declaring a 256 MiB window, in raw blocks of at most 128 KiB, which only the reader
+    // decodes, and only in memory.
+    const auto large_window = [](const std::vector<u8>& content) {
+        std::vector<u8> frame{0x28, 0xB5, 0x2F, 0xFD, 0x00, 18 << 3};
+        for (std::size_t at = 0; at < content.size();) {
+            const std::size_t size = std::min<std::size_t>(128 * 1024, content.size() - at);
+            const bool last = at + size == content.size();
+            const u32 block = static_cast<u32>(size << 3) | (last ? 1u : 0u);
+            frame.insert(frame.end(), {static_cast<u8>(block), static_cast<u8>(block >> 8),
+                                       static_cast<u8>(block >> 16)});
+            frame.insert(frame.end(), content.begin() + static_cast<std::ptrdiff_t>(at),
+                         content.begin() + static_cast<std::ptrdiff_t>(at + size));
+            at += size;
+        }
+        return frame;
+    };
+    const auto game = Content(300 * 1024, 41);
+    const auto wide = Content(500 * 1024, 42);
+    Member game_member = ZstdMember(game);
+    game_member.sha256 = Sha256(game);
+    const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
+    TempDir t;
+    SECTION("in memory") {
+        // 1 MiB holds the game's 300 KiB member, but not that and the 500 KiB one with its
+        // decoder: read through the game's cache, the retry would evict the game's member.
+        const auto backing = std::make_shared<CountingFile>(BuildNup({game_member, wide_member}));
+        NupContainer nup{backing, std::size_t{1} << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        const auto file = nup.OpenFile(0);
+        REQUIRE(ReadMatches(file, game, 0, game.size()));
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+        backing->reads = 0;
+        REQUIRE(ReadMatches(file, game, 0, game.size()));
+        REQUIRE(backing->reads == 0);
+    }
+    SECTION("spilled") {
+        // 64 KiB spills both; the reader refuses the large window there, and leaves no temporary
+        // file behind for the rest of the container's life.
+        NupContainer nup{Backing(BuildNup({game_member, wide_member})), std::size_t{64} << 10,
+                         t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+        REQUIRE(fs::is_empty(t.path));
+    }
+}
+
 TEST_CASE("Verifying a NUP polls its callback while a small extent decodes to much",
           "[nup][nup-read]") {
     // 64 MiB of zeros in a few KiB: one input chunk decodes to far more than the 4 MiB step, and

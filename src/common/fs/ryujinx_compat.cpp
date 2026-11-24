@@ -16,6 +16,16 @@
 
 namespace Common::FS {
 namespace fs = std::filesystem;
+
+namespace {
+// Test-only: runs after a published path is reclaimed into recovery, before old-save restore.
+void (*after_published_reclaim)() = nullptr;
+} // namespace
+
+void SetRyujinxAfterPublishedReclaimHook(void (*hook)()) {
+    after_published_reclaim = hook;
+}
+
 namespace {
 
 u64 ReadLe(std::string_view data) {
@@ -173,17 +183,20 @@ public:
                 throw std::runtime_error("Could not roll back the new save: " + ec.message());
             }
             published = false;
-            // Reclaimed live content may include newer in-place writes after publish. Keep it as a
-            // reported recovery copy instead of deleting it as disposable staging. An identity
-            // check against the staged original would still drop those writes.
-            if (Exists(stage)) {
-                recovery = std::move(stage);
-                stage.clear();
-                has_recovery = true;
+            // Rename already placed the live save at stage. Claim it as recovery immediately —
+            // before any further FS probe (Exists/symlink_status can throw) or old-save restore —
+            // so reclaimed content is never left as disposable staging if a later step fails.
+            recovery = std::move(stage);
+            stage.clear();
+            has_recovery = true;
+            if (after_published_reclaim) {
+                after_published_reclaim();
             }
         }
         if (has_backup) {
-            if (Exists(destination)) {
+            std::error_code probe_ec;
+            const auto status = fs::symlink_status(destination, probe_ec);
+            if (!probe_ec && (fs::exists(status) || status.type() == fs::file_type::symlink)) {
                 throw std::runtime_error("Could not restore the old save: destination is occupied");
             }
             fs::rename(backup, destination, ec);

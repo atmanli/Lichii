@@ -275,6 +275,43 @@ TEST_CASE("Rollback recovery keeps newer writes from a published Ryujinx save", 
     CHECK(ReadSave(lichii) == "Lichii save");
     CHECK(ReadSave(f.ryujinx) == "Ryujinx save");
 }
+
+TEST_CASE("Rollback still reports recovery when old-save restore fails", "[ryujinx]") {
+    if (geteuid() == 0) {
+        SKIP("Directory permissions do not prevent root from renaming");
+    }
+    Fixture f;
+    const auto lichii = f.root / "nand" / "lichii";
+    WriteSave(lichii, "Lichii save");
+    WriteSave(f.ryujinx, "Ryujinx save");
+    static fs::path occupy_destination;
+    occupy_destination = f.ryujinx;
+    // After reclaim, occupy the live path so restoring the old save fails. Recovery must still be
+    // reported — reclaim must not depend on a post-rename Exists probe that can throw first.
+    SetRyujinxAfterPublishedReclaimHook([] {
+        WriteSave(occupy_destination, "blocker");
+    });
+    const auto deny_publish = [](fs::path from, fs::path to) {
+        if (!CreateSymlink(from, to)) {
+            return false;
+        }
+        fs::permissions(to.parent_path().parent_path(), fs::perms::owner_write,
+                        fs::perm_options::remove);
+        return true;
+    };
+    const auto result =
+        UpdateRyujinxSave(lichii, f.ryujinx, RyujinxSaveOperation::FromLichii, deny_publish);
+    SetRyujinxAfterPublishedReclaimHook(nullptr);
+    fs::permissions(lichii.parent_path(), fs::perms::owner_write, fs::perm_options::add);
+    CHECK_FALSE(result.error.empty());
+    CHECK(result.error.find("occupied") != std::string::npos);
+    // Old save remains at backup; reclaimed published content is also reported.
+    REQUIRE(result.backups.size() == 2);
+    CHECK(ReadSave(result.backups[0]) == "Ryujinx save");
+    CHECK(ReadSave(result.backups[1]) == "Lichii save");
+    CHECK(fs::exists(result.backups[1]));
+    CHECK(ReadSave(lichii) == "Lichii save");
+}
 #endif
 
 TEST_CASE("Ryujinx link and unlink preserve saves and backups", "[ryujinx]") {

@@ -740,6 +740,15 @@ auto TextureCache<P>::QueueCollectorDownload(ImageId image_id) -> CollectorQueue
         std::vector<DAddr> new_ranges;
         new_ticks.reserve(last_page - first_page + 1);
         new_ranges.reserve(last_page - first_page + 1);
+        // The first large collector can add tens of thousands of pages. Allocate its empty
+        // tables once instead of repeatedly rehashing during the transactional insertion.
+        // Existing tables may already hold these pages; do not reserve duplicate capacity.
+        if (overlap_writeback_ticks.empty()) {
+            overlap_writeback_ticks.reserve(last_page - first_page + 1);
+        }
+        if (overlap_writeback_ranges.empty()) {
+            overlap_writeback_ranges.reserve(last_page - first_page + 1);
+        }
         bool enqueued = false;
         bool committed = false;
         SCOPE_EXIT {

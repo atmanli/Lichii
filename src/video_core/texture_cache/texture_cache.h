@@ -672,9 +672,11 @@ auto TextureCache<P>::QueueCollectorDownload(ImageId image_id) -> CollectorQueue
             ImageFlagBits::Converted | ImageFlagBits::Rescaled | ImageFlagBits::Sparse |
             ImageFlagBits::NonContiguous | ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels |
             ImageFlagBits::CompactLayers | ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
-        if (info.type != ImageType::e2D || info.format != PixelFormat::D16_UNORM ||
+        if (info.type != ImageType::e2D ||
+            (info.format != PixelFormat::D16_UNORM && info.format != PixelFormat::D32_FLOAT) ||
             info.resources.levels != 1 || info.resources.layers != 1 || info.size.depth != 1 ||
-            info.num_samples != 1 || info.block.depth != 0 || info.tile_width_spacing != 0 ||
+            info.num_samples != 1 || info.block.width != 0 || info.block.depth != 0 ||
+            info.tile_width_spacing != 0 ||
             info.is_sparse || image.HasScaled() || True(image.flags & excluded) ||
             !HasGuestRange(image) || image.guest_size_bytes < 32_MiB || collector_count >= 16 ||
             image.guest_size_bytes > CollectorMaxBytes - collector_held_bytes) {
@@ -691,7 +693,8 @@ auto TextureCache<P>::QueueCollectorDownload(ImageId image_id) -> CollectorQueue
             !memory->IsContinuousRange(image.gpu_addr, image.guest_size_bytes)) {
             return CollectorQueueResult::Unsupported;
         }
-        const WritebackChunks::Layout layout{info.size.width, info.size.height, 2,
+        const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(info.format);
+        const WritebackChunks::Layout layout{info.size.width, info.size.height, bytes_per_pixel,
                                              info.block.height};
         const auto first = WritebackChunks::Next(layout, 0, CollectorChunkBytes);
         if (!first) {
@@ -699,7 +702,8 @@ auto TextureCache<P>::QueueCollectorDownload(ImageId image_id) -> CollectorQueue
         }
         const u64 band_rows = u64{8} << info.block.height;
         const u64 guest_size =
-            ((info.size.height + band_rows - 1) / band_rows) * band_rows * info.size.width * 2;
+            ((info.size.height + band_rows - 1) / band_rows) * band_rows * info.size.width *
+            bytes_per_pixel;
         if (guest_size != image.guest_size_bytes) {
             return CollectorQueueResult::Unsupported;
         }
@@ -818,11 +822,12 @@ void TextureCache<P>::SubmitCollectorChunk(AsyncOverlapDownload& download, u64 b
         const auto start =
             trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto& info = download.info;
-        const WritebackChunks::Layout layout{info.size.width, info.size.height, 2,
+        const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(info.format);
+        const WritebackChunks::Layout layout{info.size.width, info.size.height, bytes_per_pixel,
                                              info.block.height};
         const auto chunk = WritebackChunks::Next(layout, download.collector_cursor, budget);
         ASSERT(chunk.has_value());
-        const u64 linear_size = u64{chunk->width} * chunk->height * 2;
+        const u64 linear_size = u64{chunk->width} * chunk->height * bytes_per_pixel;
         ASSERT(download.map.mapped_span.size() >= linear_size);
         const BufferImageCopy copy{
             .buffer_offset = 0,
@@ -853,13 +858,15 @@ void TextureCache<P>::LandCollectorChunk(AsyncOverlapDownload& download) {
     const auto start =
         trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto& chunk = download.collector_chunk;
+    const auto& info = download.info;
+    const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(info.format);
     const DAddr begin = download.cpu_addr + chunk.guest_offset;
     const DAddr end = begin + chunk.guest_size;
     collector_scratch.resize(chunk.guest_size);
     WritebackRanges::MergeRanges(download.keep);
     // Only the final, partial GOB band needs the old padding. Kept bytes can include unmapped
     // memory, so neither read nor write them. Full bands need no guest read at all.
-    if (u64{chunk.width} * chunk.height * 2 != chunk.guest_size) {
+    if (u64{chunk.width} * chunk.height * bytes_per_pixel != chunk.guest_size) {
         DAddr cursor = begin;
         for (const auto& [keep_begin, keep_end] : download.keep) {
             if (keep_begin >= end) {
@@ -880,8 +887,8 @@ void TextureCache<P>::LandCollectorChunk(AsyncOverlapDownload& download) {
                                           end - cursor);
         }
     }
-    const auto& info = download.info;
-    const WritebackChunks::Layout layout{info.size.width, info.size.height, 2, info.block.height};
+    const WritebackChunks::Layout layout{info.size.width, info.size.height, bytes_per_pixel,
+                                         info.block.height};
     const bool swizzled = WritebackChunks::Swizzle(collector_scratch, download.map.mapped_span,
                                                    layout, chunk, info.native_tiling);
     ASSERT(swizzled);

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -219,6 +221,49 @@ TEST_CASE("A partial GOB column cannot be scheduled for writeback", "[writeback_
     CHECK_FALSE(Chunks::Next(layout, 1, column_bytes));
     CHECK_FALSE(Chunks::Next({65, 32, 4, 2}, 0, column_bytes));
     CHECK_FALSE(Chunks::Next({64, 32, 3, 2}, 0, column_bytes));
+}
+
+TEST_CASE("D32 shadow writeback chunks preserve every bit and tail padding", "[writeback_chunks]") {
+    namespace Chunks = VideoCommon::WritebackChunks;
+    // Include signed zero, infinities and NaN payloads: D32 is copied as four raw bytes.
+    constexpr std::array<u32, 8> values{0, 0x80000000, 0x3f800000, 0xbf800000,
+                                       0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345};
+    for (u32 height : {4096U, 4093U}) {
+        for (u32 block_height : {4U, 6U}) {
+            const Layout full{4096, height, 1, 4, block_height, 0, 0};
+            const Chunks::Layout layout{full.width, full.height, full.bpp, block_height};
+            std::vector<u8> linear(LinearBytes(full));
+            for (size_t i = 0; i < linear.size() / 4; ++i) {
+                const u32 value = values[i % values.size()] ^
+                                  static_cast<u32>((i / values.size()) * 0x9e3779b9U);
+                std::memcpy(linear.data() + i * 4, &value, 4);
+            }
+            for (bool native : {false, true}) {
+                std::vector<u8> expected(GuestBytes(full), 0x5a);
+                SwizzleTexture(expected, linear, 4, full.width, full.height, 1, block_height,
+                               0, 0, native);
+                std::vector<u8> actual(expected.size(), 0x5a);
+                constexpr u64 budget = 4 * 1024 * 1024;
+                u64 cursor = 0;
+                while (cursor < actual.size()) {
+                    const auto chunk = Chunks::Next(layout, cursor, budget);
+                    REQUIRE(chunk);
+                    REQUIRE(chunk->guest_offset == cursor);
+                    REQUIRE(chunk->guest_size <= budget);
+                    const size_t pitch = size_t{chunk->width} * 4;
+                    std::vector<u8> compact(pitch * chunk->height);
+                    for (u32 y = 0; y < chunk->height; ++y) {
+                        const size_t source = (size_t{chunk->y + y} * full.width + chunk->x) * 4;
+                        std::copy_n(linear.data() + source, pitch, compact.data() + y * pitch);
+                    }
+                    const auto guest = std::span{actual}.subspan(cursor, chunk->guest_size);
+                    REQUIRE(Chunks::Swizzle(guest, compact, layout, *chunk, native));
+                    cursor += chunk->guest_size;
+                }
+                CHECK(actual == expected);
+            }
+        }
+    }
 }
 
 TEST_CASE("Block linear subrect swizzle matches the GOB layout", "[block_linear_swizzle]") {

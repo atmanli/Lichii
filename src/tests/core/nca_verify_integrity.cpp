@@ -30,12 +30,12 @@ using namespace FileSys;
 /// is ~0), then data again, and hands out at most `chunk` bytes per read.
 class StallingFile final : public VectorVfsFile {
 public:
-    StallingFile(std::vector<u8> data, std::string name, std::size_t stall_at_,
+    StallingFile(std::vector<u8> data_, std::string name_, std::size_t stall_at_,
                  std::size_t zero_reads_, std::size_t chunk_)
-        : VectorVfsFile(std::move(data), std::move(name)), stall_at{stall_at_},
+        : VectorVfsFile(std::move(data_), std::move(name_)), stall_at{stall_at_},
           zero_reads{zero_reads_}, chunk{chunk_} {}
 
-    std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+    std::size_t Read(u8* out, std::size_t length, std::size_t offset) const override {
         if (offset >= stall_at && zero_reads != 0) {
             if (zero_reads != ~std::size_t{0}) {
                 --zero_reads;
@@ -43,7 +43,7 @@ public:
             return 0;
         }
         const std::size_t limit = offset < stall_at ? stall_at - offset : length;
-        return VectorVfsFile::Read(data, std::min({length, chunk, limit}), offset);
+        return VectorVfsFile::Read(out, std::min({length, chunk, limit}), offset);
     }
 
 private:

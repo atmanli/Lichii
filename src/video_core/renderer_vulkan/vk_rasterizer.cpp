@@ -628,6 +628,7 @@ RasterizerVulkan::~RasterizerVulkan() {
     state_tracker.ClearChannel();
     scheduler.WaitWorker();
     scheduler.Finish();
+    buffer_cache_runtime.ClearMultiRangeBuffers();
 }
 
 GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_indirect) {
@@ -5716,6 +5717,7 @@ void RasterizerVulkan::TickFrame() {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();
     }
+    scheduler.JoinRecorders();
     {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();

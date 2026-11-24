@@ -1361,8 +1361,13 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
                     ZSTD_outBuffer out{output.data(), output.size(), 0};
                     last_result = ZSTD_decompressStream(dctx.get(), &out, &in);
                     if (ZSTD_isError(last_result)) {
-                        if (ZSTD_getErrorCode(last_result) ==
-                            ZSTD_error_frameParameter_windowTooLarge) {
+                        // The buffered stream decoder allocates about a frame's window when the
+                        // frame has no content size. A reader that decodes the member in memory
+                        // needs no such buffer, so a failed allocation goes to it as a window
+                        // above the limit does; a spilled one is buffered too, and fails as here.
+                        const auto code = ZSTD_getErrorCode(last_result);
+                        if (code == ZSTD_error_frameParameter_windowTooLarge ||
+                            (code == ZSTD_error_memory_allocation && !cache->Spills(node.size))) {
                             through_reader = true;
                             break;
                         }
@@ -1392,7 +1397,8 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
             }
         }
         if (through_reader) {
-            // A frame wants a window above the stream decoder's limit. A member the reader spills
+            // A frame wants a window above the stream decoder's limit, or one it could not
+            // allocate for a member the reader decodes in memory. A member the reader spills
             // keeps that limit and is refused at the same frame, so it fails here as reading it
             // does, with nothing decoded to disk. One it decodes in memory accepts the frame: hash
             // what the reader reads, through a cache of its own with the container's cap, so

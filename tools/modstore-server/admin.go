@@ -40,15 +40,24 @@ func validStatus(s string) bool {
 func (s *store) adminHandler(token string) http.Handler {
 	mux := http.NewServeMux()
 	s.registerReads(mux, adminPrefix, true)
-	mux.Handle("PUT "+adminPrefix+"/games/{title}", endpoint(s.putGame))
-	mux.Handle("PUT "+adminPrefix+"/mods/{id}", endpoint(s.putMod))
-	mux.Handle("PUT "+adminPrefix+"/mods/{id}/preview", endpoint(s.putPreview))
-	mux.Handle("PUT "+adminPrefix+"/mods/{id}/status", endpoint(s.putStatus))
-	mux.Handle("PUT "+adminPrefix+"/mods/{id}/versions/{version}", endpoint(s.putVersion))
-	mux.Handle("PUT "+adminPrefix+"/mods/{id}/versions/{version}/status", endpoint(s.putStatus))
-	mux.Handle("PUT "+adminPrefix+"/gamebanana", endpoint(s.putGameBanana))
-	mux.Handle("PUT "+adminPrefix+"/gamebanana/drop-demos", endpoint(s.dropDemos))
-	mux.Handle("PUT "+adminPrefix+"/github", endpoint(s.putGitHub))
+	write := func(route string, handler endpoint) {
+		mux.Handle("PUT "+adminPrefix+route, endpoint(func(w http.ResponseWriter, r *http.Request) error {
+			if err := handler(w, r); err != nil {
+				return err
+			}
+			s.invalidateCatalog()
+			return nil
+		}))
+	}
+	write("/games/{title}", s.putGame)
+	write("/mods/{id}", s.putMod)
+	write("/mods/{id}/preview", s.putPreview)
+	write("/mods/{id}/status", s.putStatus)
+	write("/mods/{id}/versions/{version}", s.putVersion)
+	write("/mods/{id}/versions/{version}/status", s.putStatus)
+	write("/gamebanana", s.putGameBanana)
+	write("/gamebanana/drop-demos", s.dropDemos)
+	write("/github", s.putGitHub)
 	want := sha256.Sum256([]byte("Bearer " + token))
 	writer := make(chan struct{}, 1)
 	return responseHeaders(endpoint(func(w http.ResponseWriter, r *http.Request) error {

@@ -72,7 +72,16 @@ UTC RFC 3339. Local asset URLs begin with `/api/v1/` and belong to the same orig
 
 Public records require approval of both mod and version. An unavailable
 mod, version, or preview returns 404, whether absent or pending/rejected.
-The API sets `Cache-Control: no-store`, including for assets. When the JSON
+Successful public game lists, mod lists, and mod details up to 1 MiB
+of uncompressed JSON support gzip and
+`ETag` revalidation with `If-None-Match`. They set
+`Cache-Control: public, max-age=300` and vary on `Accept-Encoding` and
+`X-Lichii-Catalog-Features`. The origin invalidates cached data on successful
+admin writes. A CDN may still serve a fresh cached response after a write.
+Edge cache rules must keep opt-in and legacy responses separate.
+Larger JSON responses, admin responses, errors, and assets remain
+`no-store`. The public listener permits up to 32 concurrent asset requests
+and returns 503 for additional ones. When the JSON
 handler rejects a request it returns `{"error":{"code":"invalid_input","message":"..."}}`
 or another stable code with the appropriate status. Unmatched paths,
 methods and HTTP transport errors may return plain text instead. Handle

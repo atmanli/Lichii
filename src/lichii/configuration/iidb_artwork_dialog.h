@@ -5,21 +5,24 @@
 
 #include <optional>
 #include <vector>
-#include <QDialog>
 #include <QImage>
 #include <QSet>
+#include <QStringList>
 #include "lichii/game/iidb_client.h"
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/notice.h"
 
 class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QStackedWidget;
 class QTabBar;
 
 namespace IiDB {
 
-class ArtworkDialog final : public QDialog {
+class ArtworkDialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -41,6 +44,8 @@ private:
     void ClearPreview();
     void Preview();
     void UpdateRequestControls();
+    void SetStatus(const QString& text, Spotlight::Notice::Tone tone);
+    void SetPreviewStatus(const QString& text, Spotlight::Notice::Tone tone);
 
     enum class Thumbnail { Pending, Attempted, Limited };
 
@@ -70,14 +75,17 @@ private:
     QPushButton* key_button;
     QComboBox* matches;
     QTabBar* categories;
+    const QStringList category_names{tr("iiSU Box Art"), tr("Box Art"), tr("Icons")};
+    QStackedWidget* gallery_stack;
     QListWidget* gallery;
     QPushButton* more;
     QPushButton* preview_button;
-    QLabel* status;
-    QLabel* thumbnail_status;
+    Spotlight::Notice* status;
+    Spotlight::Notice* thumbnail_status;
     QLabel* source_preview;
     QLabel* icon_preview;
-    QLabel* preview_status;
+    QLabel* original_size;
+    Spotlight::Notice* preview_status;
     QPushButton* use;
 };
 

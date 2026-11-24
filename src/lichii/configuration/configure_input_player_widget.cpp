@@ -4,12 +4,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <QMenu>
 #include <QPainter>
 #include <QTimer>
 
 #include "hid_core/frontend/emulated_controller.h"
 #include "lichii/configuration/configure_input_player_widget.h"
+#include "lichii/spotlight/theme.h"
 
 PlayerControlPreview::PlayerControlPreview(QWidget* parent) : QFrame(parent) {
     is_controller_set = false;
@@ -63,45 +63,26 @@ void PlayerControlPreview::EndMapping() {
 }
 
 void PlayerControlPreview::UpdateColors() {
-    if (QIcon::themeName().contains(QStringLiteral("dark")) ||
-        QIcon::themeName().contains(QStringLiteral("midnight"))) {
-        colors.primary = QColor(204, 204, 204);
-        colors.button = QColor(35, 38, 41);
-        colors.button2 = QColor(26, 27, 30);
-        colors.slider_arrow = QColor(14, 15, 18);
-        colors.font2 = QColor(255, 255, 255);
-        colors.indicator = QColor(170, 238, 255);
-        colors.deadzone = QColor(204, 136, 136);
-        colors.slider_button = colors.button;
-    }
-
-    if (QIcon::themeName().contains(QStringLiteral("dark"))) {
-        colors.outline = QColor(160, 160, 160);
-    } else if (QIcon::themeName().contains(QStringLiteral("midnight"))) {
-        colors.outline = QColor(145, 145, 145);
-    } else {
-        colors.outline = QColor(0, 0, 0);
-        colors.primary = QColor(225, 225, 225);
-        colors.button = QColor(109, 111, 114);
-        colors.button2 = QColor(77, 80, 84);
-        colors.slider_arrow = QColor(65, 68, 73);
-        colors.font2 = QColor(0, 0, 0);
-        colors.indicator = QColor(0, 0, 200);
-        colors.deadzone = QColor(170, 0, 0);
-        colors.slider_button = QColor(153, 149, 149);
-    }
-
-    // Constant colors
-    colors.highlight = QColor(170, 0, 0);
-    colors.highlight2 = QColor(119, 0, 0);
-    colors.slider = QColor(103, 106, 110);
-    colors.transparent = QColor(0, 0, 0, 0);
+    // Paper: controls-map-buttons, the Spotlight colours of the controller drawings.
+    colors.outline = QColor(255, 255, 255, 0x5c);
+    colors.primary = QColor(0x34, 0x37, 0x45);
+    colors.button = QColor(0x26, 0x28, 0x33);
+    colors.button2 = QColor(0x1c, 0x1e, 0x27);
+    colors.slider = QColor(0x44, 0x47, 0x56);
+    colors.slider_button = colors.slider;
+    colors.slider_arrow = QColor(0x0f, 0x10, 0x16);
     colors.font = QColor(255, 255, 255);
-    colors.led_on = QColor(255, 255, 0);
-    colors.led_off = QColor(170, 238, 255);
-    colors.indicator2 = QColor(59, 165, 93);
-    colors.charging = QColor(250, 168, 26);
-    colors.button_turbo = QColor(217, 158, 4);
+    colors.font2 = colors.font;
+    colors.highlight = Spotlight::Color::Accent();
+    colors.highlight2 = Spotlight::Color::AccentLight();
+    colors.transparent = QColor(0, 0, 0, 0);
+    colors.indicator = Spotlight::Color::Info();
+    colors.indicator2 = Spotlight::Color::Success();
+    colors.deadzone = Spotlight::Color::AccentLight();
+    colors.led_on = Spotlight::Color::Accent();
+    colors.led_off = Spotlight::Color::Info();
+    colors.charging = Spotlight::Color::Warning();
+    colors.button_turbo = Spotlight::Color::Warning();
 
     colors.left = colors.primary;
     colors.right = colors.primary;

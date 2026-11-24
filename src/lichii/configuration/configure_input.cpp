@@ -4,8 +4,13 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <memory>
 #include <thread>
+
+#include <QSignalBlocker>
+#include <QTabBar>
+#include <QVBoxLayout>
 
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -30,6 +35,7 @@
 #include "lichii/configuration/configure_touchscreen_advanced.h"
 #include "lichii/configuration/configure_vibration.h"
 #include "lichii/configuration/input_profiles.h"
+#include "lichii/spotlight/widgets.h"
 
 namespace {
 template <typename Dialog, typename... Args>
@@ -59,6 +65,20 @@ ConfigureInput::ConfigureInput(Core::System& system_, QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::ConfigureInput>()),
       profiles(std::make_unique<InputProfiles>()), system{system_} {
     ui->setupUi(this);
+    console_mode = new Spotlight::SegmentedControl({tr("Docked"), tr("Handheld")},
+                                                   Spotlight::SegmentedControl::Kind::Light, 38);
+    console_mode->setAccessibleName(tr("Console Mode"));
+    ui->consoleInputSettingsLayout->insertWidget(
+        ui->consoleInputSettingsLayout->indexOf(ui->handheldGroup), console_mode);
+    connect(console_mode, &Spotlight::SegmentedControl::CurrentChanged, this,
+            [this](int index) { (index == 0 ? ui->radioDocked : ui->radioUndocked)->setChecked(true); });
+    connect(ui->radioDocked, &QRadioButton::toggled, console_mode, [this](bool docked) {
+        const QSignalBlocker blocker(console_mode);
+        console_mode->SetCurrentIndex(docked ? 0 : 1);
+    });
+    for (auto* widget : {ui->consoleInputSettings, ui->connectedControllers}) {
+        widget->setProperty("spotlightTransparent", true);
+    }
 }
 
 ConfigureInput::~ConfigureInput() = default;
@@ -66,6 +86,7 @@ ConfigureInput::~ConfigureInput() = default;
 /// Initialize controller and microphone pages, sharing the active system with host capture preview.
 void ConfigureInput::Initialize(InputCommon::InputSubsystem* input_subsystem,
                                 std::size_t max_players) {
+    player_count = std::min<std::size_t>(max_players, player_tabs.size());
     const bool is_powered_on = system.IsPoweredOn();
     auto& hid_core = system.HIDCore();
     player_controllers = {
@@ -105,6 +126,7 @@ void ConfigureInput::Initialize(InputCommon::InputSubsystem* input_subsystem,
 
     for (std::size_t i = 0; i < player_tabs.size(); ++i) {
         QHBoxLayout* tab_layout = new QHBoxLayout(player_tabs[i]);
+        tab_layout->setContentsMargins(0, 0, 0, 0);
         tab_layout->addWidget(player_controllers[i]);
         connect(player_controllers[i], &ConfigureInputPlayer::Connected, [this, i](bool checked) {
             // Ensures that connecting a controller changes the number of players
@@ -212,6 +234,76 @@ QList<QWidget*> ConfigureInput::GetSubTabs() const {
     };
 }
 
+QTabWidget* ConfigureInput::PlayerTabs() const {
+    return ui->tabWidget;
+}
+
+QCheckBox* ConfigureInput::PlayerConnected(std::size_t player) const {
+    return connected_controller_checkboxes[player];
+}
+
+ConfigureInputPlayer* ConfigureInput::Player(std::size_t player) const {
+    return player_controllers[player];
+}
+
+QWidget* ConfigureInput::MappingPage() {
+    if (mapping_page != nullptr) {
+        return mapping_page;
+    }
+    mapping_page = new QWidget;
+    mapping_page->setProperty("spotlightTransparent", true);
+    auto* layout = new QVBoxLayout(mapping_page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(16);
+    const int advanced_index = static_cast<int>(player_count);
+    const auto options = [advanced_index](int current) {
+        QStringList labels;
+        for (int i = 0; i < advanced_index; ++i) {
+            labels.append(i == current ? ConfigureInput::tr("Player %1").arg(i + 1)
+                                       : QString::number(i + 1));
+        }
+        labels.append(ConfigureInput::tr("Advanced"));
+        return labels;
+    };
+    auto* players = new Spotlight::SegmentedControl(
+        options(ui->tabWidget->currentIndex()), Spotlight::SegmentedControl::Kind::Light, 38);
+    players->setAccessibleName(tr("Player"));
+    const auto show_player = [players, options](int index) {
+        const QSignalBlocker blocker(players);
+        players->SetOptions(options(index));
+        players->SetCurrentIndex(index);
+    };
+    show_player(ui->tabWidget->currentIndex());
+    connect(players, &Spotlight::SegmentedControl::CurrentChanged, this,
+            [this, advanced_index, show_player](int index) {
+                if (index == advanced_index) {
+                    show_player(ui->tabWidget->currentIndex());
+                    emit AdvancedRequested();
+                    return;
+                }
+                ui->tabWidget->setCurrentIndex(index);
+            });
+    connect(ui->tabWidget, &QTabWidget::currentChanged, players, show_player);
+    const auto size_to_current = [this] {
+        for (int i = 0; i < ui->tabWidget->count(); ++i) {
+            const auto policy = i == ui->tabWidget->currentIndex() ? QSizePolicy::Preferred
+                                                                   : QSizePolicy::Ignored;
+            ui->tabWidget->widget(i)->setSizePolicy(policy, policy);
+        }
+    };
+    size_to_current();
+    connect(ui->tabWidget, &QTabWidget::currentChanged, mapping_page, size_to_current);
+    layout->addWidget(players, 0, Qt::AlignLeft);
+    for (auto* tab : player_tabs) {
+        tab->setProperty("spotlightTransparent", true);
+    }
+    ui->tabWidget->tabBar()->hide();
+    ui->tabWidget->setDocumentMode(true);
+    ui->tabWidget->setStyleSheet(QStringLiteral("QTabWidget::pane { top: 0; } QTabWidget > QStackedWidget { background: transparent; }"));
+    layout->addWidget(ui->tabWidget);
+    return mapping_page;
+}
+
 /// Apply all Controls pages, including the saved microphone device and gain.
 void ConfigureInput::ApplyConfiguration() {
     const bool was_global = Settings::values.players.UsingGlobal();
@@ -250,6 +342,7 @@ void ConfigureInput::changeEvent(QEvent* event) {
 
 void ConfigureInput::RetranslateUI() {
     ui->retranslateUi(this);
+    console_mode->SetOptions({tr("Docked"), tr("Handheld")});
 }
 
 void ConfigureInput::LoadConfiguration() {
@@ -300,6 +393,7 @@ void ConfigureInput::UpdateDockedState(bool is_handheld) {
     // Disallow changing the console mode if the controller type is handheld.
     ui->radioDocked->setEnabled(!is_handheld);
     ui->radioUndocked->setEnabled(!is_handheld);
+    console_mode->setEnabled(!is_handheld);
 
     ui->radioDocked->setChecked(Settings::IsDockedMode());
     ui->radioUndocked->setChecked(!Settings::IsDockedMode());

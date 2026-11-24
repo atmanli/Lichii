@@ -19,6 +19,7 @@
 #include "ui_configure_ringcon.h"
 #include "lichii/bootmanager.h"
 #include "lichii/configuration/configure_ringcon.h"
+#include "lichii/spotlight/theme.h"
 
 const std::array<std::string, ConfigureRingController::ANALOG_SUB_BUTTONS_NUM>
     ConfigureRingController::analog_sub_buttons{{
@@ -119,11 +120,13 @@ void SetAnalogParam(const Common::ParamPackage& input_param, Common::ParamPackag
 ConfigureRingController::ConfigureRingController(QWidget* parent,
                                                  InputCommon::InputSubsystem* input_subsystem_,
                                                  Core::HID::HIDCore& hid_core_)
-    : QDialog(parent), timeout_timer(std::make_unique<QTimer>()),
+    : Spotlight::Dialog(parent), timeout_timer(std::make_unique<QTimer>()),
       poll_timer(std::make_unique<QTimer>()), input_subsystem{input_subsystem_},
 
       ui(std::make_unique<Ui::ConfigureRingController>()) {
     ui->setupUi(this);
+    SetIcon(QStringLiteral("circle-notch"), Spotlight::Color::Success());
+    SetSubtitle(tr("Map the flex sensor"));
 
     analog_map_buttons = {
         ui->buttonRingAnalogPull,
@@ -211,8 +214,6 @@ ConfigureRingController::ConfigureRingController(QWidget* parent,
             return;
         }
     });
-
-    resize(0, 0);
 }
 
 ConfigureRingController::~ConfigureRingController() {
@@ -231,7 +232,7 @@ void ConfigureRingController::changeEvent(QEvent* event) {
         RetranslateUI();
     }
 
-    QDialog::changeEvent(event);
+    Spotlight::Dialog::changeEvent(event);
 }
 
 void ConfigureRingController::RetranslateUI() {
@@ -316,7 +317,7 @@ void ConfigureRingController::EnableRingController() {
         break;
     }
     ui->enable_ring_controller_button->setEnabled(true);
-    ui->enable_ring_controller_button->setText(tr("Enable"));
+    ui->enable_ring_controller_button->setText(tr("Enable Ring-Con with Joy-Con driver"));
 }
 
 void ConfigureRingController::ControllerUpdate(Core::HID::ControllerTriggerType type) {

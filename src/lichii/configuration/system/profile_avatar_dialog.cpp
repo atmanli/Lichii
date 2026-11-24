@@ -5,61 +5,116 @@
 
 #include <QBoxLayout>
 #include <QColorDialog>
+#include <QDialogButtonBox>
 #include <QLabel>
 #include <QListWidget>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
+#include <QStyle>
+#include <QToolButton>
+#include "lichii/spotlight/theme.h"
 
-// TODO: Move this to a .ui def
+namespace {
+constexpr int AvatarSize = 64;
+constexpr int AvatarCell = 78;
+constexpr int SwatchSize = 26;
+
+QIcon SwatchIcon(const QColor& color, bool selected, qreal ratio) {
+    QPixmap pixmap(QSize(SwatchSize, SwatchSize) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(selected ? QPen(Spotlight::Color::Accent(), 2) : Qt::NoPen);
+    painter.setBrush(color);
+    painter.drawEllipse(QRectF(1.5, 1.5, SwatchSize - 3, SwatchSize - 3));
+    painter.end();
+    return QIcon(pixmap);
+}
+} // namespace
+
 ProfileAvatarDialog::ProfileAvatarDialog(QWidget* parent)
-    : QDialog{parent}, avatar_list{new QListWidget(this)}, bg_color_button{new QPushButton(this)} {
-    auto* main_layout = new QVBoxLayout(this);
-    auto* button_layout = new QHBoxLayout();
-    auto* select_button = new QPushButton(tr("Select"), this);
-    auto* cancel_button = new QPushButton(tr("Cancel"), this);
-    auto* bg_color_label = new QLabel(tr("Background Color"), this);
-
-    SetBackgroundColor(Qt::white);
+    : Spotlight::Dialog{parent}, avatar_list{new QListWidget(this)} {
+    setWindowTitle(tr("Choose an avatar"));
+    SetSubtitle(tr("Pictures from your console firmware"));
+    SetIcon(QStringLiteral("image"), Spotlight::Color::Accent());
 
     avatar_list->setViewMode(QListView::IconMode);
-    avatar_list->setIconSize(QSize(64, 64));
-    avatar_list->setSpacing(4);
+    avatar_list->setIconSize(QSize(AvatarSize, AvatarSize));
+    avatar_list->setGridSize(QSize(AvatarCell, AvatarCell));
+    avatar_list->setMovement(QListView::Static);
     avatar_list->setResizeMode(QListView::Adjust);
+    avatar_list->setFrameShape(QFrame::NoFrame);
     avatar_list->setSelectionMode(QAbstractItemView::SingleSelection);
     avatar_list->setEditTriggers(QAbstractItemView::NoEditTriggers);
     avatar_list->setDragDropMode(QAbstractItemView::NoDragDrop);
     avatar_list->setDragEnabled(false);
     avatar_list->setDropIndicatorShown(false);
     avatar_list->setAcceptDrops(false);
+    avatar_list->setStyleSheet(QStringLiteral(
+        "QListWidget { background: transparent; border: none; outline: none; }"
+        "QListWidget::item { border: 3px solid transparent; border-radius: 35px; padding: 0; }"
+        "QListWidget::item:selected { background: transparent; border-color: #ff6b95; }"));
 
-    button_layout->addWidget(bg_color_button);
-    button_layout->addWidget(bg_color_label);
-    button_layout->addStretch();
-    button_layout->addWidget(select_button);
-    button_layout->addWidget(cancel_button);
+    auto* background_row = new QHBoxLayout;
+    background_row->setSpacing(10);
+    auto* background_label = new QLabel(tr("Background"), this);
+    background_label->setFont(Spotlight::Font(13, 600));
+    background_row->addWidget(background_label);
+    background_row->addSpacing(6);
+    for (const QColor& color : {QColor(Qt::white), Spotlight::Color::Accent(),
+                                Spotlight::Color::Success(), Spotlight::Color::Info(),
+                                Spotlight::Color::Warning()}) {
+        auto* swatch = new QToolButton(this);
+        swatch->setFixedSize(SwatchSize, SwatchSize);
+        swatch->setIconSize(QSize(SwatchSize, SwatchSize));
+        swatch->setCursor(Qt::PointingHandCursor);
+        swatch->setAccessibleName(color.name());
+        swatch->setStyleSheet(QStringLiteral("QToolButton { background: transparent; border: none; }"));
+        connect(swatch, &QToolButton::clicked, this, [this, color] {
+            SetBackgroundColor(color);
+            RefreshAvatars();
+        });
+        background_row->addWidget(swatch);
+        swatches.emplace_back(swatch, color);
+    }
+    auto* custom = new QPushButton(tr("Custom…"), this);
+    custom->setFlat(true);
+    custom->setCursor(Qt::PointingHandCursor);
+    background_row->addWidget(custom);
+    background_row->addStretch();
 
-    this->setWindowTitle(tr("Select Firmware Avatar"));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+    buttons->addButton(tr("Use avatar"), QDialogButtonBox::AcceptRole)->setDefault(true);
+
+    auto* main_layout = new QVBoxLayout(this);
+    main_layout->setContentsMargins(0, 0, 0, 0);
+    main_layout->setSpacing(20);
     main_layout->addWidget(avatar_list);
-    main_layout->addLayout(button_layout);
+    main_layout->addLayout(background_row);
+    main_layout->addWidget(buttons);
 
-    connect(bg_color_button, &QPushButton::clicked, this, [this]() {
-        const auto new_color = QColorDialog::getColor(avatar_bg_color);
+    SetBackgroundColor(Qt::white);
+
+    connect(custom, &QPushButton::clicked, this, [this]() {
+        const auto new_color = QColorDialog::getColor(avatar_bg_color, this);
         if (new_color.isValid()) {
             SetBackgroundColor(new_color);
             RefreshAvatars();
         }
     });
-    connect(select_button, &QPushButton::clicked, this, [this]() { accept(); });
-    connect(cancel_button, &QPushButton::clicked, this, [this]() { reject(); });
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 }
 
 ProfileAvatarDialog::~ProfileAvatarDialog() = default;
 
 void ProfileAvatarDialog::SetBackgroundColor(const QColor& color) {
     avatar_bg_color = color;
-
-    bg_color_button->setStyleSheet(
-        QStringLiteral("background-color: %1; min-width: 60px;").arg(avatar_bg_color.name()));
+    for (const auto& [swatch, swatch_color] : swatches) {
+        swatch->setIcon(SwatchIcon(swatch_color, swatch_color == color, devicePixelRatioF()));
+    }
 }
 
 QPixmap ProfileAvatarDialog::CreateAvatar(const QPixmap& avatar) {
@@ -88,10 +143,19 @@ void ProfileAvatarDialog::RefreshAvatars() {
         return;
     }
     for (int i = 0; i < avatar_image_store.size(); ++i) {
-        const auto icon =
-            QIcon(CreateAvatar(avatar_image_store[i])
-                      .scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-        avatar_list->item(i)->setIcon(icon);
+        const QPixmap avatar = CreateAvatar(avatar_image_store[i])
+                                   .scaled(AvatarSize, AvatarSize, Qt::IgnoreAspectRatio,
+                                           Qt::SmoothTransformation);
+        QPixmap round(avatar.size());
+        round.fill(Qt::transparent);
+        QPainter painter(&round);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath circle;
+        circle.addEllipse(QRectF(round.rect()));
+        painter.setClipPath(circle);
+        painter.drawPixmap(0, 0, avatar);
+        painter.end();
+        avatar_list->item(i)->setIcon(QIcon(round));
     }
 }
 
@@ -104,27 +168,8 @@ void ProfileAvatarDialog::LoadImages(const QVector<QPixmap>& avatar_images) {
     }
     RefreshAvatars();
 
-    // Determine window size now that avatars are loaded into the grid
-    // There is probably a better way to handle this that I'm unaware of
-    const auto* style = avatar_list->style();
-
-    const int icon_size = avatar_list->iconSize().width();
-    const int icon_spacing = avatar_list->spacing() * 2;
-    const int icon_margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin);
-    const int icon_full_size = icon_size + icon_spacing + icon_margin;
-
-    const int horizontal_margin = style->pixelMetric(QStyle::PM_LayoutLeftMargin) +
-                                  style->pixelMetric(QStyle::PM_LayoutRightMargin) +
-                                  style->pixelMetric(QStyle::PM_ScrollBarExtent);
-    const int vertical_margin = style->pixelMetric(QStyle::PM_LayoutTopMargin) +
-                                style->pixelMetric(QStyle::PM_LayoutBottomMargin);
-
-    // Set default list size so that it is 6 icons wide and 4.5 tall
-    const int columns = 6;
-    const double rows = 4.5;
-    const int total_width = icon_full_size * columns + horizontal_margin;
-    const int total_height = icon_full_size * rows + vertical_margin;
-    avatar_list->setMinimumSize(total_width, total_height);
+    const int scroll_bar = avatar_list->style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+    avatar_list->setFixedSize(AvatarCell * 6 + scroll_bar + 4, AvatarCell * 9 / 2);
 }
 
 bool ProfileAvatarDialog::AreImagesLoaded() const {

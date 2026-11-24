@@ -123,7 +123,7 @@ void ConfigureInputAdvanced::ApplyConfiguration() {
         auto& player = Settings::values.players.GetValue()[player_idx];
         std::array<u32, 4> colors{};
         std::transform(controllers_colors[player_idx].begin(), controllers_colors[player_idx].end(),
-                       colors.begin(), [](QColor color) { return color.rgb(); });
+                       colors.begin(), [](QColor color) { return color.rgb() & 0xFFFFFF; });
 
         player.body_color_left = colors[0];
         player.button_color_left = colors[1];

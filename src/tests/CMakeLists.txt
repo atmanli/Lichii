@@ -267,6 +267,7 @@ add_executable(tests
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp
+    core/nup_convert.cpp
     core/nup_writer.cpp
     core/nup_metadata.cpp
     core/nup_read_bench.cpp
@@ -362,6 +363,7 @@ endif()
 
 target_compile_definitions(tests PRIVATE
     LICHII_NX_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/core/nx_fixtures"
+    LICHII_NEXTENDO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/common/nextendo_fixtures"
     LICHII_TESTS_LOG_DIR="${CMAKE_CURRENT_BINARY_DIR}/test-log")
 
 add_test(NAME tests COMMAND tests)

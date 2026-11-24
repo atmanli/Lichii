@@ -30,10 +30,13 @@ ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     layout->addWidget(description);
     auto* form = new QFormLayout;
     devices = new QComboBox(this);
+    devices->setObjectName(QStringLiteral("microphone_device"));
     form->addRow(tr("Input device:"), devices);
     refresh = new QPushButton(tr("Refresh devices"), this);
+    refresh->setObjectName(QStringLiteral("microphone_refresh"));
     form->addRow(QString{}, refresh);
     volume = new QSlider(Qt::Horizontal, this);
+    volume->setObjectName(QStringLiteral("microphone_volume"));
     volume->setRange(0, 200);
     volume->setValue(Settings::values.microphone_volume.GetValue());
     volume_label = new QLabel(tr("%1%").arg(volume->value()), this);
@@ -42,13 +45,16 @@ ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     gain_layout->addWidget(volume_label);
     form->addRow(tr("Microphone volume:"), gain_layout);
     level = new QProgressBar(this);
+    level->setObjectName(QStringLiteral("microphone_level"));
     level->setRange(0, 100);
     level->setValue(0);
     form->addRow(tr("Input level:"), level);
     layout->addLayout(form);
     test = new QPushButton(tr("Start microphone test"), this);
+    test->setObjectName(QStringLiteral("microphone_test"));
     layout->addWidget(test);
     status = new QLabel(this);
+    status->setObjectName(QStringLiteral("microphone_status"));
     status->setWordWrap(true);
     layout->addWidget(status);
     layout->addStretch();
@@ -58,6 +64,7 @@ ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
         if (!preview_stream->IsReady()) {
             StopTest();
             status->setText(tr("Microphone disconnected or capture failed."));
+            emit StateChanged();
             return;
         }
         level->setValue(static_cast<int>(preview_stream->TakeInputPeak() * 100 / 32768));
@@ -123,6 +130,7 @@ void ConfigureMicrophone::StartTest() {
         (selected != auto_device_name &&
          std::find(available.begin(), available.end(), selected) == available.end())) {
         status->setText(tr("Microphone input is unavailable. Choose an available input device."));
+        emit StateChanged();
         return;
     }
     preview_sink = CreateSinkFromID(Settings::values.sink_id.GetValue(), selected);
@@ -136,11 +144,13 @@ void ConfigureMicrophone::StartTest() {
         StopTest();
         status->setText(tr("Unable to open the microphone. Check the device and microphone "
                            "permissions in your operating system."));
+        emit StateChanged();
         return;
     }
     test->setText(tr("Stop microphone test"));
     status->setText(tr("Listening. Speak into your microphone."));
     timer->start();
+    emit StateChanged();
 }
 
 /// Stop metering and release preview capture before its controls or device selection change.
@@ -151,6 +161,7 @@ void ConfigureMicrophone::StopTest() {
     level->setValue(0);
     test->setText(tr("Start microphone test"));
     status->clear();
+    emit StateChanged();
 }
 
 /// Save gain and the input device when emulation is stopped; release any active preview.

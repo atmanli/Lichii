@@ -7,126 +7,138 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <QFontMetricsF>
+#include <functional>
+#include <numeric>
+#include <QCoreApplication>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPolygonF>
-#include <QStringList>
 #include <QWindow>
 
 #include "common/settings.h"
 #include "core/core.h"
+#include "lichii/spotlight/theme.h"
 #include "main_window.h"
+#include "qt_common/config/shared_translation.h"
 #include "qt_common/qt_common.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
+#include "video_core/shader_notify.h"
 
 namespace {
 
 using Common::DkbCpuTrace::Role;
+using namespace Spotlight;
 
-// Layout of the "6 · 3 + big number" design at 100% scale; Qt scales it with the DPI.
-constexpr int OverlayWidth = 300;
-constexpr int OverlayHeight = 158;
-constexpr qreal PaddingX = 10;
-constexpr qreal PaddingTop = 6;
-constexpr qreal ContentWidth = 280;
-constexpr qreal HeaderHeight = 44;
-constexpr qreal GraphTop = PaddingTop + HeaderHeight + 4;
-constexpr qreal GraphHeight = 72;
-constexpr qreal PlotWidth = 236;
-constexpr qreal AxisX = 240;
-constexpr qreal LabelX = 247;
-constexpr qreal LabelHeight = 14;
-constexpr qreal FooterTop = GraphTop + GraphHeight + 10;
-
+constexpr int CardWidth = 300;
+constexpr int CardRadius = 18;
+constexpr int Padding = 16;
+constexpr int GraphTop = Padding + 54 + 12;
+constexpr int GraphWidth = 260;
+constexpr int GraphHeight = 54;
+constexpr int MetricsTop = GraphTop + GraphHeight + 12;
+constexpr int ChipsTop = MetricsTop + 37 + 12;
+constexpr int ChipHeight = 22;
+constexpr int ChipGap = 6;
+constexpr QMargins ShadowMargins{16, 8, 16, 24};
+constexpr int ShadowOffset = 12;
 constexpr auto HistoryWindow = std::chrono::seconds{5};
 constexpr auto StatsWindow = std::chrono::milliseconds{500};
-constexpr std::size_t FpsSamples = 10;
-/// A frame this much slower than the median is a spike.
-constexpr float SpikeRatio = 1.2f;
 
-constexpr QRgb TextColor = qRgb(0xF2, 0xF3, 0xF5);
-constexpr QRgb MutedColor = qRgb(0xA0, 0xA5, 0xAD);
-constexpr QRgb DimColor = qRgb(0x6E, 0x73, 0x7B);
-constexpr QRgb AccentColor = qRgb(0x5E, 0xB4, 0xFF);
-constexpr QRgb SpikeColor = qRgb(0xFF, 0x5D, 0x52);
-constexpr QRgb BackgroundColor = qRgba(0, 0, 0, 140);
-constexpr QRgb LineColor = qRgba(0xF2, 0xF3, 0xF5, 217);
-constexpr QRgb AxisColor = qRgba(255, 255, 255, 46);
-constexpr QRgb MedianLineColor = qRgba(255, 255, 255, 56);
-
-/// The busiest of these threads is the CPU side's limit: the guest cores and GPU emulation.
 constexpr std::array CpuRoles{
-    Role::GuestCore0, Role::GuestCore1,      Role::GuestCore2,  Role::GuestCore3, Role::GuestCore4,
+    Role::GuestCore0, Role::GuestCore1,      Role::GuestCore2, Role::GuestCore3, Role::GuestCore4,
     Role::GuestCore5, Role::GuestSingleCore, Role::GpuCommand, Role::GpuBack,
 };
 
-QFont MonoFont(int pixel_size, QFont::Weight weight = QFont::Normal) {
-    QFont font;
-    font.setFamilies({QStringLiteral("Geist Mono"), QStringLiteral("Cascadia Mono"),
-                      QStringLiteral("JetBrains Mono"), QStringLiteral("Consolas"),
-                      QStringLiteral("SF Mono"), QStringLiteral("Menlo"),
-                      QStringLiteral("DejaVu Sans Mono"), QStringLiteral("Liberation Mono")});
-    font.setStyleHint(QFont::Monospace);
-    font.setPixelSize(pixel_size);
-    font.setWeight(weight);
-    font.setLetterSpacing(QFont::AbsoluteSpacing, (pixel_size >= 40 ? -0.03 : -0.01) * pixel_size);
+QColor CardFill() {
+    return QColor(0x0b, 0x0c, 0x10, 0xd9);
+}
+
+QColor GraphLine() {
+    return QColor(0x7e, 0xe2, 0xa8);
+}
+
+QColor Generated() {
+    return QColor(0xc9, 0xb3, 0xff);
+}
+
+QColor Building() {
+    return QColor(0xff, 0xd3, 0x7a);
+}
+
+QColor Soft(QColor color) {
+    color.setAlpha(0x2e);
+    return color;
+}
+
+QFont MetricLabelFont() {
+    QFont font = Font(11, 600);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 0.55);
     return font;
 }
 
-/// The baseline of text centred in a line box, as CSS places it.
-qreal Baseline(const QFont& font, qreal top, qreal line_height) {
-    const QFontMetricsF metrics{font};
-    return top + (line_height - metrics.ascent() - metrics.descent()) / 2 + metrics.ascent();
+QString Number(const std::optional<double>& value, int precision = 0) {
+    return value ? QString::number(*value, 'f', precision) : QStringLiteral("—");
 }
 
-struct Run {
-    QString text;
-    QFont font;
-    QColor color;
-};
-
-qreal Width(const std::vector<Run>& runs) {
-    qreal width = 0;
-    for (const Run& run : runs) {
-        width += QFontMetricsF{run.font}.horizontalAdvance(run.text);
+/// The chips run left to right and wrap inside the card's padding.
+std::vector<QRect> ChipRects(const QStringList& chips) {
+    const QFontMetrics metrics(Font(11, 600));
+    std::vector<QRect> rects;
+    int x = Padding;
+    int y = ChipsTop;
+    for (const QString& chip : chips) {
+        const int width = 18 + metrics.horizontalAdvance(chip);
+        if (x > Padding && x + width > CardWidth - Padding) {
+            x = Padding;
+            y += ChipHeight + ChipGap;
+        }
+        rects.emplace_back(x, y, width, ChipHeight);
+        x += width + ChipGap;
     }
-    return width;
-}
-
-void DrawRuns(QPainter& painter, qreal x, qreal baseline, const std::vector<Run>& runs) {
-    for (const Run& run : runs) {
-        painter.setFont(run.font);
-        painter.setPen(run.color);
-        painter.drawText(QPointF{x, baseline}, run.text);
-        x += QFontMetricsF{run.font}.horizontalAdvance(run.text);
-    }
-}
-
-QString Percent(const std::optional<double>& percent) {
-    return percent ? QStringLiteral("%1%").arg(std::round(*percent), 0, 'f', 0)
-                   : QStringLiteral("—");
+    return rects;
 }
 
 } // namespace
 
-PerformanceOverlay::PerformanceOverlay(MainWindow* parent) : QWidget(parent), m_mainWindow{parent} {
+PerformanceOverlay::PerformanceOverlay(MainWindow* parent, QWidget* anchor)
+    : QWidget(anchor->window(), Qt::FramelessWindowHint | Qt::Tool), m_mainWindow(parent),
+      m_anchor(anchor) {
     setAttribute(Qt::WA_TranslucentBackground);
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Tool);
-    setFixedSize(OverlayWidth, OverlayHeight);
-    raise();
-
-    // pos/stats
-    resetPosition(m_mainWindow->pos());
-    connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::resetPosition);
-    connect(m_mainWindow, &MainWindow::statsUpdated, this, &PerformanceOverlay::updateStats);
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setMouseTracking(true);
+    UpdateHeight();
+    m_anchor->installEventFilter(this);
+    connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::ResetPosition);
+    connect(parent, &MainWindow::statsUpdated, this, &PerformanceOverlay::updateStats);
+    ResetPosition();
 }
 
-void PerformanceOverlay::resetPosition(const QPoint& _) {
-    auto pos = m_mainWindow->pos();
-    move(pos.x() + m_offset.x(), pos.y() + m_offset.y());
+QRect PerformanceOverlay::Card() const {
+    return rect().marginsRemoved(ShadowMargins);
+}
+
+QRect PerformanceOverlay::CloseButton() const {
+    return QRect{Card().left() + CardWidth - Padding - 24, Card().top() + Padding, 24, 24};
+}
+
+void PerformanceOverlay::UpdateHeight() {
+    const auto chips = ChipRects(m_chips);
+    const int bottom = chips.empty() ? ChipsTop - 12 : chips.back().bottom() + 1;
+    setFixedSize(CardWidth + ShadowMargins.left() + ShadowMargins.right(),
+                 bottom + Padding + ShadowMargins.top() + ShadowMargins.bottom());
+}
+
+void PerformanceOverlay::ResetPosition() {
+    move(m_anchor->mapToGlobal(m_offset) - QPoint{ShadowMargins.left(), ShadowMargins.top()});
+}
+
+bool PerformanceOverlay::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_anchor && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
+        ResetPosition();
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
@@ -138,19 +150,19 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
         return;
     }
 
-    m_fps.reset();
-    if (!std::isnan(results.average_game_fps)) {
-        m_fps = results.average_game_fps;
-        m_fpsSamples.push_back(static_cast<float>(std::round(*m_fps)));
-        if (m_fpsSamples.size() > FpsSamples) {
-            m_fpsSamples.pop_front();
-        }
-    }
-
+    m_fps = std::isfinite(results.average_game_fps) ? std::optional(results.average_game_fps)
+                                                    : std::nullopt;
+    m_speed = std::isfinite(results.emulation_speed) ? std::optional(results.emulation_speed * 100)
+                                                     : std::nullopt;
+    m_generated = m_mainWindow->FrameGenFps();
+    m_shaders = std::max(shaders.ShadersLeft(), 0);
     m_frames = perf_stats.GetRecentFrameTimes(HistoryWindow);
     m_frameMs.reset();
     if (!m_frames.empty() &&
-        Core::FrameTimeHistory::Clock::now() - m_frames.back().end < std::chrono::seconds{1}) {
+        Core::FrameTimeHistory::Clock::now() - m_frames.back().end >= std::chrono::seconds{1}) {
+        m_frames.clear();
+    }
+    if (!m_frames.empty()) {
         double sum = 0;
         int count = 0;
         for (auto it = m_frames.rbegin();
@@ -165,8 +177,8 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
     auto cpu_snapshot = Common::DkbCpuTrace::ReadSnapshot();
     m_cpuPercent.reset();
     if (m_cpuSnapshot) {
-        const double wall_ns = std::chrono::duration<double, std::nano>(
-                                   cpu_snapshot.wall_time - m_cpuSnapshot->wall_time)
+        const double wall_ns = std::chrono::duration<double, std::nano>(cpu_snapshot.wall_time -
+                                                                        m_cpuSnapshot->wall_time)
                                    .count();
         std::optional<u64> busiest_ns;
         for (const Role role : CpuRoles) {
@@ -190,202 +202,171 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
         m_gpuPercent = std::min(100.0, *gpu_ms / *m_frameMs * 100.0);
     }
 
-    QStringList tags;
-    if (const QString& dlss = m_mainWindow->DlssStatusText(); !dlss.isEmpty()) {
-        tags << dlss;
+    const auto label = [](const auto& options, auto value) {
+        const auto it = options.find(value);
+        return it == options.end()
+                   ? QString{}
+                   : QCoreApplication::translate("MainWindow", it->second.toUtf8().constData());
+    };
+    QStringList chips{
+        label(ConfigurationShared::renderer_backend_texts_map,
+              Settings::values.renderer_backend.GetValue()),
+        tr("%1×").arg(Settings::values.resolution_info.up_factor),
+        label(ConfigurationShared::scaling_filter_texts_map,
+              Settings::values.scaling_filter.GetValue()),
+    };
+    if (Settings::values.frame_gen.GetValue()) {
+        chips << label(ConfigurationShared::frame_gen_type_texts_map,
+                       Settings::values.frame_gen_type.GetValue());
     }
-    switch (Settings::values.scaling_filter.GetValue()) {
-    case Settings::ScalingFilter::Fsr:
-        tags << QStringLiteral("FSR");
-        break;
-    case Settings::ScalingFilter::Fsr3:
-        tags << QStringLiteral("FSR 3");
-        break;
-    case Settings::ScalingFilter::Sgsr:
-    case Settings::ScalingFilter::SgsrEdge:
-        tags << QStringLiteral("SGSR");
-        break;
-    default:
-        break;
+    chips.removeAll(QString{});
+    if (m_shaders > 0) {
+        chips << tr("%n shader(s) building", nullptr, m_shaders);
     }
-    if (const auto& scaling = Settings::values.resolution_info; scaling.active) {
-        tags << QStringLiteral("%1×").arg(scaling.up_factor, 0, 'g', 3);
+    if (chips != m_chips) {
+        m_chips = chips;
+        UpdateHeight();
     }
-    if (const double generated = m_mainWindow->FrameGenFps(); generated >= 0.5) {
-        tags << tr("FG +%1").arg(std::round(generated), 0, 'f', 0);
-    }
-    m_tags = tags.join(QStringLiteral("  "));
 
+    std::vector<float> intervals;
+    intervals.reserve(m_frames.size());
+    for (const auto& frame : m_frames) {
+        if (std::isfinite(frame.ms) && frame.ms > 0) {
+            intervals.push_back(frame.ms);
+        }
+    }
+    m_low_fps.reset();
+    QStringList details;
+    if (const auto summary = Core::Summarize(intervals)) {
+        if (intervals.size() >= 100) {
+            const std::size_t count = std::max<std::size_t>(1, (intervals.size() + 99) / 100);
+            std::partial_sort(intervals.begin(), intervals.begin() + count, intervals.end(),
+                              std::greater{});
+            const double sum = std::accumulate(intervals.begin(), intervals.begin() + count, 0.0);
+            m_low_fps = 1000 * count / sum;
+        }
+        details << tr("Frame time %1 ms · min %2 · max %3")
+                       .arg(m_frameMs.value_or(summary->median_ms), 0, 'f', 1)
+                       .arg(summary->min_ms, 0, 'f', 1)
+                       .arg(summary->max_ms, 0, 'f', 1);
+    }
+    if (!m_mainWindow->DlssStatusText().isEmpty()) {
+        details << m_mainWindow->DlssStatusText();
+    }
+    setToolTip(details.join(QLatin1Char('\n')));
     update();
 }
 
-void PerformanceOverlay::paintEvent(QPaintEvent* event) {
+void PerformanceOverlay::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    const qreal ratio = devicePixelRatioF();
+    m_shadow = QPixmap(size() * ratio);
+    m_shadow.setDevicePixelRatio(ratio);
+    m_shadow.fill(Qt::transparent);
+    QPainter painter(&m_shadow);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 10));
+    const QRectF card = QRectF(Card()).translated(0, ShadowOffset);
+    for (int spread = 12; spread > 0; spread -= 2) {
+        painter.drawRoundedRect(card.adjusted(-spread, -spread, spread, spread),
+                                CardRadius + spread, CardRadius + spread);
+    }
+}
+
+void PerformanceOverlay::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.drawPixmap(0, 0, m_shadow);
+    painter.setPen(QPen(Color::StrokeSubtle(), 1));
+    painter.setBrush(CardFill());
+    painter.drawRoundedRect(QRectF(Card()).adjusted(0.5, 0.5, -0.5, -0.5), CardRadius, CardRadius);
+
+    const QRect close = CloseButton().translated(-Card().topLeft());
+    painter.translate(Card().topLeft());
+    const auto text = [&](const QRect& area, const QString& value, const QFont& font,
+                          const QColor& ink, Qt::Alignment alignment = Qt::AlignLeft) {
+        painter.setFont(font);
+        painter.setPen(ink);
+        painter.drawText(area, alignment | Qt::AlignVCenter, value);
+    };
+
+    text(QRect{Padding, Padding, 200, 36}, Number(m_fps), Font(34, 700), Color::Text());
+    text(QRect{Padding, Padding + 38, 200, 16}, tr("FPS · 1% low %1").arg(Number(m_low_fps)),
+         Font(12), Color::TextSecondary());
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor::fromRgba(BackgroundColor));
-    painter.drawRoundedRect(rect(), 5.0, 5.0);
+    painter.setBrush(m_close_hovered ? Color::ControlHover() : Color::Fill());
+    painter.drawEllipse(QRectF(close));
+    painter.drawPixmap(close.left() + 6, close.top() + 6,
+                       IconPixmap(u"x", 12, Color::TextSecondary(), devicePixelRatioF()));
 
-    const QColor text = QColor::fromRgb(TextColor);
-    const QColor muted = QColor::fromRgb(MutedColor);
-    const QColor accent = QColor::fromRgb(AccentColor);
-    const QFont fps_font = MonoFont(40, QFont::DemiBold);
-    const QFont small_font = MonoFont(13);
-    const QFont small_bold_font = MonoFont(13, QFont::DemiBold);
-    const QFont footer_font = MonoFont(11);
-
-    // Header: the big fps number on the left, frame time and CPU/GPU % on the right.
-    const qreal fps_baseline = Baseline(fps_font, PaddingTop, HeaderHeight);
-    const std::vector<Run> fps_runs{
-        {m_fps ? QString::number(std::round(*m_fps), 'f', 0) : QStringLiteral("—"), fps_font, text},
-    };
-    DrawRuns(painter, PaddingX, fps_baseline, fps_runs);
-    DrawRuns(painter, PaddingX + Width(fps_runs) + 6, fps_baseline,
-             {{QStringLiteral("fps"), small_font, muted}});
-
-    const qreal right = PaddingX + ContentWidth;
-    const qreal right_top = PaddingTop + (HeaderHeight - 34) / 2;
-    const std::vector<Run> ms_runs{
-        {m_frameMs ? QString::number(*m_frameMs, 'f', 1) : QStringLiteral("—"), small_bold_font,
-         text},
-        {QStringLiteral(" ms"), small_font, muted},
-    };
-    DrawRuns(painter, right - Width(ms_runs), Baseline(small_font, right_top, 17), ms_runs);
-
-    // The higher percentage is the limit and gets the accent.
-    const bool both = m_cpuPercent && m_gpuPercent;
-    const bool cpu_limit = both && std::round(*m_cpuPercent) >= std::round(*m_gpuPercent);
-    const bool gpu_limit = both && !cpu_limit;
-    const std::vector<Run> load_runs{
-        {QStringLiteral("CPU ") + Percent(m_cpuPercent), cpu_limit ? small_bold_font : small_font,
-         cpu_limit ? accent : muted},
-        {QStringLiteral("  "), small_font, muted},
-        {QStringLiteral("GPU ") + Percent(m_gpuPercent), gpu_limit ? small_bold_font : small_font,
-         gpu_limit ? accent : muted},
-    };
-    DrawRuns(painter, right - Width(load_runs), Baseline(small_font, right_top + 17, 17),
-             load_runs);
-
-    paintGraph(painter, QRectF{PaddingX, GraphTop, ContentWidth, GraphHeight});
-
-    // Footer: fps min/median/max over the last 5 s, and the features that are on.
-    QString fps_range = QStringLiteral("— — —");
-    const std::vector<float> fps_samples(m_fpsSamples.begin(), m_fpsSamples.end());
-    if (const auto summary = Core::Summarize(fps_samples)) {
-        fps_range = QStringLiteral("%1 %2 %3")
-                        .arg(summary->min_ms, 0, 'f', 0)
-                        .arg(std::round(summary->median_ms), 0, 'f', 0)
-                        .arg(summary->max_ms, 0, 'f', 0);
+    if (m_fps && m_generated >= 0.5) {
+        const QString generated = tr("+%1 generated").arg(m_generated, 0, 'f', 0);
+        const int width = 18 + QFontMetrics(Font(11, 600)).horizontalAdvance(generated);
+        const QRect pill{close.left() - 10 - width, Padding, width, ChipHeight};
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Soft(Generated()));
+        painter.drawRoundedRect(QRectF(pill), ChipHeight / 2.0, ChipHeight / 2.0);
+        text(pill, generated, Font(11, 600), Generated(), Qt::AlignHCenter);
     }
-    const qreal footer_baseline = Baseline(footer_font, FooterTop, LabelHeight);
-    const std::vector<Run> range_runs{
-        {fps_range, footer_font, muted},
-        {QStringLiteral(" fps"), footer_font, QColor::fromRgb(DimColor)},
-    };
-    DrawRuns(painter, PaddingX, footer_baseline, range_runs);
 
-    const qreal tags_width = ContentWidth - Width(range_runs) - 12;
-    const QString tags =
-        QFontMetricsF{footer_font}.elidedText(m_tags, Qt::ElideRight, tags_width);
-    DrawRuns(painter, right - QFontMetricsF{footer_font}.horizontalAdvance(tags), footer_baseline,
-             {{tags, footer_font, muted}});
+    paintGraph(painter, QRectF{Padding, GraphTop, GraphWidth, GraphHeight});
+
+    const std::array<std::pair<QString, QString>, 4> metrics{{
+        {tr("Frame"), m_frameMs ? tr("%1 ms").arg(Number(m_frameMs, 1)) : Number(m_frameMs)},
+        {tr("Speed"), m_speed ? tr("%1%").arg(Number(m_speed)) : Number(m_speed)},
+        {tr("GPU"), m_gpuPercent ? tr("%1%").arg(Number(m_gpuPercent)) : Number(m_gpuPercent)},
+        {tr("CPU"), m_cpuPercent ? tr("%1%").arg(Number(m_cpuPercent)) : Number(m_cpuPercent)},
+    }};
+    const QFontMetrics label_metrics(MetricLabelFont());
+    const QFontMetrics value_metrics(Font(15, 600));
+    int x = Padding;
+    for (const auto& [name, value] : metrics) {
+        const QString caption = QLocale().toUpper(name);
+        const int width = std::max(label_metrics.horizontalAdvance(caption),
+                                   value_metrics.horizontalAdvance(value));
+        text(QRect{x, MetricsTop, width, 15}, caption, MetricLabelFont(), Color::TextMuted());
+        text(QRect{x, MetricsTop + 17, width, 20}, value, Font(15, 600), Color::Text());
+        x += width + 18;
+    }
+
+    const auto chips = ChipRects(m_chips);
+    for (std::size_t i = 0; i < chips.size(); ++i) {
+        const bool building = m_shaders > 0 && i + 1 == chips.size();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(building ? Soft(Building()) : Color::Control());
+        painter.drawRoundedRect(QRectF(chips[i]), ChipHeight / 2.0, ChipHeight / 2.0);
+        text(chips[i], m_chips[static_cast<qsizetype>(i)], Font(11, 600),
+             building ? Building() : Color::Text(), Qt::AlignHCenter);
+    }
 }
 
 void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
-    painter.fillRect(QRectF{area.left() + AxisX, area.top(), 1, area.height()},
-                     QColor::fromRgba(AxisColor));
-    if (m_frames.size() < 2) {
-        return;
-    }
-
-    std::vector<float> frame_ms;
-    frame_ms.reserve(m_frames.size());
-    for (const auto& frame : m_frames) {
-        frame_ms.push_back(frame.ms);
-    }
-    const auto summary = *Core::Summarize(frame_ms);
-
-    // Min and max span the plot; a steady frame rate keeps a small span so jitter stays flat.
-    float low = summary.min_ms;
-    float high = summary.max_ms;
-    const float min_span = std::max(2.0f, summary.median_ms * 0.1f);
-    if (high - low < min_span) {
-        const float middle = (low + high) / 2;
-        low = middle - min_span / 2;
-        high = middle + min_span / 2;
-    }
-    const qreal plot_top = area.top() + 6;
-    const qreal plot_bottom = area.bottom() - 7;
-    const auto y_of = [&](float ms) {
-        return plot_top + (high - ms) / (high - low) * (plot_bottom - plot_top);
-    };
-    const auto newest = m_frames.back().end;
-    const double window_s = std::chrono::duration<double>(HistoryWindow).count();
-
-    QPolygonF line;
-    line.reserve(static_cast<qsizetype>(m_frames.size()));
-    for (const auto& frame : m_frames) {
-        const double age_s = std::chrono::duration<double>(newest - frame.end).count();
-        line << QPointF{area.left() + PlotWidth * (1.0 - age_s / window_s), y_of(frame.ms)};
-    }
-
-    painter.setBrush(Qt::NoBrush);
-    QPen median_pen{QColor::fromRgba(MedianLineColor), 0.75};
-    median_pen.setDashPattern({2.0 / 0.75, 3.0 / 0.75});
-    painter.setPen(median_pen);
-    const qreal median_y = y_of(summary.median_ms);
-    painter.drawLine(QPointF{area.left(), median_y}, QPointF{area.left() + PlotWidth, median_y});
-
-    QPen line_pen{QColor::fromRgba(LineColor), 1.1};
-    line_pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(line_pen);
-    painter.drawPolyline(line);
-
-    const float spike_ms = summary.median_ms * SpikeRatio;
-    QPen spike_pen{QColor::fromRgb(SpikeColor), 1.1};
-    spike_pen.setCapStyle(Qt::RoundCap);
-    spike_pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(spike_pen);
-    for (qsizetype i = 1; i < line.size(); ++i) {
-        if (frame_ms[i - 1] > spike_ms || frame_ms[i] > spike_ms) {
-            painter.drawLine(line[i - 1], line[i]);
+    const qreal target_ms =
+        1000.0 /
+        (Settings::CurrentProgramIsSwitch2() ? Settings::values.frame_rate_limit.GetValue() : 60);
+    constexpr qreal target_y = 12;
+    if (m_frames.size() >= 2) {
+        const auto newest = m_frames.back().end;
+        const double window = std::chrono::duration<double>(HistoryWindow).count();
+        QPolygonF points;
+        points.reserve(static_cast<qsizetype>(m_frames.size()));
+        for (const auto& frame : m_frames) {
+            const double age = std::chrono::duration<double>(newest - frame.end).count();
+            points << QPointF{area.right() - area.width() * std::clamp(age / window, 0.0, 1.0),
+                              std::clamp(area.top() + target_y * frame.ms / target_ms,
+                                         area.top() + 1, area.bottom() - 1)};
         }
+        painter.setPen(QPen(GraphLine(), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(points);
     }
-
-    // Min, median and max as ticks on the axis at their real heights, labelled beside them.
-    struct Tick {
-        float ms;
-        QColor color;
-        QFont font;
-    };
-    const std::array<Tick, 3> ticks{{
-        {summary.max_ms,
-         QColor::fromRgb(summary.max_ms > spike_ms ? SpikeColor : TextColor),
-         MonoFont(11, QFont::Medium)},
-        {summary.median_ms, QColor::fromRgb(TextColor), MonoFont(11, QFont::Medium)},
-        {summary.min_ms, QColor::fromRgb(MutedColor), MonoFont(11)},
-    }};
-    std::array<qreal, 3> label_tops{};
-    for (std::size_t i = 0; i < ticks.size(); ++i) {
-        const qreal y = y_of(ticks[i].ms);
-        painter.fillRect(QRectF{area.left() + AxisX - 2, y - 0.5, 5, 1}, ticks[i].color);
-        label_tops[i] = y - LabelHeight / 2;
-    }
-    // Push overlapping labels apart, keeping them within the graph and the footer's padding.
-    for (std::size_t i = 1; i < label_tops.size(); ++i) {
-        label_tops[i] = std::max(label_tops[i], label_tops[i - 1] + LabelHeight);
-    }
-    label_tops[2] = std::min(label_tops[2], area.bottom() + 7 - LabelHeight);
-    for (std::size_t i = label_tops.size() - 1; i-- > 0;) {
-        label_tops[i] = std::min(label_tops[i], label_tops[i + 1] - LabelHeight);
-    }
-    for (std::size_t i = 0; i < ticks.size(); ++i) {
-        DrawRuns(painter, area.left() + LabelX,
-                 Baseline(ticks[i].font, label_tops[i], LabelHeight),
-                 {{QString::number(ticks[i].ms, 'f', 1), ticks[i].font, ticks[i].color}});
-    }
+    QPen dash(QColor(0xff, 0xff, 0xff, 0x24), 1);
+    dash.setDashPattern({3, 4});
+    painter.setPen(dash);
+    painter.drawLine(QPointF{area.left(), area.top() + target_y + 0.5},
+                     QPointF{area.right(), area.top() + target_y + 0.5});
 }
 
 void PerformanceOverlay::hideEvent(QHideEvent* event) {
@@ -394,36 +375,67 @@ void PerformanceOverlay::hideEvent(QHideEvent* event) {
         QtCommon::system->GetPerfStats().SetFrameTimeHistoryEnabled(false);
     }
     m_fps.reset();
-    m_fpsSamples.clear();
+    m_low_fps.reset();
+    m_speed.reset();
     m_frameMs.reset();
     m_cpuPercent.reset();
     m_gpuPercent.reset();
     m_cpuSnapshot.reset();
     m_frames.clear();
+    m_shaders = 0;
+    m_generated = 0;
+    m_chips.clear();
+    m_close_hovered = false;
+    UpdateHeight();
 }
 
 void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) {
         return;
     }
-    // Wayland ignores move() on top-level windows, so the overlay sat where the compositor put it:
-    // let the compositor drag it instead.
+    if (CloseButton().contains(event->pos())) {
+        m_close_pressed = true;
+        return;
+    }
     if (QGuiApplication::platformName().startsWith(QStringLiteral("wayland")) && windowHandle() &&
         windowHandle()->startSystemMove()) {
         return;
     }
+    m_dragging = true;
     m_drag_start_pos = event->pos();
 }
 
 void PerformanceOverlay::mouseMoveEvent(QMouseEvent* event) {
-    // drag
-    if (event->buttons() & Qt::LeftButton) {
-        QPoint new_global_pos = event->globalPosition().toPoint() - m_drag_start_pos;
-        m_offset = new_global_pos - m_mainWindow->pos();
-        move(new_global_pos);
+    if (m_dragging && (event->buttons() & Qt::LeftButton)) {
+        const QPoint target = event->globalPosition().toPoint() - m_drag_start_pos;
+        m_offset =
+            m_anchor->mapFromGlobal(target + QPoint{ShadowMargins.left(), ShadowMargins.top()});
+        move(target);
+        return;
+    }
+    const bool hovered = CloseButton().contains(event->pos());
+    if (hovered != m_close_hovered) {
+        m_close_hovered = hovered;
+        setCursor(hovered ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        update(CloseButton());
     }
 }
 
-void PerformanceOverlay::closeEvent(QCloseEvent* event) {
+void PerformanceOverlay::mouseReleaseEvent(QMouseEvent* event) {
+    m_dragging = false;
+    if (std::exchange(m_close_pressed, false) && CloseButton().contains(event->pos())) {
+        close();
+    }
+}
+
+void PerformanceOverlay::leaveEvent(QEvent*) {
+    if (m_close_hovered) {
+        m_close_hovered = false;
+        unsetCursor();
+        update(CloseButton());
+    }
+}
+
+void PerformanceOverlay::closeEvent(QCloseEvent*) {
     emit closed();
 }

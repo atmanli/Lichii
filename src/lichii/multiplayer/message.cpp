@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <QApplication>
 #include <QMessageBox>
 #include <QString>
 
@@ -54,13 +55,13 @@ const ConnectionError ErrorManager::NO_INTERFACE_SELECTED(QT_TR_NOOP(
     "make a selection."));
 
 static bool WarnMessage(const std::string& title, const std::string& text) {
-    return QMessageBox::Ok == QMessageBox::warning(nullptr, QObject::tr(title.c_str()),
-                                                   QObject::tr(text.c_str()),
-                                                   QMessageBox::Ok | QMessageBox::Cancel);
+    return QMessageBox::Ok ==
+           QMessageBox::warning(QApplication::activeWindow(), QObject::tr(title.c_str()),
+                                QObject::tr(text.c_str()), QMessageBox::Ok | QMessageBox::Cancel);
 }
 
 void ErrorManager::ShowError(const ConnectionError& e) {
-    QMessageBox::critical(nullptr, tr("Error"), tr(e.GetString().c_str()));
+    QMessageBox::critical(QApplication::activeWindow(), tr("Error"), tr(e.GetString().c_str()));
 }
 
 bool WarnGameRunning() {

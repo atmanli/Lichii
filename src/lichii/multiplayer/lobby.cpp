@@ -4,7 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <QInputDialog>
+#include <QFontDatabase>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QStyledItemDelegate>
+#include <QVBoxLayout>
 #include <QList>
 #include <QtConcurrentRun>
 #include "common/logging.h"
@@ -12,10 +17,8 @@
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/internal_network/network_interface.h"
-#include "network/network.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_lobby.h"
-#include "qt_common/game_list/game_list_p.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/game/common.h"
 #include "lichii/main_window.h"
 #include "lichii/multiplayer/client_room.h"
 #include "lichii/multiplayer/lobby.h"
@@ -23,15 +26,88 @@
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
+#include "network/network.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/game_list_p.h"
+#include "ui_lobby.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/web_backend.h"
 #endif
 
+namespace {
+
+class RoomDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+protected:
+    void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override {
+        QStyledItemDelegate::initStyleOption(option, index);
+        option->displayAlignment = Qt::AlignLeft | Qt::AlignVCenter;
+        QColor color = QColor(0xff, 0xff, 0xff, 0xb8);
+        if (index.parent().isValid()) {
+            option->font = Spotlight::Font(13, 400);
+            option->palette.setColor(QPalette::Text, color);
+            option->palette.setColor(QPalette::HighlightedText, color);
+            return;
+        }
+        switch (index.column()) {
+        case Column::GAME_NAME:
+            option->font = Spotlight::Font(12, 500);
+            option->decorationSize = {28, 28};
+            color = Spotlight::Color::Text();
+            break;
+        case Column::ROOM_NAME:
+            option->font = Spotlight::Font(14, 600);
+            option->decorationPosition = QStyleOptionViewItem::Right;
+            option->decorationSize = {15, 15};
+            color = Spotlight::Color::Text();
+            break;
+        case Column::MEMBER:
+            option->font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+            option->font.setPixelSize(12);
+            break;
+        default:
+            option->font = Spotlight::Font(13, 400);
+            break;
+        }
+        option->palette.setColor(QPalette::Text, color);
+        option->palette.setColor(QPalette::HighlightedText, color);
+    }
+};
+
+} // namespace
+
 Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
              std::shared_ptr<Core::AnnounceMultiplayerSession> session, Core::System& system_)
-    : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
-      ui(std::make_unique<Ui::Lobby>()), announce_multiplayer_session(session), system{system_} {
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::Lobby>()),
+      announce_multiplayer_session(session), system{system_} {
     ui->setupUi(this);
+    SetIcon(u"users", Spotlight::Color::Success());
+    resize(724, 638);
+    for (auto* label : {ui->label, ui->label_2}) {
+        label->setFont(Spotlight::Font(13, 600));
+        Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    }
+    ui->search->addAction(
+        Spotlight::Icon(u"magnifying-glass", Spotlight::Color::TextSecondary(), 16),
+        QLineEdit::LeadingPosition);
+    ui->refresh_list->setProperty("kind", QStringLiteral("primary"));
+    ui->refresh_list->setIcon(
+        Spotlight::Icon(u"arrow-clockwise", Spotlight::Color::OnAccent(), 16));
+    ui->refresh_list->setMinimumHeight(40);
+    ui->room_list->setObjectName(QStringLiteral("LobbyRooms"));
+    ui->room_list->setStyleSheet(QStringLiteral(
+        "QTreeView#LobbyRooms { background-color: rgba(255, 255, 255, 13); "
+        "border: 1px solid rgba(255, 255, 255, 20); border-radius: 18px; padding: 0 0 4px 0; }"
+        "QTreeView#LobbyRooms::item { padding: 11px 0; border: 0; }"
+        "QTreeView#LobbyRooms::item:selected { background-color: rgba(255, 107, 149, 36); "
+        "color: #ffffff; }"
+        "QTreeView#LobbyRooms QHeaderView::section { background-color: rgba(255, 255, 255, 15); "
+        "color: rgba(255, 255, 255, 158); border: 0; height: 40px; padding: 0 12px; "
+        "font-weight: 600; }"));
 
     // setup the watcher for background connections
     watcher = new QFutureWatcher<void>;
@@ -48,9 +124,11 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
     proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     proxy->setSortLocaleAware(true);
     ui->room_list->setModel(proxy);
-    ui->room_list->header()->setSectionResizeMode(QHeaderView::Interactive);
-    ui->room_list->header()->stretchLastSection();
-    ui->room_list->setAlternatingRowColors(true);
+    ResetModel();
+    ui->room_list->setItemDelegate(new RoomDelegate(this));
+    ui->room_list->setIconSize({28, 28});
+    ui->room_list->header()->setStretchLastSection(false);
+    ui->room_list->header()->setFont(Spotlight::Font(13, 600));
     ui->room_list->setSelectionMode(QHeaderView::SingleSelection);
     ui->room_list->setSelectionBehavior(QHeaderView::SelectRows);
     ui->room_list->setVerticalScrollMode(QHeaderView::ScrollPerPixel);
@@ -100,13 +178,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
 Lobby::~Lobby() = default;
 
 void Lobby::UpdateGameList(QStandardItemModel* list) {
-    game_list->clear();
-    for (int i = 0; i < list->rowCount(); i++) {
-        auto parent = list->item(i, 0);
-        for (int j = 0; j < parent->rowCount(); j++) {
-            game_list->appendRow(parent->child(j)->clone());
-        }
-    }
+    Lichii::CopyLibraryGames(*game_list, *list);
     if (proxy)
         proxy->UpdateGameList(game_list);
     ui->room_list->sortByColumn(Column::GAME_NAME, Qt::AscendingOrder);
@@ -117,11 +189,36 @@ void Lobby::RetranslateUi() {
 }
 
 QString Lobby::PasswordPrompt() {
-    bool ok;
-    const QString text =
-        QInputDialog::getText(this, tr("Password Required to Join"), tr("Password:"),
-                              QLineEdit::Password, QString(), &ok);
-    return ok ? text : QString();
+    Spotlight::Dialog prompt(this);
+    prompt.setWindowTitle(tr("Password Required to Join"));
+    prompt.SetIcon(u"lock-simple", Spotlight::Color::Accent());
+    prompt.setFixedWidth(472);
+    auto* layout = new QVBoxLayout(&prompt);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    auto* label = new QLabel(tr("Password:"), &prompt);
+    label->setFont(Spotlight::Font(13, 600));
+    Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    auto* password = new QLineEdit(&prompt);
+    password->setEchoMode(QLineEdit::Password);
+    label->setBuddy(password);
+    layout->addWidget(label);
+    layout->addWidget(password);
+    auto* buttons = new QHBoxLayout;
+    buttons->setContentsMargins(0, 18, 0, 0);
+    buttons->setSpacing(10);
+    buttons->addStretch(1);
+    auto* cancel = new QPushButton(tr("Cancel"), &prompt);
+    auto* ok = new QPushButton(tr("OK"), &prompt);
+    ok->setProperty("kind", QStringLiteral("primary"));
+    ok->setDefault(true);
+    buttons->addWidget(cancel);
+    buttons->addWidget(ok);
+    layout->addLayout(buttons);
+    connect(cancel, &QPushButton::clicked, &prompt, &QDialog::reject);
+    connect(ok, &QPushButton::clicked, &prompt, &QDialog::accept);
+    password->setFocus();
+    return prompt.exec() == QDialog::Accepted ? password->text() : QString();
 }
 
 void Lobby::OnExpandRoom(const QModelIndex& index) {
@@ -230,6 +327,12 @@ void Lobby::ResetModel() {
     model->setHeaderData(Column::ROOM_NAME, Qt::Horizontal, tr("Room Name"), Qt::DisplayRole);
     model->setHeaderData(Column::GAME_NAME, Qt::Horizontal, tr("Preferred Game"), Qt::DisplayRole);
     model->setHeaderData(Column::HOST, Qt::Horizontal, tr("Host"), Qt::DisplayRole);
+    auto* header = ui->room_list->header();
+    header->setSectionResizeMode(QHeaderView::Interactive);
+    header->setSectionResizeMode(Column::ROOM_NAME, QHeaderView::Stretch);
+    header->resizeSection(Column::GAME_NAME, 236);
+    header->resizeSection(Column::MEMBER, 74);
+    header->resizeSection(Column::HOST, 110);
 }
 
 void Lobby::RefreshLobby() {
@@ -237,6 +340,8 @@ void Lobby::RefreshLobby() {
         ResetModel();
         ui->refresh_list->setEnabled(false);
         ui->refresh_list->setText(tr("Refreshing"));
+        ui->refresh_list->setIcon(
+            Spotlight::Icon(u"circle-notch", Spotlight::Color::TextMuted(), 16));
         room_list_watcher.setFuture(
             QtConcurrent::run([session]() { return session->GetRoomList(); }));
     } else {
@@ -248,13 +353,15 @@ void Lobby::OnRefreshLobby() {
     AnnounceMultiplayerRoom::RoomList new_room_list = room_list_watcher.result();
     for (auto room : new_room_list) {
         // find the icon for the game if this person owns that game.
-        QPixmap smdh_icon;
+        QIcon game_icon;
         for (int r = 0; r < game_list->rowCount(); ++r) {
             auto index = game_list->index(r, 0);
             auto game_id = game_list->data(index, GameListItemPath::ProgramIdRole).toULongLong();
 
             if (game_id != 0 && room.information.preferred_game.id == game_id) {
-                smdh_icon = game_list->data(index, Qt::DecorationRole).value<QPixmap>();
+                game_icon =
+                    ArtworkImage::Icon(index.data(Qt::DecorationRole).value<QPixmap>(), 32, 6);
+                break;
             }
         }
 
@@ -269,7 +376,7 @@ void Lobby::OnRefreshLobby() {
 
         auto first_item = new LobbyItemGame(
             room.information.preferred_game.id,
-            QString::fromStdString(room.information.preferred_game.name), smdh_icon);
+            QString::fromStdString(room.information.preferred_game.name), game_icon);
         auto row = QList<QStandardItem*>({
             first_item,
             new LobbyItemName(room.has_password, QString::fromStdString(room.information.name)),
@@ -291,13 +398,10 @@ void Lobby::OnRefreshLobby() {
         }
     }
 
-    // Re-enable the refresh button and resize the columns
+    // Re-enable the refresh button
     ui->refresh_list->setEnabled(true);
     ui->refresh_list->setText(tr("Refresh List"));
-    ui->room_list->header()->stretchLastSection();
-    for (int i = 0; i < Column::TOTAL - 1; ++i) {
-        ui->room_list->resizeColumnToContents(i);
-    }
+    ui->refresh_list->setIcon(Spotlight::Icon(u"arrow-clockwise", Spotlight::Color::OnAccent(), 16));
 
     // Set the member list child items to span all columns
     for (int i = 0; i < proxy->rowCount(); i++) {

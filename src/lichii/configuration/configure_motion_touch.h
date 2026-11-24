@@ -5,11 +5,12 @@
 
 #include <memory>
 #include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QLabel;
 class QPushButton;
 class QStringListModel;
-class QVBoxLayout;
+class QTimer;
 
 namespace InputCommon {
 class InputSubsystem;
@@ -34,8 +35,12 @@ public:
 private:
     Q_INVOKABLE void UpdateLabelText(const QString& text);
     Q_INVOKABLE void UpdateButtonText(const QString& text);
+    void SetStatusIcon(const QString& icon, const QColor& tint);
+    void DrawSpinner();
 
-    QVBoxLayout* layout;
+    QLabel* status_icon;
+    QTimer* spinner;
+    int spinner_angle{};
     QLabel* status_label;
     QPushButton* cancel_button;
     std::unique_ptr<InputCommon::CemuhookUDP::CalibrationConfigurationJob> job;
@@ -50,7 +55,7 @@ private:
     friend class ConfigureMotionTouch;
 };
 
-class ConfigureMotionTouch : public QDialog {
+class ConfigureMotionTouch : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

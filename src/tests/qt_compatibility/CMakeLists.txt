@@ -6,11 +6,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Test)
 add_executable(compatibility_report_tests
     compatibility_report.cpp
     ../../lichii/compatibility_report.cpp
     ../../lichii/compatibility_report.h
+    ../../lichii/spotlight/dialog.cpp
+    ../../lichii/spotlight/notice.cpp
+    ../../lichii/spotlight/theme.cpp
+    ../../lichii/spotlight/widgets.cpp
+    ../../../dist/qt_themes/lichii/spotlight.qrc
 )
 target_compile_features(compatibility_report_tests PRIVATE cxx_std_20)
 target_compile_definitions(compatibility_report_tests PRIVATE

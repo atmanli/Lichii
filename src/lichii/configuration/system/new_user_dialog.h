@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 #include "common/uuid.h"
 #include "core/file_sys/vfs/vfs_types.h"
 
@@ -20,7 +20,7 @@ struct User {
     QPixmap pixmap;
 };
 
-class NewUserDialog : public QDialog {
+class NewUserDialog : public Spotlight::Dialog {
     Q_OBJECT
     Q_PROPERTY(bool isDefaultAvatar READ isDefaultAvatar WRITE setIsDefaultAvatar NOTIFY
                    isDefaultAvatarChanged FINAL)
@@ -68,4 +68,5 @@ public slots:
 signals:
     void isDefaultAvatarChanged(bool isDefaultAvatar);
     void userAdded(User user);
+    void deleteRequested();
 };

@@ -14,23 +14,15 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QMessageBox>
-#include <QPlainTextEdit>
-#include <QProgressDialog>
-#include <QPushButton>
 #include <QUrl>
-#include <QVBoxLayout>
 #include <fmt/format.h>
 
 #include "common/common_types.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "video_core/vulkan_common/ffx_files.h"
 #include "lichii/configuration/amd_fsr4_panel.h"
+#include "lichii/configuration/graphics_panel_widgets.h"
+#include "video_core/vulkan_common/ffx_files.h"
 
 #include "common/net/ca_store.h"
 
@@ -83,56 +75,32 @@ std::optional<std::string> Fetch(std::string_view entry, std::string& error,
 } // Anonymous namespace
 
 AmdFsr4Panel::AmdFsr4Panel(QWidget* parent) : QWidget(parent) {
-    QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(24, 0, 0, 8);
-    layout->setSpacing(6);
-
-    QHBoxLayout* status_row = new QHBoxLayout;
-    status_row->setSpacing(8);
-    icon_label = new QLabel(this);
-    icon_label->setTextFormat(Qt::RichText);
-    icon_label->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
-    icon_label->setFixedWidth(16);
-    status_label = new QLabel(this);
-    status_label->setTextFormat(Qt::RichText);
-    status_label->setWordWrap(true);
-    status_row->addWidget(icon_label);
-    status_row->addWidget(status_label, 1);
-
-    QHBoxLayout* button_row = new QHBoxLayout;
-    button_row->setContentsMargins(24, 0, 0, 0);
-    download_button = new QPushButton(this);
-    folder_button = new QPushButton(Tr("Open Folder"), this);
+    using namespace GraphicsPanel;
+    RuntimeCard card(this, Tr("AMD FSR 4"), Tr("Supported Vulkan devices on Windows or Linux"),
+                     QStringLiteral("graphics-card"));
+    status = card.status;
 #if defined(__linux__)
-    QLabel* about =
-        new QLabel(QStringLiteral("<a href=\"https://github.com/Astyyyyy/fsr4-vk\">%1</a>")
-                       .arg(Tr("About fsr4-vk")),
-                   this);
-    about->setOpenExternalLinks(true);
-    about->setToolTip(Tr("fsr4-vk on GitHub (GPL-3.0). Its licence and AMD's notice ship in the "
-                         "package's share/licenses/fsr4-vk folder."));
-    download_button->setVisible(false);
+    card.ProjectLink(Tr("fsr4-vk project"),
+                     QUrl(QStringLiteral("https://github.com/Astyyyyy/fsr4-vk")))
+        ->setToolTip(Tr("fsr4-vk on GitHub (GPL-3.0). Its licence and AMD's notice ship in the "
+                        "package's share/licenses/fsr4-vk folder."));
 #else
-    QLabel* about = new QLabel(
-        QStringLiteral("<a href=\"%1\">%2</a>")
-            .arg(QString::fromUtf8(FfxRuntime::RELEASE_PAGE.data(),
-                                   static_cast<qsizetype>(FfxRuntime::RELEASE_PAGE.size())),
-                 Tr("Where do these files come from?")),
-        this);
-    about->setOpenExternalLinks(true);
-    about->setToolTip(Tr("AMD's FidelityFX SDK release on GitHub. The files are in "
-                         "Kits\\FidelityFX\\signedbin."));
+    card.ProjectLink(
+            Tr("FidelityFX project"),
+            QUrl(QString::fromUtf8(FfxRuntime::RELEASE_PAGE.data(),
+                                   static_cast<qsizetype>(FfxRuntime::RELEASE_PAGE.size()))))
+        ->setToolTip(Tr("AMD's FidelityFX SDK release on GitHub. The files are in "
+                        "Kits\\FidelityFX\\signedbin."));
 #endif
-    button_row->addWidget(download_button);
-    button_row->addWidget(folder_button);
-    button_row->addStretch(1);
-    button_row->addWidget(about);
-
-    layout->addLayout(status_row);
-    layout->addLayout(button_row);
-
-    connect(download_button, &QPushButton::clicked, this, [this] { Download(); });
-    connect(folder_button, &QPushButton::clicked, this, [] {
+    auto* folder_button = new PillButton(Tr("Open Folder"), QStringLiteral("folder-open"),
+                                         PillButton::Kind::Control, 34);
+    card.actions->addWidget(folder_button);
+    card.actions->addStretch();
+    download_button = new PillButton(Tr("Download"), QStringLiteral("download-simple"),
+                                     PillButton::Kind::Accent, 34);
+    card.actions->addWidget(download_button);
+    connect(download_button, &QAbstractButton::clicked, this, [this] { Download(); });
+    connect(folder_button, &QAbstractButton::clicked, this, [] {
         const std::filesystem::path folder = FfxRuntime::Folder();
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
@@ -147,61 +115,52 @@ void AmdFsr4Panel::showEvent(QShowEvent* event) {
 }
 
 void AmdFsr4Panel::Refresh() {
+    using GraphicsPanel::Tone;
 #if defined(__linux__)
     const std::filesystem::path library = FfxRuntime::PortLibrary();
     const bool ready = !library.empty();
-    icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
-                              : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
-    status_label->setText(
-        ready ? Tr("<b>Ready.</b> Found fsr4-vk, the community Vulkan port of FSR 4 (not AMD's "
-                   "official FSR 4). It runs if the GPU and driver support it; otherwise FSR 3.1 "
-                   "does.")
-              : Tr("<b>Not in this build:</b> Lichii's x86-64 Linux packages include fsr4-vk. For "
-                   "a build without it, put %1 from fsr4-vk in the folder. Until then, FSR 3.1 is "
-                   "used.")
-                    .arg(QString::fromUtf8(
-                        FfxRuntime::PORT_LIBRARY.data(),
-                        static_cast<qsizetype>(FfxRuntime::PORT_LIBRARY.size()))));
-    status_label->setToolTip(ready ? PathText(library)
-                                   : Tr("Folder: %1").arg(PathText(FfxRuntime::Folder())));
+    download_button->hide();
+    const QString details =
+        ready ? Tr("Found fsr4-vk, the community Vulkan port of FSR 4, not AMD's official FSR 4. "
+                   "If the GPU or driver doesn't support it, games use FSR 3.1.\n%1")
+                    .arg(PathText(library))
+              : Tr("Install %1 from the fsr4-vk project into %2. Until then, FSR 3.1 is used.")
+                    .arg(QString::fromUtf8(FfxRuntime::PORT_LIBRARY.data(),
+                                           static_cast<qsizetype>(FfxRuntime::PORT_LIBRARY.size())),
+                         PathText(FfxRuntime::Folder()));
 #else
     const bool ready = FfxRuntime::FilesPresent();
     const QString version = QString::fromUtf8(FfxRuntime::SDK_VERSION.data(),
                                               static_cast<qsizetype>(FfxRuntime::SDK_VERSION.size()));
-    icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
-                              : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
-    status_label->setText(
-        ready ? Tr("<b>Ready.</b> Found AMD's FidelityFX runtime from FidelityFX SDK %1. FSR 4 runs "
-                   "if AMD's driver offers it for this GPU; otherwise FSR 3.1 does.")
-                    .arg(version)
-              : Tr("<b>AMD's files needed:</b> the FidelityFX runtime from AMD's FidelityFX SDK %1 "
-                   "(amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll). Until then, "
-                   "FSR 3.1 is used.")
-                    .arg(version));
-    status_label->setToolTip(Tr("Folder: %1").arg(PathText(FfxRuntime::Folder())));
-    download_button->setText(
+    const QString details =
+        Tr("AMD FidelityFX SDK %1. FSR 4 runs only on supported GPUs and drivers; otherwise "
+           "games use FSR 3.1.\nFolder: %2")
+            .arg(version, PathText(FfxRuntime::Folder()));
+    download_button->setToolTip(
         Tr("Download from AMD (%1 MB)").arg((DownloadSize() + (1 << 20) - 1) >> 20));
-    download_button->setVisible(!ready);
+    download_button->setEnabled(!ready);
 #endif
+    status->SetMessage(ready ? Tr("Installed · FSR 4 runtime available")
+                             : Tr("FSR 4 runtime missing."),
+                       ready ? Tone::Ready : Tone::Warning, details);
 }
 
 void AmdFsr4Panel::Download() {
     const std::filesystem::path folder = FfxRuntime::Folder();
     const auto fail = [this](const std::string& error) {
         LOG_ERROR(Frontend, "AMD FSR 4 download failed: {}", error);
-        QMessageBox::warning(this, Tr("AMD FSR 4"),
-                             Tr("Could not download AMD's files: %1. FSR 3.1 is used.")
-                                 .arg(QString::fromStdString(error)));
+        GraphicsPanel::ShowResult(this, Tr("AMD FSR 4"),
+                                  Tr("Could not download AMD's files: %1. FSR 3.1 is used.")
+                                      .arg(QString::fromStdString(error)),
+                                  GraphicsPanel::Tone::Error);
         Refresh();
     };
 
     std::string error;
     std::optional<std::string> licence;
     {
-        QProgressDialog busy(Tr("Contacting AMD's download..."), QString{}, 0, 0, this);
-        busy.setWindowTitle(Tr("AMD FSR 4"));
-        busy.setWindowModality(Qt::WindowModal);
-        busy.setMinimumDuration(0);
+        GraphicsPanel::RuntimeProgress busy(this, Tr("AMD FSR 4"),
+                                            Tr("Contacting AMD's download..."));
         busy.show();
         QApplication::processEvents();
         licence = Fetch(FfxRuntime::LICENSE_ENTRY, error);
@@ -211,38 +170,23 @@ void AmdFsr4Panel::Download() {
         return;
     }
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(Tr("Download AMD FSR 4"));
-    QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    QLabel* intro = new QLabel(
-        Tr("Lichii will download amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll "
-           "from AMD's FidelityFX SDK %1 release on GitHub into %2.<br>These files are AMD's, under "
-           "AMD's licence terms below. Lichii checks AMD's signature before using them.")
-            .arg(QString::fromUtf8(FfxRuntime::SDK_VERSION.data(),
-                                   static_cast<qsizetype>(FfxRuntime::SDK_VERSION.size())),
-                 PathText(folder)),
-        &dialog);
-    intro->setWordWrap(true);
-    QPlainTextEdit* licence_text = new QPlainTextEdit(QString::fromStdString(*licence), &dialog);
-    licence_text->setReadOnly(true);
-    licence_text->setMinimumSize(640, 380);
-    QDialogButtonBox* buttons = new QDialogButtonBox(&dialog);
-    buttons->addButton(Tr("Accept and Download"), QDialogButtonBox::AcceptRole);
-    buttons->addButton(QDialogButtonBox::Cancel);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(intro);
-    layout->addWidget(licence_text, 1);
-    layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (!GraphicsPanel::ConfirmDownload(
+            this, Tr("Download AMD FSR 4"),
+            Tr("Lichii will download amd_fidelityfx_loader_vk.dll and "
+               "amd_fidelityfx_upscaler_vk.dll "
+               "from AMD's FidelityFX SDK %1 release on GitHub into %2.\n\nThese files are AMD's, "
+               "under "
+               "AMD's licence terms below. Lichii checks AMD's signature before using them.")
+                .arg(QString::fromUtf8(FfxRuntime::SDK_VERSION.data(),
+                                       static_cast<qsizetype>(FfxRuntime::SDK_VERSION.size())),
+                     PathText(folder)),
+            QString::fromStdString(*licence), Tr("Cancel"), Tr("Accept and Download"))) {
         return;
     }
 
-    QProgressDialog progress(Tr("Downloading AMD's FSR 4 files..."), Tr("Cancel"), 0, 1000, this);
-    progress.setWindowTitle(Tr("AMD FSR 4"));
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setValue(0);
+    GraphicsPanel::RuntimeProgress progress(this, Tr("AMD FSR 4"),
+                                            Tr("Downloading AMD's FSR 4 files..."), Tr("Cancel"));
+    progress.show();
     QApplication::processEvents();
     std::error_code ec;
     std::filesystem::create_directories(folder, ec);
@@ -250,11 +194,11 @@ void AmdFsr4Panel::Download() {
     u64 done = 0;
     for (const FfxRuntime::File& file : FfxRuntime::FILES) {
         const std::optional<std::string> contents = Fetch(file.entry, error, [&](u64 received) {
-            progress.setValue(static_cast<int>((done + received) * 1000 / total));
+            progress.SetValue(static_cast<int>((done + received) * 1000 / total));
             QApplication::processEvents();
-            return !progress.wasCanceled();
+            return !progress.WasCanceled();
         });
-        if (progress.wasCanceled()) {
+        if (progress.WasCanceled()) {
             return;
         }
         if (!contents) {
@@ -307,10 +251,11 @@ void AmdFsr4Panel::Download() {
         std::ofstream stream(folder / FfxRuntime::LICENSE_FILE, std::ios::binary | std::ios::trunc);
         stream.write(licence->data(), static_cast<std::streamsize>(licence->size()));
     }
-    progress.setValue(1000);
+    progress.SetValue(1000);
     progress.close();
     Refresh();
-    QMessageBox::information(this, Tr("AMD FSR 4"),
-                             Tr("AMD's FSR 4 runtime is ready. It is used the next time a game "
-                                "starts."));
+    GraphicsPanel::ShowResult(this, Tr("AMD FSR 4"),
+                              Tr("AMD's FSR 4 runtime is ready. It is used the next time a game "
+                                 "starts."),
+                              GraphicsPanel::Tone::Ready);
 }

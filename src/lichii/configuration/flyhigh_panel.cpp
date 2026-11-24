@@ -15,18 +15,9 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QMessageBox>
-#include <QPlainTextEdit>
-#include <QProgressDialog>
-#include <QPushButton>
 #include <QSaveFile>
 #include <QScopedValueRollback>
 #include <QUrl>
-#include <QVBoxLayout>
 #include <fmt/format.h>
 
 #include "common/common_types.h"
@@ -34,6 +25,7 @@
 #include "common/logging.h"
 #include "common/net/ca_store.h"
 #include "lichii/configuration/flyhigh_panel.h"
+#include "lichii/configuration/graphics_panel_widgets.h"
 #include "video_core/frame_gen/flyhigh_model.h"
 
 namespace {
@@ -154,43 +146,23 @@ bool Save(const std::filesystem::path& path, std::string_view contents, std::str
 } // Anonymous namespace
 
 FlyHighPanel::FlyHighPanel(QWidget* parent) : QWidget(parent) {
-    QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(24, 0, 0, 8);
-    layout->setSpacing(6);
-
-    QHBoxLayout* status_row = new QHBoxLayout;
-    status_row->setSpacing(8);
-    icon_label = new QLabel(this);
-    icon_label->setTextFormat(Qt::RichText);
-    icon_label->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
-    icon_label->setFixedWidth(16);
-    status_label = new QLabel(this);
-    status_label->setTextFormat(Qt::RichText);
-    status_label->setWordWrap(true);
-    status_row->addWidget(icon_label);
-    status_row->addWidget(status_label, 1);
-
-    QHBoxLayout* button_row = new QHBoxLayout;
-    button_row->setContentsMargins(24, 0, 0, 0);
-    download_button = new QPushButton(this);
-    folder_button = new QPushButton(Tr("Open Folder"), this);
-    QLabel* about = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>")
-                                   .arg(Text(Model::RELEASE_PAGE), Tr("About FlyHigh")),
-                               this);
-    about->setOpenExternalLinks(true);
-    about->setToolTip(Tr("The FlyHigh engine on GitHub. The engine is Apache-2.0. The weights "
-                         "are CC BY-NC 4.0 for noncommercial use and require a separate licence "
-                         "for commercial use."));
-    button_row->addWidget(download_button);
-    button_row->addWidget(folder_button);
-    button_row->addStretch(1);
-    button_row->addWidget(about);
-
-    layout->addLayout(status_row);
-    layout->addLayout(button_row);
-
-    connect(download_button, &QPushButton::clicked, this, [this] { Download(); });
-    connect(folder_button, &QPushButton::clicked, this, [] {
+    using namespace GraphicsPanel;
+    RuntimeCard card(this, Tr("FlyHigh"), Tr("Supported builds · FlyHigh selected"),
+                     QStringLiteral("lightning"));
+    status = card.status;
+    card.ProjectLink(Tr("FlyHigh project"), QUrl(Text(Model::RELEASE_PAGE)))
+        ->setToolTip(Tr("The FlyHigh engine on GitHub. The engine is Apache-2.0. The weights "
+                        "are CC BY-NC 4.0 for noncommercial use and require a separate licence "
+                        "for commercial use."));
+    auto* folder_button = new PillButton(Tr("Open Folder"), QStringLiteral("folder-open"),
+                                         PillButton::Kind::Control, 34);
+    card.actions->addWidget(folder_button);
+    card.actions->addStretch();
+    download_button = new PillButton(Tr("Download Model"), QStringLiteral("download-simple"),
+                                     PillButton::Kind::Accent, 34);
+    card.actions->addWidget(download_button);
+    connect(download_button, &QAbstractButton::clicked, this, [this] { Download(); });
+    connect(folder_button, &QAbstractButton::clicked, this, [] {
         const std::filesystem::path folder = FrameGen::FlyHighModelDir();
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
@@ -204,27 +176,29 @@ void FlyHighPanel::showEvent(QShowEvent* event) {
 }
 
 void FlyHighPanel::Refresh() {
+    using GraphicsPanel::Tone;
     const bool library = FrameGen::FlyHighLibraryPresent();
     const bool model = FrameGen::FlyHighModelInstalled();
-    const bool ready = library && model;
-    icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
-                              : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
+    const QString folder = Tr("Folder: %1").arg(PathText(FrameGen::FlyHighModelDir()));
     if (!library) {
-        status_label->setText(
-            Tr("<b>Library missing:</b> flyhigh.dll (libflyhigh.so on Linux) must be beside "
-               "Lichii. Lichii's release archives include it."));
+        status->SetMessage(Tr("FlyHigh runtime unavailable. Model download is unavailable."),
+                           Tone::Warning,
+                           Tr("FlyHigh's library must be beside Lichii. The release archives "
+                              "include it.\n%1")
+                               .arg(folder));
     } else if (!model) {
-        status_label->setText(Tr("<b>Model needed:</b> FlyHigh's network weights, about %1 MB, "
-                                 "are downloaded once into the user folder.")
-                                  .arg((DownloadSize() + (1 << 19)) >> 20));
+        status->SetMessage(Tr("Runtime available. Download a model before using FlyHigh."),
+                           Tone::Warning,
+                           Tr("The network weights are about %1 MB.\n%2")
+                               .arg((DownloadSize() + (1 << 19)) >> 20)
+                               .arg(folder));
     } else {
-        status_label->setText(Tr("<b>Ready.</b> FlyHigh runs on its own Vulkan device on the "
-                                 "same GPU; the first start at a new resolution times its "
-                                 "kernels for a few seconds."));
+        status->SetMessage(Tr("FlyHigh runtime and model ready."), Tone::Ready,
+                           Tr("FlyHigh runs on a separate Vulkan device on the same GPU. "
+                              "The first start at a new resolution times its kernels.\n%1")
+                               .arg(folder));
     }
-    status_label->setToolTip(Tr("Folder: %1").arg(PathText(FrameGen::FlyHighModelDir())));
-    download_button->setText(Tr("Download Model"));
-    download_button->setVisible(library && !model);
+    download_button->setEnabled(library && !model);
 }
 
 void FlyHighPanel::Download() {
@@ -248,65 +222,45 @@ bool DownloadFlyHighModel(QWidget* parent) {
     const std::filesystem::path folder = FrameGen::FlyHighModelDir();
     const auto fail = [parent](const std::string& error) {
         LOG_ERROR(Frontend, "FlyHigh model download failed: {}", error);
-        QMessageBox::warning(parent, Tr("FlyHigh"),
-                             Tr("Could not download the FlyHigh model: %1. Optical Flow "
-                                "Interpolation runs until it is there.")
-                                 .arg(QString::fromStdString(error)));
+        GraphicsPanel::ShowResult(parent, Tr("FlyHigh"),
+                                  Tr("Could not download the FlyHigh model: %1. Optical Flow "
+                                     "Interpolation runs until it is there.")
+                                      .arg(QString::fromStdString(error)),
+                                  GraphicsPanel::Tone::Error);
         return false;
     };
 
-    QDialog dialog(parent);
-    dialog.setWindowTitle(Tr("Download the FlyHigh Model"));
-    QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    QLabel* intro = new QLabel(
-        Tr("If you accept, Lichii will download the FlyHigh model (graph.json, flyhighfg.json "
-           "and flyhighfg.bin) from GitHub into %1.\n\n"
-           "The weights are available for noncommercial use with attribution under CC BY-NC "
-           "4.0. Commercial use needs a separate licence from the FlyHigh maintainers. "
-           "The Apache-2.0 engine licence does not cover the weights.")
-            .arg(PathText(folder)),
-        &dialog);
-    intro->setTextFormat(Qt::PlainText);
-    intro->setWordWrap(true);
-    QPlainTextEdit* licence_text = new QPlainTextEdit(Text(WEIGHTS_LICENSE), &dialog);
-    licence_text->setReadOnly(true);
-    licence_text->setMinimumSize(640, 380);
-    QDialogButtonBox* buttons = new QDialogButtonBox(&dialog);
-    QPushButton* accept_button =
-        buttons->addButton(Tr("Accept and Download"), QDialogButtonBox::AcceptRole);
-    accept_button->setAutoDefault(false);
-    buttons->addButton(QDialogButtonBox::Cancel)->setDefault(true);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(intro);
-    layout->addWidget(licence_text, 1);
-    layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (!GraphicsPanel::ConfirmDownload(
+            parent, Tr("Download the FlyHigh Model"),
+            Tr("If you accept, Lichii will download the FlyHigh model (graph.json, flyhighfg.json "
+               "and flyhighfg.bin) from GitHub into %1.\n\n"
+               "The weights are available for noncommercial use with attribution under CC BY-NC "
+               "4.0. Commercial use needs a separate licence from the FlyHigh maintainers. "
+               "The Apache-2.0 engine licence does not cover the weights.")
+                .arg(PathText(folder)),
+            Text(WEIGHTS_LICENSE), Tr("Cancel"), Tr("Accept and Download"))) {
         return false;
     }
 
-    QProgressDialog progress(Tr("Downloading the FlyHigh model..."), Tr("Cancel"), 0, 1000,
-                             parent);
-    progress.setWindowTitle(Tr("FlyHigh"));
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setValue(0);
+    GraphicsPanel::RuntimeProgress progress(parent, Tr("FlyHigh"),
+                                            Tr("Downloading the FlyHigh model..."), Tr("Cancel"));
+    progress.show();
     QApplication::processEvents();
     std::string error;
     const u64 total = DownloadSize();
     u64 done = 0;
     std::array<std::string, Model::FILES.size()> downloads;
     for (size_t i = 0; i < downloads.size(); ++i) {
-        if (progress.wasCanceled()) {
+        if (progress.WasCanceled()) {
             return false;
         }
         const Model::File& file = Model::FILES[i];
         auto contents = Fetch(file, error, [&](u64 received) {
-            progress.setValue(static_cast<int>((done + received) * 999 / total));
+            progress.SetValue(static_cast<int>((done + received) * 999 / total));
             QApplication::processEvents();
-            return !progress.wasCanceled();
+            return !progress.WasCanceled();
         });
-        if (progress.wasCanceled()) {
+        if (progress.WasCanceled()) {
             return false;
         }
         if (!contents) {
@@ -335,7 +289,7 @@ bool DownloadFlyHighModel(QWidget* parent) {
         }
     }
     LOG_INFO(Frontend, "Downloaded the FlyHigh model into {}", Common::FS::PathToUTF8String(folder));
-    progress.setValue(1000);
+    progress.SetValue(1000);
     progress.close();
     return true;
 }

@@ -6,12 +6,13 @@
 #pragma once
 
 #include "lichii/multiplayer/chat_room.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class ClientRoom;
 }
 
-class ClientRoomWindow : public QDialog {
+class ClientRoomWindow : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

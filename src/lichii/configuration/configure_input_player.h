@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <QPushButton>
 #include <QWidget>
 
 #include "common/param_package.h"
@@ -19,7 +20,6 @@
 class QCheckBox;
 class QKeyEvent;
 class QLabel;
-class QPushButton;
 class QSlider;
 class QSpinBox;
 class QString;
@@ -45,6 +45,24 @@ class HIDCore;
 class EmulatedController;
 enum class NpadStyleIndex : u8;
 } // namespace Core::HID
+
+/// A binding of the Map buttons page (Paper: controls-map-buttons): a 32 px field with the mapped
+/// input, muted while unset and accented while it waits for input.
+class InputBindingButton : public QPushButton {
+public:
+    explicit InputBindingButton(QWidget* parent = nullptr);
+
+    void SetWaiting(bool waiting);
+
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    bool waiting = false;
+};
 
 class ConfigureInputPlayer : public QWidget {
     Q_OBJECT
@@ -77,6 +95,9 @@ public:
     /// Clear all input configuration.
     void ClearAll();
 
+    QString ControllerName() const;
+    QString DeviceName() const;
+
 signals:
     /// Emitted when this controller is (dis)connected by the user.
     void Connected(bool connected);
@@ -93,6 +114,7 @@ signals:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     QString ButtonToText(const Common::ParamPackage& param);
@@ -130,6 +152,9 @@ private:
 
     /// Update UI to reflect current configuration.
     void UpdateUI();
+
+    /// Puts the right column beside the controller, or under the left one when the page is narrow.
+    void ArrangeColumns();
 
     /// Sets the available controllers.
     void SetConnectableControllers();
@@ -192,6 +217,12 @@ private:
 
     /// This will be the the setting function when an input is awaiting configuration.
     std::optional<std::function<void(const Common::ParamPackage&)>> input_setter;
+
+    /// The binding that waits for input while input_setter is set.
+    InputBindingButton* waiting_button{};
+
+    /// Whether ArrangeColumns stacked the side columns, once it has run.
+    std::optional<bool> narrow_columns;
 
     Core::HID::EmulatedController* emulated_controller;
 

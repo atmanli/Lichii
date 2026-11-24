@@ -5,17 +5,21 @@
 
 #include <atomic>
 #include <memory>
-#include <QDialog>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QString>
 
 #include "core/debugger/nx2_bug_bundle.h"
+#include "lichii/spotlight/dialog.h"
 
 class QDialogButtonBox;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+
+namespace Spotlight {
+class Notice;
+}
 
 namespace Core {
 class System;
@@ -23,7 +27,7 @@ class System;
 
 /// Help → Report a bug and its hotkey: captures the moment the player asked, then asks for a
 /// description and writes the bug-report bundle (docs/nx2/bug-bundle.md).
-class BugReportDialog : public QDialog {
+class BugReportDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -41,7 +45,9 @@ private:
 
     void Save();
     void ShowResult(const Written& written);
+    void FitHeight();
     void reject() override;
+    void showEvent(QShowEvent* event) override;
 
     std::shared_ptr<std::atomic<bool>> stop;
     std::shared_ptr<Core::Nx2Debug::BugBundle> bundle;
@@ -50,7 +56,9 @@ private:
     QFutureWatcher<Written> writer;
     bool writing = false;
 
-    QLabel* status{};
+    Spotlight::Notice* status{};
+    QLabel* frame_note{};
+    QLabel* dropped_note{};
     QPlainTextEdit* description{};
     QDialogButtonBox* buttons{};
     QPushButton* save{};

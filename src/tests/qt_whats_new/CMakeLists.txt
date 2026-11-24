@@ -16,6 +16,11 @@ add_executable(whats_new_tests
     whats_new.cpp
     ../../lichii/whats_new_dialog.cpp
     ../../lichii/whats_new_dialog.h
+    ../../lichii/spotlight/dialog.cpp
+    ../../lichii/spotlight/notice.cpp
+    ../../lichii/spotlight/theme.cpp
+    ../../lichii/spotlight/widgets.cpp
+    ../../../dist/qt_themes/lichii/spotlight.qrc
     ../../lichii/lichii.qrc
     ../../../dist/qt_themes/default/default.qrc
     ../../../dist/qt_themes/lichii/style.qrc

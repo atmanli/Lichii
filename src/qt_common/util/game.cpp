@@ -209,8 +209,8 @@ void RemoveBaseContent(u64 program_id, InstalledEntryType type) {
     const auto res =
         ContentManager::RemoveBaseContent(system->GetFileSystemController(), program_id);
     if (res) {
-        QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                        tr("Successfully removed the installed base game."));
+        QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                    tr("Successfully removed the installed base game."));
     } else {
         QtCommon::Frontend::Warning(
 
@@ -222,8 +222,8 @@ void RemoveBaseContent(u64 program_id, InstalledEntryType type) {
 void RemoveUpdateContent(u64 program_id, InstalledEntryType type) {
     const auto res = ContentManager::RemoveUpdate(system->GetFileSystemController(), program_id);
     if (res) {
-        QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                        tr("Successfully removed the installed update."));
+        QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                    tr("Successfully removed the installed update."));
     } else {
         QtCommon::Frontend::Warning(GetGameListErrorRemoving(type),
                                     tr("There is no update installed for this title."));
@@ -238,8 +238,8 @@ void RemoveAddOnContent(u64 program_id, InstalledEntryType type) {
         return;
     }
 
-    QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                    tr("Successfully removed %1 installed DLC.").arg(count));
+    QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                tr("Successfully removed %1 installed DLC.").arg(count));
 }
 
 // Global Content //
@@ -288,8 +288,8 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
         return;
     }
     if (result == PipelineCacheClear::Cleared) {
-        QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                        tr("Successfully removed the transferable shader cache."));
+        QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                    tr("Successfully removed the transferable shader cache."));
     } else {
         QtCommon::Frontend::Warning(tr("Error Removing Transferable Shader Cache"),
                                     tr("Failed to remove the transferable shader cache."));
@@ -332,8 +332,8 @@ void RemoveAllTransferableShaderCaches(u64 program_id) {
     LOG_INFO(Frontend, "Removing every shader cache of {:016x}: {}", program_id,
              Common::FS::PathToUTF8String(program_shader_cache_dir));
     if (Common::FS::RemoveDirRecursively(program_shader_cache_dir)) {
-        QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                        tr("Successfully removed the transferable shader caches."));
+        QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                    tr("Successfully removed the transferable shader caches."));
     } else {
         QtCommon::Frontend::Warning(
 
@@ -357,8 +357,8 @@ void RemoveCustomConfiguration(u64 program_id, const std::string& game_path) {
     }
 
     if (Common::FS::RemoveFile(custom_config_file_path)) {
-        QtCommon::Frontend::Information(tr("Successfully Removed"),
-                                        tr("Successfully removed the custom game configuration."));
+        QtCommon::Frontend::Success(tr("Successfully Removed"),
+                                    tr("Successfully removed the custom game configuration."));
     } else {
         QtCommon::Frontend::Warning(tr("Error Removing Custom Configuration"),
                                     tr("Failed to remove the custom game configuration."));
@@ -416,12 +416,12 @@ inline constexpr bool CreateShortcutMessagesGUI(ShortcutMessages imsg, const QSt
     switch (imsg) {
     case ShortcutMessages::Fullscreen:
         buttons = Yes | No;
-        result = QtCommon::Frontend::Information(
+        result = QtCommon::Frontend::Question(
             tr("Create Shortcut"), tr("Do you want to launch the game in fullscreen?"), buttons);
         return result == Yes;
     case ShortcutMessages::Success:
-        QtCommon::Frontend::Information(
-            tr("Shortcut Created"), tr("Successfully created a shortcut to %1").arg(game_title));
+        QtCommon::Frontend::Success(tr("Shortcut Created"),
+                                    tr("Successfully created a shortcut to %1").arg(game_title));
         return false;
     case ShortcutMessages::Volatile:
         buttons = Ok | Cancel;

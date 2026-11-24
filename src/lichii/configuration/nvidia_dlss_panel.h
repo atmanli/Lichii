@@ -10,8 +10,12 @@
 
 #include <QWidget>
 
-class QLabel;
-class QPushButton;
+namespace GraphicsPanel {
+class Notice;
+}
+namespace Spotlight {
+class PillButton;
+}
 
 class NvidiaDlssPanel : public QWidget {
 public:
@@ -29,10 +33,8 @@ protected:
 private:
     void Download();
 
-    QLabel* icon_label;
-    QLabel* status_label;
-    QPushButton* download_button;
-    QPushButton* folder_button;
+    GraphicsPanel::Notice* status;
+    Spotlight::PillButton* download_button;
     bool frame_gen_wanted{};
 };
 

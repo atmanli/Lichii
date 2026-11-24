@@ -6,25 +6,36 @@
 #include <QEventLoop>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QFontDatabase>
+#include <QLabel>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QAbstractTextDocumentLayout>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QVBoxLayout>
+#include <QtMath>
 #include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
 #include "frontend_common/update_installer.h"
 #include "qt_common/abstract/frontend.h"
-#include "qt_common/abstract/progress.h"
 #ifdef _WIN32
 #include "qt_common/util/compress.h"
 #endif
 #include "ui_update_dialog.h"
 #include "update_dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 #include "common/httplib.h"
 
@@ -34,25 +45,129 @@
 
 #undef GetSaveFileName
 
-UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
-    : QDialog(parent), ui(new Ui::UpdateDialog) {
-    ui->setupUi(this);
+namespace {
 
-    ui->version->setText(
-        tr("%1 is available for download.").arg(QString::fromStdString(release.title)));
+// Paper's transfer card: the step as the title, the bar with its percentage under it, and Cancel.
+class TransferProgress final : public Spotlight::Dialog {
+public:
+    TransferProgress(const QString& title, QWidget* parent) : Spotlight::Dialog(parent) {
+        setWindowTitle(title);
+        setWindowModality(Qt::WindowModal);
+        SetIcon(u"download-simple", Spotlight::Color::Accent());
+        SetCloseVisible(false);
+        SetCardWidth(430);
+
+        bar = new QProgressBar(this);
+        bar->setRange(0, 100);
+        bar->setTextVisible(false);
+        bar->setStyleSheet(QStringLiteral(
+            "QProgressBar { background-color: rgba(255, 255, 255, 46); border-radius: 4px; "
+            "min-height: 8px; max-height: 8px; } "
+            "QProgressBar::chunk { border-radius: 4px; }"));
+        percent = new QLabel(this);
+        QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        mono.setPixelSize(13);
+        percent->setFont(mono);
+        percent->setAlignment(Qt::AlignRight);
+        Spotlight::SetTextColor(percent, Spotlight::Color::TextSecondary());
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Cancel)->setAutoDefault(false);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setSpacing(0);
+        layout->addWidget(bar);
+        layout->addSpacing(14);
+        layout->addWidget(percent);
+        layout->addSpacing(26);
+        layout->addWidget(buttons);
+        SetValue(0);
+    }
+
+    void SetValue(int value) {
+        bar->setValue(value);
+        percent->setText(QStringLiteral("%1%").arg(value));
+    }
+
+    bool WasCanceled() const {
+        return canceled;
+    }
+
+    void reject() override {
+        canceled = true;
+        QDialog::reject();
+    }
+
+private:
+    QProgressBar* bar;
+    QLabel* percent;
+    bool canceled = false;
+};
+
+QString FileName(const QString& path) {
+    return QFileInfo(path).fileName();
+}
+
+} // namespace
+
+UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
+    : Spotlight::Dialog(parent), ui(new Ui::UpdateDialog) {
+    ui->setupUi(this);
+    SetIcon(u"cloud-arrow-down", Spotlight::Color::Accent());
+    setFixedWidth(702);
+    resize(width(), 0);
+
+    QString subtitle =
+        tr("%1 is available for download.").arg(QString::fromStdString(release.title));
     ui->url->setText(
-        tr("<a href=\"%1\">View on GitHub</a>").arg(QString::fromStdString(release.html_url)));
+        tr("<a href=\"%1\" style=\"color: #8fb5ff; text-decoration: none\">View on GitHub</a>")
+            .arg(QString::fromStdString(release.html_url)));
+    ui->url->setFont(Spotlight::Font(13, 600));
+    ui->urlIcon->setPixmap(
+        Spotlight::IconPixmap(u"github-logo", 14, Spotlight::Color::Info(), devicePixelRatioF()));
+
+    for (auto* card : {ui->notesCard, ui->groupBox}) {
+        card->setStyleSheet(QStringLiteral("#%1 { background-color: rgba(255, 255, 255, 13); "
+                                           "border: 1px solid rgba(255, 255, 255, 20); "
+                                           "border-radius: 16px; }")
+                                .arg(card->objectName()));
+    }
+    ui->notesTitle->setFont(Spotlight::Font(12, 600));
+    Spotlight::SetTextColor(ui->notesTitle, Spotlight::Color::TextSecondary());
+    ui->versionsTitle->setFont(Spotlight::Font(13, 600));
+    ui->question->setFont(Spotlight::Font(14, 600));
+    ui->question->setWordWrap(true);
 
     std::string text{release.body};
     if (auto pos = text.find("# Packages"); pos != std::string::npos) {
         text = text.substr(0, pos);
     }
 
+    ui->body->setStyleSheet(QStringLiteral(
+        "QTextBrowser { background: transparent; border: 0; padding: 0; "
+        "color: rgba(255, 255, 255, 158); }"));
+    ui->body->viewport()->setAutoFillBackground(false);
+    ui->body->document()->setDocumentMargin(0);
+    ui->body->document()->setDefaultFont(Spotlight::Font(13, 400));
     ui->body->setMarkdown(QString::fromStdString(text));
+    QTextCharFormat heading;
+    heading.setFont(Spotlight::DisplayFont(23));
+    heading.setForeground(Spotlight::Color::Text());
+    for (auto block = ui->body->document()->begin(); block.isValid(); block = block.next()) {
+        if (block.blockFormat().headingLevel() > 0) {
+            QTextCursor cursor(block);
+            cursor.select(QTextCursor::BlockUnderCursor);
+            cursor.mergeCharFormat(heading);
+        }
+    }
+    connect(ui->body->document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged, ui->body, [this](QSizeF size) {
+                ui->body->setFixedHeight(qMin(qCeil(size.height()), 280));
+            });
 
     ui->buttonBox->button(QDialogButtonBox::No)->setText(tr("Remind Me Later"));
-    auto* skip = ui->buttonBox->addButton(tr("Skip This Version"), QDialogButtonBox::ActionRole);
-    connect(skip, &QPushButton::clicked, this, [this] { done(SkipVersion); });
+    ui->buttonBox->button(QDialogButtonBox::Yes)->setDefault(true);
+    connect(ui->skip, &QPushButton::clicked, this, [this] { done(SkipVersion); });
 
     // TODO(crueter): Find a way to set default
     const auto assets = release.GetPlatformAssets();
@@ -68,16 +183,17 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
 
         if (m_asset.name == "Standard" &&
             std::string_view{Common::g_build_release_platform}.ends_with("-pgo")) {
-            ui->version->setText(
-                ui->version->text() +
-                tr(" This release has no PGO build, so the standard build will be downloaded."));
+            subtitle +=
+                tr(" This release has no PGO build, so the standard build will be downloaded.");
         }
 
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     } else {
+        ui->radioButtons->setAlignment(Qt::AlignLeft);
         u32 i = 0;
         for (const Common::Net::Asset& a : assets) {
             QRadioButton* r = new QRadioButton(tr(a.name.c_str()), this);
+            r->setFont(Spotlight::Font(14, 600));
             connect(r, &QRadioButton::toggled, this, [a, this](bool checked) {
                 if (checked)
                     m_asset = a;
@@ -92,6 +208,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
 
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     }
+    SetSubtitle(subtitle);
 }
 
 UpdateDialog::~UpdateDialog() {
@@ -133,7 +250,7 @@ void UpdateDialog::Restart(QWidget* window, const QString& target) {
     if (!process.startDetached()) {
         LOG_ERROR(Frontend, "Could not start the restart helper for {}", target.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to restart"),
-                                     tr("Please start %1 again yourself.").arg(target));
+                                     tr("Please start %1 again yourself.").arg(FileName(target)));
         return;
     }
     if (window) {
@@ -212,7 +329,7 @@ void UpdateDialog::Download() {
 
     // Download is complete. User may choose to open in the file manager.
     auto button =
-        QtCommon::Frontend::Question(tr("Download Complete"),
+        QtCommon::Frontend::Success(tr("Download Complete"),
                                      tr("Successfully downloaded %1. Would you like to open it?")
                                          .arg(QString::fromStdString(m_asset.filename)),
                                      QtCommon::Frontend::Yes | QtCommon::Frontend::No);
@@ -243,15 +360,15 @@ void UpdateDialog::InstallInPlace(const std::filesystem::path& target) {
         QtCommon::Frontend::Critical(
             tr("Failed to install the update"),
             tr("Could not replace %1. Your installation was not changed.")
-                .arg(QString::fromStdString(target.string())));
+                .arg(QString::fromStdString(target.filename().string())));
         return;
     }
 
     LOG_INFO(Frontend, "Installed {} over {}", m_asset.filename, target.string());
-    const auto button = QtCommon::Frontend::Question(
+    const auto button = QtCommon::Frontend::Success(
         tr("Update Installed"),
-        tr("The new version is installed. The previous version is kept as %1.\n\nRestart now?")
-            .arg(QString::fromStdString(UpdateInstaller::PreviousPath(target).string())),
+        tr("The new version is installed. The previous version was kept as %1. Restart now?")
+            .arg(QString::fromStdString(UpdateInstaller::PreviousPath(target).filename().string())),
         QtCommon::Frontend::Yes | QtCommon::Frontend::No);
     if (button == QtCommon::Frontend::Yes) {
         Restart(parentWidget(), QString::fromStdString(target.string()));
@@ -285,28 +402,28 @@ void UpdateDialog::InstallOnRestart(const std::filesystem::path& exe) {
         return;
     }
 
-    auto progress = QtCommon::Frontend::newProgressDialog(tr("Unpacking..."), tr("Cancel"), 0, 100);
-    progress->show();
+    TransferProgress progress(tr("Unpacking..."), parentWidget());
+    progress.show();
     const auto unpacked = QtCommon::Compress::extractDir(
         QString::fromStdWString(archive.wstring()), QString::fromStdWString(staging.wstring()),
         [&](std::size_t total, std::size_t done) {
             QGuiApplication::processEvents();
             if (total != 0) {
-                progress->setValue(static_cast<int>((done * 100) / total));
+                progress.SetValue(static_cast<int>((done * 100) / total));
             }
-            return !progress->wasCanceled();
+            return !progress.WasCanceled();
         });
-    progress->close();
+    progress.close();
     if (unpacked.isEmpty() || !std::filesystem::exists(staging / exe.filename(), ec)) {
         fail(tr("The downloaded update could not be unpacked."));
         return;
     }
     std::filesystem::remove(archive, ec);
 
-    const auto button = QtCommon::Frontend::Question(
+    const auto button = QtCommon::Frontend::Success(
         tr("Update Ready"),
-        tr("Lichii will close, install the update and start again. The previous version is "
-           "kept, and your settings and data are not changed.\n\nRestart now?"),
+        tr("Lichii will close, install the update and start again. The previous version, "
+           "settings and data are kept. Restart now?"),
         QtCommon::Frontend::Yes | QtCommon::Frontend::No);
     if (button != QtCommon::Frontend::Yes ||
         !LaunchInstaller(parentWidget(), QString::fromStdWString(staging.wstring()))) {
@@ -321,7 +438,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     if (!file.open(QIODevice::Truncate | QIODevice::WriteOnly)) {
         LOG_WARNING(Frontend, "Could not open file {}", filename.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to save file"),
-                                     tr("Could not open file %1 for writing.").arg(filename));
+                                     tr("Could not open %1 for writing.").arg(FileName(filename)));
         return false;
     }
 
@@ -341,9 +458,8 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         return false;
     }
 
-    auto progress =
-        QtCommon::Frontend::newProgressDialog(tr("Downloading..."), tr("Cancel"), 0, 100);
-    progress->show();
+    TransferProgress progress(tr("Downloading..."), parentWidget());
+    progress.show();
 
     QGuiApplication::processEvents();
 
@@ -351,9 +467,9 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     auto progress_callback = [&](size_t processed_size, size_t total_size) {
         QGuiApplication::processEvents();
         if (total_size != 0) {
-            progress->setValue(static_cast<int>((processed_size * 100) / total_size));
+            progress.SetValue(static_cast<int>((processed_size * 100) / total_size));
         }
-        return !progress->wasCanceled();
+        return !progress.WasCanceled();
     };
 
     QCryptographicHash hash(QCryptographicHash::Sha256);
@@ -368,7 +484,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
             LOG_WARNING(Frontend, "Could not write {} bytes to file {}", data_length,
                         filename.toStdString());
             QtCommon::Frontend::Critical(tr("Failed to save file"),
-                                         tr("Could not write to file %1.").arg(filename));
+                                         tr("Could not write to %1.").arg(FileName(filename)));
             return false;
         }
 
@@ -386,12 +502,12 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
             file.resize(0);
             hash.reset();
             received = 0;
-            progress->setValue(0);
-            progress->setLabelText(tr("Downloading... (try %1 of %2)").arg(attempt).arg(attempts));
+            progress.SetValue(0);
+            progress.setWindowTitle(tr("Downloading... (try %1 of %2)").arg(attempt).arg(attempts));
             QEventLoop wait;
             QTimer::singleShot(2000 * (attempt - 1), &wait, &QEventLoop::quit);
             wait.exec();
-            if (progress->wasCanceled()) {
+            if (progress.WasCanceled()) {
                 break;
             }
         }
@@ -405,10 +521,17 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         LOG_WARNING(Frontend, "GET to {}{} failed ({}), trying again", m_asset.url, m_asset.path,
                     result ? std::to_string(result->status) : httplib::to_string(result.error()));
     }
-    progress->close();
+    progress.close();
 
     if (!result) {
         LOG_ERROR(Frontend, "GET to {}{} returned null", m_asset.url, m_asset.path);
+        if (result.error() != httplib::Error::Canceled) {
+            QString error = QString::fromStdString(httplib::to_string(result.error()));
+            error[0] = error[0].toLower();
+            QtCommon::Frontend::Critical(tr("Failed to download file"),
+                                         tr("Could not download %1.\nError code: %2.")
+                                             .arg(QString::fromStdString(m_asset.filename), error));
+        }
         return false;
     }
 
@@ -417,9 +540,8 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         LOG_ERROR(Frontend, "GET to {}{} returned error status code: {}", m_asset.url, m_asset.path,
                   response.status);
         QtCommon::Frontend::Critical(tr("Failed to download file"),
-                                     tr("Could not download from %1%2\nError code: %3")
-                                         .arg(QString::fromStdString(m_asset.url),
-                                              QString::fromStdString(m_asset.path),
+                                     tr("Could not download %1.\nError code: %2.")
+                                         .arg(QString::fromStdString(m_asset.filename),
                                               QString::number(response.status)));
         return false;
     }
@@ -438,15 +560,15 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         file.cancelWriting();
         QtCommon::Frontend::Critical(
             tr("Download failed verification"),
-            tr("The downloaded file does not match the checksum GitHub published for it, so it "
-               "was discarded. Try again later."));
+            tr("The file does not match the checksum GitHub published for it, so it was not "
+               "saved."));
         return false;
     }
 
     if (!file.commit()) {
         LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to save file"),
-                                     tr("Could not commit to file %1.").arg(filename));
+                                     tr("Could not commit to %1.").arg(FileName(filename)));
         return false;
     }
 

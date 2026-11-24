@@ -756,6 +756,10 @@ bool Widget::Valid() const {
     return created;
 }
 
+u32 Widget::SettingId() const {
+    return setting.Id();
+}
+
 void Widget::SetCustom(bool custom) {
     setProperty("custom", custom);
     if (combobox != nullptr) {

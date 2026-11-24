@@ -322,4 +322,35 @@ struct ProfilePull {
 // the profile signed in again or out meanwhile. Blocks on the request.
 std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& profile, bool force);
 
+// Public: the player count of every game with Nextendo servers, as on the Status page.
+constexpr std::string_view OnlineCountsPath = "/api/online-counts";
+// With the friends scope: the players and lobbies of each game.
+constexpr std::string_view LiveStatusPath = "/api/status/live";
+
+struct OnlineGame {
+    std::string name;
+    // The titles that share the game's servers and count, such as Pokémon Scarlet and Violet.
+    std::vector<u64> titles;
+    u32 players{};
+};
+
+// /api/online-counts. nullopt when it isn't the expected JSON.
+std::optional<std::vector<OnlineGame>> ParseOnlineCounts(std::string_view body);
+// nullopt when nextendo.network can't be reached or is over the request budget. Blocks.
+std::optional<std::vector<OnlineGame>> FetchOnlineCounts(std::string_view client_id);
+
+struct LiveGame {
+    std::vector<u64> titles;
+    u32 lobbies{};
+    // The account's friends playing it.
+    std::vector<std::string> friends;
+};
+
+// /api/status/live's games. nullopt when it isn't the expected JSON.
+std::optional<std::vector<LiveGame>> ParseLiveStatus(std::string_view body);
+// nullopt unless the profile is signed in with the friends scope and nextendo.network answers.
+// Never drops the scope on a refusal: the counts alone still work. Blocks.
+std::optional<std::vector<LiveGame>> FetchLiveStatus(std::string_view client_id,
+                                                     const Common::UUID& profile);
+
 } // namespace Common::Nextendo

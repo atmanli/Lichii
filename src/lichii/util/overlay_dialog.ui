@@ -14,7 +14,18 @@
    <string>Dialog</string>
   </property>
   <property name="styleSheet">
-   <string notr="true"/>
+   <string notr="true">QDialog#OverlayDialog, QStackedWidget#stackedDialog { background: rgba(0, 0, 0, 140); }
+QWidget#contentDialog, QWidget#contentRichDialog { background-color: #15161e; border: 1px solid rgba(255, 255, 255, 20); border-radius: 22px; margin: 0; }
+QWidget#buttonsDialog, QWidget#buttonsRichDialog { background: transparent; border: 0; margin: 0; }
+QWidget#contentDialog QLabel#label_title, QWidget#contentRichDialog QLabel#label_title_rich { color: #ffffff; background: transparent; padding: 0; }
+QWidget#contentDialog QLabel#label_dialog { color: rgba(255, 255, 255, 214); background: transparent; padding: 0; }
+QWidget#richDialog QTextBrowser { color: rgba(255, 255, 255, 214); background: transparent; border: 0; padding: 0; }
+QDialog#OverlayDialog QPushButton { color: #ffffff; background-color: rgba(255, 255, 255, 20); border: 2px solid transparent; border-radius: 20px; min-height: 36px; min-width: 0; padding: 0 18px; }
+QDialog#OverlayDialog QPushButton:hover { background-color: rgba(255, 255, 255, 36); border-color: transparent; }
+QDialog#OverlayDialog QPushButton:focus { color: #ffffff; background-color: rgba(255, 255, 255, 20); border: 2px solid #ffffff; border-radius: 20px; }
+QDialog#OverlayDialog QPushButton:pressed { color: #ffffff; background-color: rgba(255, 255, 255, 36); border: 2px solid #ffffff; border-radius: 20px; }
+QDialog#OverlayDialog QPushButton#button_ok_label, QDialog#OverlayDialog QPushButton#button_ok_rich { color: #2a0a14; background-color: #ff6b95; }
+QDialog#OverlayDialog QPushButton#button_ok_label:hover, QDialog#OverlayDialog QPushButton#button_ok_rich:hover { background-color: #ff8fae; }</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <property name="spacing">
@@ -38,7 +49,7 @@
       <number>0</number>
      </property>
      <widget class="QWidget" name="lineDialog">
-      <layout class="QGridLayout" name="lineDialogGridLayout" rowstretch="210,300,210" columnstretch="250,780,250">
+      <layout class="QGridLayout" name="lineDialogGridLayout" rowstretch="1,0,1" columnstretch="1,0,1">
        <property name="leftMargin">
         <number>0</number>
        </property>
@@ -56,7 +67,7 @@
        </property>
        <item row="1" column="1">
         <widget class="QWidget" name="contentDialog" native="true">
-         <layout class="QVBoxLayout" name="verticalLayout_2" stretch="70,149,82">
+         <layout class="QVBoxLayout" name="verticalLayout_2" stretch="0,0,0">
           <property name="spacing">
            <number>0</number>
           </property>

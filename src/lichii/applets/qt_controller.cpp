@@ -26,6 +26,7 @@
 #include "lichii/configuration/input_profiles.h"
 #include "lichii/main_window.h"
 #include "lichii/util/controller_navigation.h"
+#include "lichii/spotlight/theme.h"
 
 namespace {
 
@@ -66,10 +67,13 @@ bool IsControllerCompatible(Core::HID::NpadStyleIndex controller_type,
 QtControllerSelectorDialog::QtControllerSelectorDialog(
     QWidget* parent, Core::Frontend::ControllerParameters parameters_,
     InputCommon::InputSubsystem* input_subsystem_, Core::System& system_)
-    : QDialog(parent), ui(std::make_unique<Ui::QtControllerSelectorDialog>()),
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::QtControllerSelectorDialog>()),
       parameters(std::move(parameters_)), input_subsystem{input_subsystem_},
       input_profiles(std::make_unique<InputProfiles>()), system{system_} {
     ui->setupUi(this);
+    SetIcon(u"game-controller", Spotlight::Color::Purple());
+    SetCardWidth(900);
+    ui->inputConfigButton->setIcon(Spotlight::Icon(u"plus", Spotlight::Color::Text(), 16));
 
     player_widgets = {
         ui->widgetPlayer1, ui->widgetPlayer2, ui->widgetPlayer3, ui->widgetPlayer4,
@@ -116,11 +120,6 @@ QtControllerSelectorDialog::QtControllerSelectorDialog(
         ui->comboPlayer1Emulated, ui->comboPlayer2Emulated, ui->comboPlayer3Emulated,
         ui->comboPlayer4Emulated, ui->comboPlayer5Emulated, ui->comboPlayer6Emulated,
         ui->comboPlayer7Emulated, ui->comboPlayer8Emulated,
-    };
-
-    player_labels = {
-        ui->labelPlayer1, ui->labelPlayer2, ui->labelPlayer3, ui->labelPlayer4,
-        ui->labelPlayer5, ui->labelPlayer6, ui->labelPlayer7, ui->labelPlayer8,
     };
 
     connected_controller_labels = {
@@ -237,8 +236,6 @@ QtControllerSelectorDialog::QtControllerSelectorDialog(
             player->setChecked(false);
         }
     }
-
-    resize(0, 0);
 }
 
 QtControllerSelectorDialog::~QtControllerSelectorDialog() {
@@ -250,6 +247,7 @@ int QtControllerSelectorDialog::exec() {
     if (parameters_met && parameters.enable_single_mode) {
         return QDialog::Accepted;
     }
+    setWindowFlag(Qt::FramelessWindowHint);
     return QDialog::exec();
 }
 
@@ -351,6 +349,14 @@ bool QtControllerSelectorDialog::CheckIfParametersMet() {
     const auto min_supported_players = parameters.enable_single_mode ? 1 : parameters.min_players;
     const auto max_supported_players = parameters.enable_single_mode ? 1 : parameters.max_players;
 
+    const bool enough_players = num_connected_players >= min_supported_players &&
+                                num_connected_players <= max_supported_players;
+    ui->labelConnected->setText(
+        QStringLiteral("<span style=\"color: %1\">\u25cf</span> %2")
+            .arg(
+                (enough_players ? Spotlight::Color::Success() : Spotlight::Color::Warning()).name(),
+                tr("%n Connected", nullptr, num_connected_players)));
+
     // First, check against the number of connected players.
     if (num_connected_players < min_supported_players ||
         num_connected_players > max_supported_players) {
@@ -387,58 +393,14 @@ bool QtControllerSelectorDialog::CheckIfParametersMet() {
 }
 
 void QtControllerSelectorDialog::SetSupportedControllers() {
-    const QString theme = [] {
-        if (QIcon::themeName().contains(QStringLiteral("dark"))) {
-            return QStringLiteral("_dark");
-        } else if (QIcon::themeName().contains(QStringLiteral("midnight"))) {
-            return QStringLiteral("_midnight");
-        } else {
-            return QString{};
-        }
-    }();
+    ui->controllerSupported1->setVisible(parameters.enable_single_mode &&
+                                         parameters.allow_handheld);
+    ui->controllerSupported2->setVisible(parameters.allow_dual_joycons);
+    ui->controllerSupported3->setVisible(parameters.allow_left_joycon);
+    ui->controllerSupported4->setVisible(parameters.allow_right_joycon);
+    ui->controllerSupported5->setVisible(parameters.allow_pro_controller);
+    ui->controllerSupported6->setVisible(parameters.allow_gamecube_controller);
 
-    if (parameters.enable_single_mode && parameters.allow_handheld) {
-        ui->controllerSupported1->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_handheld%0); ").arg(theme));
-    } else {
-        ui->controllerSupported1->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_handheld%0_disabled); ").arg(theme));
-    }
-
-    if (parameters.allow_dual_joycons) {
-        ui->controllerSupported2->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_dual_joycon%0); ").arg(theme));
-    } else {
-        ui->controllerSupported2->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_dual_joycon%0_disabled); ").arg(theme));
-    }
-
-    if (parameters.allow_left_joycon) {
-        ui->controllerSupported3->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_joycon_left%0); ").arg(theme));
-    } else {
-        ui->controllerSupported3->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_joycon_left%0_disabled); ").arg(theme));
-    }
-
-    if (parameters.allow_right_joycon) {
-        ui->controllerSupported4->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_joycon_right%0); ").arg(theme));
-    } else {
-        ui->controllerSupported4->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_joycon_right%0_disabled); ").arg(theme));
-    }
-
-    if (parameters.allow_pro_controller || parameters.allow_gamecube_controller) {
-        ui->controllerSupported5->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_pro_controller%0); ").arg(theme));
-    } else {
-        ui->controllerSupported5->setStyleSheet(
-            QStringLiteral("image: url(:/controller/applet_pro_controller%0_disabled); ")
-                .arg(theme));
-    }
-
-    // enable_single_mode overrides min_players and max_players.
     if (parameters.enable_single_mode) {
         ui->numberSupportedLabel->setText(QStringLiteral("1"));
         return;
@@ -544,49 +506,26 @@ int QtControllerSelectorDialog::GetIndexFromControllerType(Core::HID::NpadStyleI
 }
 
 void QtControllerSelectorDialog::UpdateControllerIcon(std::size_t player_index) {
-    if (!player_groupboxes[player_index]->isChecked()) {
-        connected_controller_icons[player_index]->setStyleSheet(QString{});
-        player_labels[player_index]->show();
-        return;
-    }
-
-    const QString stylesheet = [this, player_index] {
+    const bool known = [this, player_index] {
+        if (!player_groupboxes[player_index]->isChecked()) {
+            return false;
+        }
         switch (GetControllerTypeFromIndex(emulated_controllers[player_index]->currentIndex(),
                                            player_index)) {
         case Core::HID::NpadStyleIndex::Fullkey:
         case Core::HID::NpadStyleIndex::GameCube:
-            return QStringLiteral("image: url(:/controller/applet_pro_controller%0); ");
         case Core::HID::NpadStyleIndex::JoyconDual:
-            return QStringLiteral("image: url(:/controller/applet_dual_joycon%0); ");
         case Core::HID::NpadStyleIndex::JoyconLeft:
-            return QStringLiteral("image: url(:/controller/applet_joycon_left%0); ");
         case Core::HID::NpadStyleIndex::JoyconRight:
-            return QStringLiteral("image: url(:/controller/applet_joycon_right%0); ");
         case Core::HID::NpadStyleIndex::Handheld:
-            return QStringLiteral("image: url(:/controller/applet_handheld%0); ");
+            return true;
         default:
-            return QString{};
+            return false;
         }
     }();
-
-    if (stylesheet.isEmpty()) {
-        connected_controller_icons[player_index]->setStyleSheet(QString{});
-        player_labels[player_index]->show();
-        return;
-    }
-
-    const QString theme = [] {
-        if (QIcon::themeName().contains(QStringLiteral("dark"))) {
-            return QStringLiteral("_dark");
-        } else if (QIcon::themeName().contains(QStringLiteral("midnight"))) {
-            return QStringLiteral("_midnight");
-        } else {
-            return QString{};
-        }
-    }();
-
-    connected_controller_icons[player_index]->setStyleSheet(stylesheet.arg(theme));
-    player_labels[player_index]->hide();
+    connected_controller_icons[player_index]->setPixmap(Spotlight::IconPixmap(
+        u"game-controller", 20, known ? Spotlight::Color::Success() : Spotlight::Color::TextMuted(),
+        devicePixelRatioF()));
 }
 
 void QtControllerSelectorDialog::UpdateControllerState(std::size_t player_index) {

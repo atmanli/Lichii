@@ -1565,4 +1565,157 @@ std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& p
     return pull;
 }
 
+namespace {
+
+u64 ReadTitleId(const nlohmann::json& value) {
+    if (!value.is_string()) {
+        return 0;
+    }
+    const auto& text = value.get_ref<const std::string&>();
+    u64 id = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), id, 16);
+    return error == std::errc{} && end == text.data() + text.size() ? id : 0;
+}
+
+std::vector<u64> ReadTitleIds(const nlohmann::json& object, const char* key) {
+    std::vector<u64> titles;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_array()) {
+        return titles;
+    }
+    for (const auto& entry : *it) {
+        if (const u64 id = ReadTitleId(entry); id != 0) {
+            titles.push_back(id);
+        }
+    }
+    return titles;
+}
+
+u32 ReadCount(const nlohmann::json& value) {
+    return value.is_number_unsigned() ? static_cast<u32>(value.get<u64>()) : 0;
+}
+
+} // namespace
+
+std::optional<std::vector<OnlineGame>> ParseOnlineCounts(std::string_view body) {
+    try {
+        const auto json = nlohmann::json::parse(body);
+        const auto counts = json.find("counts");
+        if (!json.is_object() || counts == json.end() || !counts->is_object()) {
+            return std::nullopt;
+        }
+        std::vector<OnlineGame> games;
+        if (const auto listed = json.find("jeux"); listed != json.end() && listed->is_array()) {
+            for (const auto& entry : *listed) {
+                if (!entry.is_object()) {
+                    continue;
+                }
+                OnlineGame game{.name = StringField(entry, "nom"),
+                                .titles = ReadTitleIds(entry, "titres")};
+                if (const auto players = entry.find("joueurs"); players != entry.end()) {
+                    game.players = ReadCount(*players);
+                }
+                if (!game.titles.empty()) {
+                    games.push_back(std::move(game));
+                }
+            }
+        }
+        const auto names = json.find("noms");
+        for (const auto& [key, value] : counts->items()) {
+            const u64 id = ReadTitleId(key);
+            const bool listed = std::ranges::any_of(games, [id](const OnlineGame& game) {
+                return std::ranges::find(game.titles, id) != game.titles.end();
+            });
+            if (id == 0 || listed) {
+                continue;
+            }
+            std::string name;
+            if (names != json.end() && names->is_object()) {
+                name = StringField(*names, key.c_str());
+            }
+            games.push_back({.name = std::move(name), .titles = {id}, .players = ReadCount(value)});
+        }
+        return games;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::vector<OnlineGame>> FetchOnlineCounts(std::string_view client_id) {
+    ApiClient api{5};
+    const auto result = api.Get(OnlineCountsPath, BaseHeaders(client_id));
+    if (!result || result->status != 200) {
+        LOG_DEBUG(Common, "Nextendo player counts unavailable ({})",
+                  result ? std::to_string(result->status) : httplib::to_string(result.error()));
+        return std::nullopt;
+    }
+    auto games = ParseOnlineCounts(result->body);
+    if (!games) {
+        LOG_WARNING(Common, "nextendo.network sent unreadable player counts");
+    }
+    return games;
+}
+
+std::optional<std::vector<LiveGame>> ParseLiveStatus(std::string_view body) {
+    try {
+        const auto json = nlohmann::json::parse(body);
+        const auto listed = json.find("games");
+        if (!json.is_object() || listed == json.end() ||
+            (!listed->is_array() && !listed->is_object())) {
+            return std::nullopt;
+        }
+        std::vector<LiveGame> games;
+        for (const auto& [key, entry] : listed->items()) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            LiveGame game{.titles = ReadTitleIds(entry, "titles")};
+            if (game.titles.empty() && listed->is_object()) {
+                if (const u64 id = ReadTitleId(key); id != 0) {
+                    game.titles.push_back(id);
+                }
+            }
+            if (const auto lobbies = entry.find("lobbies");
+                lobbies != entry.end() && lobbies->is_array()) {
+                game.lobbies = static_cast<u32>(lobbies->size());
+            }
+            if (const auto players = entry.find("players");
+                players != entry.end() && players->is_array()) {
+                for (const auto& player : *players) {
+                    if (player.is_object() && player.value("friend", false) &&
+                        !player.value("you", false)) {
+                        game.friends.push_back(StringField(player, "name"));
+                    }
+                }
+            }
+            if (!game.titles.empty()) {
+                games.push_back(std::move(game));
+            }
+        }
+        return games;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::vector<LiveGame>> FetchLiveStatus(std::string_view client_id,
+                                                     const Common::UUID& profile) {
+    if (const auto stored = LoadAccount(profile); !stored || !HasScope(stored->scope, "friends")) {
+        return std::nullopt;
+    }
+    const auto session = AccessSession(client_id, profile);
+    if (!session) {
+        return std::nullopt;
+    }
+    ApiClient api{5};
+    const auto result =
+        api.Get(LiveStatusPath, BearerHeaders(client_id, session->account.access_token));
+    if (!result || result->status != 200) {
+        LOG_DEBUG(Common, "Nextendo live status unavailable ({})",
+                  result ? std::to_string(result->status) : httplib::to_string(result.error()));
+        return std::nullopt;
+    }
+    return ParseLiveStatus(result->body);
+}
+
 } // namespace Common::Nextendo

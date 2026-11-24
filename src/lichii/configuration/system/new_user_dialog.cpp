@@ -14,10 +14,15 @@
 #include "new_user_dialog.h"
 #include "qt_common/qt_common.h"
 #include "ui_new_user_dialog.h"
+#include "lichii/spotlight/theme.h"
 
 #include <QFileDialog>
+#include <QFontDatabase>
+#include <QLayout>
 #include <QMessageBox>
-#include <QStyle>
+#include <QPainter>
+#include <QPainterPath>
+#include <QToolButton>
 #include <fmt/format.h>
 #include <qnamespace.h>
 #include <qregularexpression.h>
@@ -52,12 +57,12 @@ QPixmap NewUserDialog::GetIcon(const Common::UUID& uuid) {
 
 NewUserDialog::NewUserDialog(Common::UUID uuid, const std::string& username, const QString& title,
                              QWidget* parent)
-    : QDialog(parent) {
+    : Spotlight::Dialog(parent) {
     m_editing = true;
     setup(uuid, username, title);
 }
 
-NewUserDialog::NewUserDialog(QWidget* parent) : QDialog(parent) {
+NewUserDialog::NewUserDialog(QWidget* parent) : Spotlight::Dialog(parent) {
     setup(Common::UUID::MakeRandom(), "Eden", tr("New User"));
 }
 
@@ -66,6 +71,33 @@ void NewUserDialog::setup(Common::UUID uuid, const std::string& username, const 
     ui->setupUi(this);
 
     setWindowTitle(title);
+    SetIcon(QStringLiteral("user"), Spotlight::Color::Accent());
+    SetSubtitle(tr("A local profile. Games keep a save per profile."));
+    layout()->setSizeConstraint(QLayout::SetFixedSize);
+    ui->username->setMinimumWidth(338);
+    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    mono.setPixelSize(14);
+    ui->uuid->setFont(mono);
+    ui->uuid->setMinimumWidth(366);
+    ui->revert->setIcon(
+        Spotlight::Icon(QStringLiteral("arrow-counter-clockwise"), Spotlight::Color::Text(), 16));
+    ui->revert->setToolTip(tr("Use the default picture"));
+    ui->deleteProfile->setIcon(
+        Spotlight::Icon(QStringLiteral("trash"), Spotlight::Color::Destructive(), 15));
+    ui->deleteProfile->setVisible(m_editing);
+    connect(ui->deleteProfile, &QPushButton::clicked, this, [this] {
+        reject();
+        emit deleteRequested();
+    });
+    auto* badge = new QToolButton(ui->image);
+    badge->setGeometry(82, 82, 30, 30);
+    badge->setCursor(Qt::PointingHandCursor);
+    badge->setToolTip(ui->setAvatar->text());
+    badge->setIcon(Spotlight::Icon(QStringLiteral("pencil-simple"), Spotlight::Color::OnAccent(), 14));
+    badge->setStyleSheet(QStringLiteral("QToolButton { background: #ff6b95; border: 2px solid #15161e;"
+                                        " border-radius: 15px; }"
+                                        "QToolButton:hover { background: #ff8fae; }"));
+    connect(badge, &QToolButton::clicked, this, &NewUserDialog::setAvatar);
 
     m_scene = new QGraphicsScene;
     ui->image->setScene(m_scene);
@@ -299,8 +331,22 @@ std::vector<uint8_t> NewUserDialog::DecompressYaz0(const FileSys::VirtualFile& f
 
 void NewUserDialog::setImage(const QPixmap& pixmap) {
     m_pixmap = pixmap;
+    const QSize size = ui->image->maximumSize();
+    const qreal ratio = devicePixelRatioF();
+    QPixmap round(size * ratio);
+    round.setDevicePixelRatio(ratio);
+    round.fill(Qt::transparent);
+    QPainter painter(&round);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    QPainterPath circle;
+    circle.addEllipse(QRectF(QPointF{}, size));
+    painter.setClipPath(circle);
+    painter.drawPixmap(QRect(QPoint{}, size), pixmap);
+    painter.end();
     m_scene->clear();
-    m_scene->addPixmap(m_pixmap);
+    m_scene->addPixmap(round);
+    m_scene->setSceneRect(QRectF(QPointF{}, size));
 }
 
 void NewUserDialog::revertImage() {
@@ -309,13 +355,7 @@ void NewUserDialog::revertImage() {
 }
 
 void NewUserDialog::updateRevertButton() {
-    if (isDefaultAvatar()) {
-        ui->revert->setIcon(QIcon{});
-    } else {
-        QStyle* style = parentWidget()->style();
-        QIcon icon(style->standardIcon(QStyle::SP_LineEditClearButton));
-        ui->revert->setIcon(icon);
-    }
+    ui->revert->setVisible(!isDefaultAvatar());
 }
 
 void NewUserDialog::generateUUID() {
@@ -330,7 +370,7 @@ void NewUserDialog::verifyUser() {
     const bool uuid_good = ui->uuid->hasAcceptableInput();
     const bool username_good = ui->username->hasAcceptableInput();
 
-    auto ok_button = ui->buttonBox->button(QDialogButtonBox::Ok);
+    auto ok_button = ui->buttonBox->button(QDialogButtonBox::Save);
     ok_button->setEnabled(username_good && uuid_good);
 
     if (uuid_good) {

@@ -2,20 +2,11 @@
 
 #pragma once
 
-#include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
-namespace Ui {
-class AboutDialog;
-}
-
-class AboutDialog : public QDialog {
+class AboutDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
     explicit AboutDialog(QWidget* parent);
-    ~AboutDialog() override;
-
-private:
-    std::unique_ptr<Ui::AboutDialog> ui;
 };

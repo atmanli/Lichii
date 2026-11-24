@@ -8,13 +8,13 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QGridLayout>
+#include <QHash>
 #include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLocale>
-#include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -22,19 +22,19 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "lichii/whats_new_dialog.h"
 
 namespace {
 
 constexpr auto app_icon = ":/icons/default/256x256/lichii.png";
 
-QLabel* Label(const QString& text, int size, bool bold = false) {
+QLabel* Label(const QString& text, const QFont& font, const QColor& color) {
     auto* const label = new QLabel(text);
     label->setTextFormat(Qt::PlainText);
-    QFont font = label->font();
-    font.setPixelSize(size);
-    font.setBold(bold);
     label->setFont(font);
+    Spotlight::SetTextColor(label, color);
     return label;
 }
 
@@ -46,64 +46,79 @@ QJsonDocument ReadNotes(const QString& path) {
     return QJsonDocument::fromJson(file.readAll());
 }
 
-QWidget* Highlight(const QString& icon, const QString& title, const QString& text, bool lead) {
+QString ChangeIcon(const QString& icon) {
+    static const QHash<QString, QString> phosphor{
+        {QStringLiteral("apps"), QStringLiteral("squares-four")},
+        {QStringLiteral("bug"), QStringLiteral("bug")},
+        {QStringLiteral("clock"), QStringLiteral("clock")},
+        {QStringLiteral("cpu"), QStringLiteral("cpu")},
+        {QStringLiteral("download"), QStringLiteral("download-simple")},
+        {QStringLiteral("gamepad"), QStringLiteral("game-controller")},
+        {QStringLiteral("globe"), QStringLiteral("globe")},
+        {QStringLiteral("image"), QStringLiteral("image")},
+        {QStringLiteral("layers"), QStringLiteral("stack")},
+    };
+    return phosphor.value(icon, QStringLiteral("sparkle"));
+}
+
+QWidget* Highlight(const QString& icon, const QString& title, const QString& text) {
     auto* const row = new QWidget;
-    row->setObjectName(QStringLiteral("WhatsNewItem"));
-    row->setProperty("lead", lead);
-    row->setAttribute(Qt::WA_StyledBackground);
-    row->setMinimumHeight(76);
-
+    row->setMinimumHeight(56);
     auto* const layout = new QHBoxLayout(row);
-    const int vertical_padding = lead ? 12 : 8;
-    layout->setContentsMargins(12, vertical_padding, 12, vertical_padding);
-    layout->setSpacing(13);
+    layout->setContentsMargins(14, 8, 14, 8);
+    layout->setSpacing(12);
 
-    auto* const badge = new QLabel;
-    badge->setObjectName(QStringLiteral("WhatsNewBadge"));
-    badge->setFixedSize(40, 40);
-    badge->setAlignment(Qt::AlignCenter);
-    QIcon glyph(QStringLiteral(":/lichii/icons/menu_%1.png").arg(icon));
-    QPixmap pixmap = glyph.pixmap(QSize(22, 22), row->devicePixelRatioF());
-    if (pixmap.isNull()) {
-        pixmap = QIcon(QStringLiteral(":/lichii/icons/menu_sparkles.png"))
-                     .pixmap(QSize(22, 22), row->devicePixelRatioF());
-    }
-    if (!pixmap.isNull() && row->palette().color(QPalette::Window).lightness() > 127) {
-        QPainter painter(&pixmap);
-        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        painter.fillRect(QRectF(QPointF{}, pixmap.deviceIndependentSize()),
-                         QColor{0x65, 0x65, 0x65});
-    }
-    badge->setPixmap(pixmap);
-    layout->addWidget(badge, 0, Qt::AlignTop);
+    auto* const glyph = new QLabel;
+    glyph->setObjectName(QStringLiteral("WhatsNewBadge"));
+    glyph->setStyleSheet(QStringLiteral("background: transparent;"));
+    glyph->setPixmap(Spotlight::IconPixmap(ChangeIcon(icon), 22, Spotlight::Color::Accent(),
+                                           row->devicePixelRatioF()));
+    layout->addWidget(glyph, 0, Qt::AlignVCenter);
 
     auto* const copy = new QVBoxLayout;
-    copy->setSpacing(3);
-    auto* const heading = Label(title, 17, true);
+    copy->setSpacing(2);
+    auto* const heading = Label(title, Spotlight::Font(14, 600), Spotlight::Color::Text());
     heading->setWordWrap(true);
     copy->addWidget(heading);
-    auto* const body = Label(text, 15);
-    body->setObjectName(QStringLiteral("WhatsNewText"));
+    auto* const body = Label(text, Spotlight::Font(12, 400), Spotlight::Color::TextSecondary());
     body->setWordWrap(true);
     copy->addWidget(body);
-    copy->addStretch();
     layout->addLayout(copy, 1);
     return row;
 }
 
-QToolButton* NavigationButton(const QString& name, const QString& icon) {
+QWidget* Divider() {
+    auto* const holder = new QWidget;
+    auto* const layout = new QHBoxLayout(holder);
+    layout->setContentsMargins(18, 0, 18, 0);
+    auto* const line = new QWidget;
+    line->setFixedHeight(1);
+    line->setAttribute(Qt::WA_StyledBackground);
+    line->setStyleSheet(QStringLiteral("background-color: rgba(255, 255, 255, 18);"));
+    layout->addWidget(line);
+    return holder;
+}
+
+QToolButton* NavigationButton(const QString& name, const QString& icon, bool filled) {
     auto* const button = new QToolButton;
     button->setAccessibleName(name);
     button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    button->setAutoRaise(true);
     button->setFocusPolicy(Qt::StrongFocus);
-    button->setIcon(QIcon(icon));
-    button->setIconSize(QSize(16, 16));
-    button->setMinimumHeight(30);
-    QFont font = button->font();
-    font.setPixelSize(14);
-    font.setBold(true);
-    button->setFont(font);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setIcon(Spotlight::Icon(icon, Spotlight::Color::Text(), 15));
+    button->setIconSize(QSize(15, 15));
+    button->setFixedHeight(34);
+    button->setFont(Spotlight::Font(12, 600));
+    button->setStyleSheet(
+        QStringLiteral("QToolButton { background-color: %1; border: 1px solid transparent; "
+                       "border-radius: 17px; padding: 0 13px; color: #ffffff; }"
+                       "QToolButton:hover { background-color: rgba(255, 255, 255, 31); }"
+                       "QToolButton:disabled { background-color: %2; "
+                       "color: rgba(255, 255, 255, 89); }"
+                       "QToolButton[keyboardFocus=\"true\"] { border-color: #ffffff; }")
+            .arg(filled ? QStringLiteral("rgba(255, 255, 255, 20)") : QStringLiteral("transparent"),
+                 filled ? QStringLiteral("rgba(255, 255, 255, 15)")
+                        : QStringLiteral("transparent")));
     return button;
 }
 
@@ -180,16 +195,16 @@ QList<WhatsNewDialog::Release> WhatsNewDialog::LoadReleases(quint32 build, QDate
 
 WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pending,
                                QWidget* parent)
-    : QDialog(parent), releases(LoadReleases(build, build_date, include_pending)) {
+    : Spotlight::Dialog(parent), releases(LoadReleases(build, build_date, include_pending)) {
     setObjectName(QStringLiteral("WhatsNewDialog"));
     setWindowTitle(tr("What's new in Lichii"));
+    SetIcon(u"newspaper", Spotlight::Color::Accent());
     const QIcon icon(QString::fromLatin1(app_icon));
     setWindowIcon(icon);
-    resize(600, 740);
 
     auto* const root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
-    root->setSpacing(0);
+    root->setSpacing(20);
 
     scroll = new QScrollArea;
     scroll->setFrameShape(QFrame::NoFrame);
@@ -197,99 +212,82 @@ WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pen
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* const content = new QWidget;
     auto* const content_layout = new QVBoxLayout(content);
-    content_layout->setContentsMargins(18, 32, 18, 20);
-    content_layout->setSpacing(0);
+    content_layout->setContentsMargins(0, 0, 0, 0);
+    content_layout->setSpacing(14);
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
 
-    auto* const header = new QVBoxLayout;
-    header->setContentsMargins(12, 0, 12, 20);
-    header->setSpacing(8);
-
-    auto* const intro = new QHBoxLayout;
-    intro->setSpacing(12);
-    auto* const labels = new QVBoxLayout;
-    labels->setSpacing(7);
     auto* const release_line = new QHBoxLayout;
-    release_line->setSpacing(6);
+    release_line->setSpacing(10);
     auto* const logo = new QLabel;
-    logo->setPixmap(icon.pixmap(QSize(19, 19), devicePixelRatioF()));
-    release_line->addWidget(logo, 0, Qt::AlignTop);
-    metadata = Label({}, 14, true);
+    logo->setPixmap(icon.pixmap(QSize(38, 38), devicePixelRatioF()));
+    release_line->addWidget(logo);
+    metadata = Label({}, Spotlight::Font(13, 600), Spotlight::Color::TextSecondary());
     metadata->setObjectName(QStringLiteral("WhatsNewMetadata"));
     metadata->setWordWrap(true);
     release_line->addWidget(metadata, 1);
-    labels->addLayout(release_line);
-    auto* const title = Label(tr("What's new"), 48, true);
-    title->setWordWrap(true);
-    labels->addWidget(title);
-    intro->addLayout(labels, 1);
-    auto* const wordmark = new QLabel;
-    wordmark->setPixmap(QIcon(QStringLiteral(":/img/lichii_wordmark.png"))
-                            .pixmap(QSize(84, 36), devicePixelRatioF()));
-    intro->addWidget(wordmark, 0, Qt::AlignTop);
-    header->addLayout(intro);
+    content_layout->addLayout(release_line);
 
-    summary = Label({}, 16);
-    summary->setObjectName(QStringLiteral("WhatsNewText"));
+    content_layout->addWidget(
+        Label(tr("What's new"), Spotlight::DisplayFont(42), Spotlight::Color::Text()));
+
+    summary = Label({}, Spotlight::Font(13, 400), Spotlight::Color::TextSecondary());
     summary->setWordWrap(true);
-    header->addWidget(summary);
-    content_layout->addLayout(header);
+    content_layout->addWidget(summary);
 
-    highlights = new QVBoxLayout;
-    highlights->setSpacing(4);
-    content_layout->addLayout(highlights);
+    highlight_card = new QWidget;
+    highlight_card->setObjectName(QStringLiteral("highlightCard"));
+    highlight_card->setAttribute(Qt::WA_StyledBackground);
+    highlight_card->setStyleSheet(
+        QStringLiteral("#highlightCard { background-color: rgba(255, 255, 255, 13); "
+                       "border: 1px solid rgba(255, 255, 255, 20); border-radius: 18px; }"));
+    highlights = new QVBoxLayout(highlight_card);
+    highlights->setContentsMargins(0, 0, 0, 0);
+    highlights->setSpacing(0);
+    content_layout->addWidget(highlight_card);
     content_layout->addStretch(1);
 
-    auto* const footer = new QWidget;
-    footer->setObjectName(QStringLiteral("WhatsNewFooter"));
-    footer->setAttribute(Qt::WA_StyledBackground);
-    auto* const controls = new QVBoxLayout(footer);
-    controls->setContentsMargins(30, 14, 30, 16);
-    controls->setSpacing(8);
+    auto* const controls = new QVBoxLayout;
+    controls->setContentsMargins(0, 6, 0, 0);
+    controls->setSpacing(12);
     auto* const got_it = new QPushButton(tr("Got it"));
     got_it->setObjectName(QStringLiteral("WhatsNewDone"));
-    QFont button_font = got_it->font();
-    button_font.setPixelSize(15);
-    got_it->setFont(button_font);
-    got_it->setFixedHeight(44);
+    got_it->setFixedHeight(40);
+    got_it->setStyleSheet(
+        QStringLiteral("font-size: 14px; font-weight: 600; min-height: 40px; border-radius: 20px;"));
     got_it->setDefault(true);
     connect(got_it, &QPushButton::clicked, this, &QDialog::accept);
     controls->addWidget(got_it);
 
     auto* const history = new QGridLayout;
     history->setContentsMargins(0, 0, 0, 0);
-    history->setHorizontalSpacing(4);
+    history->setHorizontalSpacing(7);
     for (int i = 0; i < 3; ++i) {
         history->setColumnStretch(i, 1);
     }
-    previous =
-        NavigationButton(tr("Previous release"), QStringLiteral(":/lichii/icons/chevron_left.png"));
+    previous = NavigationButton(tr("Previous release"), QStringLiteral("caret-left"), true);
     previous->setObjectName(QStringLiteral("WhatsNewPrevious"));
     connect(previous, &QToolButton::clicked, this, [this] { ShowRelease(current_index + 1); });
     history->addWidget(previous, 0, 0, Qt::AlignLeading);
 
     auto* const archive = NavigationButton(tr("All releases on GitHub"),
-                                           QStringLiteral(":/lichii/icons/menu_link.png"));
+                                           QStringLiteral("arrow-square-out"), false);
     archive->setObjectName(QStringLiteral("WhatsNewArchive"));
     archive->setText(tr("All releases"));
-    archive->setLayoutDirection(layoutDirection() == Qt::LeftToRight ? Qt::RightToLeft
-                                                                     : Qt::LeftToRight);
     connect(archive, &QToolButton::clicked, this, [] {
         QDesktopServices::openUrl(
             QUrl(QStringLiteral("https://github.com/zortos293/Lichii/releases")));
     });
     history->addWidget(archive, 0, 1, Qt::AlignHCenter);
 
-    next = NavigationButton(tr("Next release"), QStringLiteral(":/lichii/icons/chevron_right.png"));
+    next = NavigationButton(tr("Next release"), QStringLiteral("caret-right"), true);
     next->setObjectName(QStringLiteral("WhatsNewNext"));
     next->setText(tr("Next"));
-    next->setLayoutDirection(archive->layoutDirection());
     connect(next, &QToolButton::clicked, this, [this] { ShowRelease(current_index - 1); });
     history->addWidget(next, 0, 2,
                        (isRightToLeft() ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignAbsolute);
     controls->addLayout(history);
-    root->addWidget(footer);
+    root->addLayout(controls);
 
     ShowRelease(0);
     got_it->setFocus();
@@ -317,8 +315,12 @@ void WhatsNewDialog::ShowRelease(qsizetype index) {
     }
     for (qsizetype i = 0; i < release.changes.size(); ++i) {
         const auto& change = release.changes[i];
-        highlights->addWidget(Highlight(change.icon, change.title, change.body, i == 0));
+        if (i > 0) {
+            highlights->addWidget(Divider());
+        }
+        highlights->addWidget(Highlight(change.icon, change.title, change.body));
     }
+    highlight_card->setHidden(release.changes.isEmpty());
     scroll->verticalScrollBar()->setValue(0);
     previous->setEnabled(index + 1 < releases.size());
     previous->setText(previous->isEnabled() ? tr("Build %1").arg(releases[index + 1].build)

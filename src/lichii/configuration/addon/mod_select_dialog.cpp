@@ -1,66 +1,168 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+
+#include <QCheckBox>
+#include <QDir>
 #include <QFileInfo>
-#include <qnamespace.h>
-#include "mod_select_dialog.h"
-#include "ui_mod_select_dialog.h"
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QPainter>
+#include <QScrollArea>
+#include <QStyle>
+#include <QVBoxLayout>
 
-ModSelectDialog::ModSelectDialog(const QStringList& mods, QWidget* parent)
-    : QDialog(parent), ui(new Ui::ModSelectDialog) {
-    ui->setupUi(this);
+#include "lichii/configuration/addon/mod_select_dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
-    item_model = new QStandardItemModel(ui->treeView);
-    ui->treeView->setModel(item_model);
+namespace {
 
-    // We must register all custom types with the Qt Automoc system so that we are able to use it
-    // with signals/slots. In this case, QList falls under the umbrella of custom types.
-    qRegisterMetaType<QList<QStandardItem*>>("QList<QStandardItem*>");
+namespace Color = Spotlight::Color;
 
-    for (const auto& mod : mods) {
-        const auto basename = QFileInfo(mod).fileName();
+constexpr int ContentWidth = 452;
+constexpr int VisibleRows = 5;
 
-        auto* const first_item = new QStandardItem;
-        first_item->setText(basename);
-        first_item->setData(mod);
+class Panel final : public QWidget {
+public:
+    using QWidget::QWidget;
 
-        first_item->setCheckable(true);
-        first_item->setCheckState(Qt::Checked);
-
-        item_model->appendRow(first_item);
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(Color::StrokeSubtle(), 1));
+        painter.setBrush(Color::FillFaint());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                Spotlight::Radius::Panel, Spotlight::Radius::Panel);
     }
+};
 
-    ui->treeView->expandAll();
+QLabel* Text(const QString& text, int size, int weight, const QColor& color) {
+    auto* label = new QLabel(text);
+    label->setTextFormat(Qt::PlainText);
+    label->setFont(Spotlight::Font(size, weight));
+    Spotlight::SetTextColor(label, color);
+    return label;
+}
 
-    int rows = item_model->rowCount();
-    int height = 4 + ui->treeView->contentsMargins().top() * 4 +
-                 ui->treeView->contentsMargins().bottom() * 4;
-    int width = 0;
+QFrame* Divider() {
+    auto* line = new QFrame;
+    line->setFixedHeight(1);
+    line->setStyleSheet(QStringLiteral("background: rgba(255, 255, 255, %1); border: none;")
+                            .arg(Color::StrokeSubtle().alpha()));
+    return line;
+}
 
-    for (int i = 0; i < rows; ++i) {
-        height += ui->treeView->sizeHintForRow(i);
-        width = qMax(width, item_model->item(i)->sizeHint().width());
-    }
-
-    width +=
-        ui->treeView->contentsMargins().left() * 4 + ui->treeView->contentsMargins().right() * 4;
-    ui->treeView->setMinimumHeight(qMin(height, 600));
-    ui->treeView->setMinimumWidth(qMax(width, 540));
-    adjustSize();
-
-    connect(this, &QDialog::accepted, this, [this]() {
-        QStringList selected_mods;
-
-        for (qsizetype i = 0; i < item_model->rowCount(); ++i) {
-            auto* const item = item_model->item(i);
-            if (item->checkState() == Qt::Checked)
-                selected_mods << item->data().toString();
+QString CommonParent(const QStringList& paths) {
+    QString parent = QFileInfo(paths.front()).absolutePath();
+    for (const auto& path : paths) {
+        while (!parent.isEmpty() && !QFileInfo(path).absoluteFilePath().startsWith(parent + u'/')) {
+            const QString up = QFileInfo(parent).absolutePath();
+            parent = up == parent ? QString{} : up;
         }
+    }
+    return parent;
+}
 
-        emit modsSelected(selected_mods);
+} // namespace
+
+ModSelectDialog::ModSelectDialog(const QStringList& mods_, QWidget* parent)
+    : Spotlight::Dialog(parent), mods{mods_} {
+    setAttribute(Qt::WA_DeleteOnClose);
+    setWindowTitle(tr("Select mods to import"));
+    SetIcon(u"puzzle-piece", Color::Accent());
+    SetSubtitle(tr("Lichii found more than one mod in this file or folder."));
+
+    auto* panel = new Panel;
+    panel->setFixedWidth(ContentWidth);
+    auto* panel_layout = new QVBoxLayout(panel);
+    panel_layout->setContentsMargins(16, 0, 16, 0);
+    panel_layout->setSpacing(0);
+    auto* header = new QHBoxLayout;
+    header->setContentsMargins(0, 18, 0, 18);
+    header->setSpacing(12);
+    auto* folder = new QLabel;
+    folder->setPixmap(Spotlight::IconPixmap(u"folder", 16, Color::TextSecondary(),
+                                            devicePixelRatioF()));
+    header->addWidget(folder);
+    header->addWidget(Text(tr("Discovered mods"), 14, 600, Color::Text()), 1);
+    panel_layout->addLayout(header);
+
+    auto* list = new QWidget;
+    auto* rows = new QVBoxLayout(list);
+    rows->setContentsMargins(0, 0, 0, 0);
+    rows->setSpacing(0);
+    const QString root = CommonParent(mods);
+    const int indent = style()->pixelMetric(QStyle::PM_IndicatorWidth) +
+                       style()->pixelMetric(QStyle::PM_CheckBoxLabelSpacing);
+    for (const auto& mod : mods) {
+        rows->addWidget(Divider());
+        auto* row = new QVBoxLayout;
+        row->setContentsMargins(0, 10, 0, 10);
+        row->setSpacing(2);
+        auto* check = new QCheckBox(QFileInfo(mod).fileName());
+        check->setFont(Spotlight::Font(14, 600));
+        check->setChecked(true);
+        row->addWidget(check);
+        QString detail = root.isEmpty() ? mod : QDir(root).relativeFilePath(mod);
+        const QStringList contents = QDir(mod).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        if (contents.size() == 1) {
+            detail += u'/' + contents.front();
+        }
+        auto* path = Text(detail, 12, 400, Color::TextSecondary());
+        path->setContentsMargins(indent, 0, 0, 0);
+        path->setToolTip(mod);
+        row->addWidget(path);
+        rows->addLayout(row);
+        checks.append(check);
+    }
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(list);
+    const int row_height = list->sizeHint().height() / static_cast<int>(mods.size());
+    scroll->setFixedHeight(row_height * std::min(static_cast<int>(mods.size()), VisibleRows));
+    panel_layout->addWidget(scroll);
+
+    auto* buttons = new QHBoxLayout;
+    buttons->setSpacing(10);
+    buttons->addStretch();
+    auto* cancel = new Spotlight::PillButton(tr("Cancel"), {},
+                                             Spotlight::PillButton::Kind::Control, 40);
+    auto* ok = new Spotlight::PillButton(tr("OK"), {}, Spotlight::PillButton::Kind::Accent, 40);
+    buttons->addWidget(cancel);
+    buttons->addWidget(ok);
+    connect(cancel, &QAbstractButton::clicked, this, &QDialog::reject);
+    connect(ok, &QAbstractButton::clicked, this, &QDialog::accept);
+
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(26);
+    layout->addWidget(panel);
+    layout->addLayout(buttons);
+
+    connect(this, &QDialog::accepted, this, [this] {
+        QStringList selected;
+        for (qsizetype i = 0; i < checks.size(); ++i) {
+            if (checks[i]->isChecked()) {
+                selected << mods[i];
+            }
+        }
+        emit modsSelected(selected);
     });
 }
 
-ModSelectDialog::~ModSelectDialog() {
-    delete ui;
+ModSelectDialog::~ModSelectDialog() = default;
+
+void ModSelectDialog::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        accept();
+        return;
+    }
+    Spotlight::Dialog::keyPressEvent(event);
 }

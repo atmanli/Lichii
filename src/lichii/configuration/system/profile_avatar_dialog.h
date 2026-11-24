@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include <vector>
 #include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QListWidget;
+class QToolButton;
 
-class ProfileAvatarDialog : public QDialog {
+class ProfileAvatarDialog : public Spotlight::Dialog {
 public:
     explicit ProfileAvatarDialog(QWidget* parent);
     ~ProfileAvatarDialog();
@@ -24,5 +27,5 @@ private:
     QVector<QPixmap> avatar_image_store;
     QListWidget* avatar_list;
     QColor avatar_bg_color;
-    QPushButton* bg_color_button;
+    std::vector<std::pair<QToolButton*, QColor>> swatches;
 };

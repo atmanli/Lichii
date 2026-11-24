@@ -18,13 +18,11 @@
 ControllerDialog::ControllerDialog(Core::HID::HIDCore& hid_core_,
                                    std::shared_ptr<InputCommon::InputSubsystem> input_subsystem_,
                                    QWidget* parent)
-    : QWidget(parent, Qt::Dialog), hid_core{hid_core_}, input_subsystem{input_subsystem_} {
+    : Spotlight::Dialog(parent), hid_core{hid_core_}, input_subsystem{input_subsystem_} {
     setObjectName(QStringLiteral("Controller"));
     setWindowTitle(tr("Controller P1"));
-    resize(500, 350);
-    setMinimumSize(500, 350);
-    // Enable the maximize button
-    setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint);
+    resize(560, 460);
+    setMinimumSize(500, 420);
 
     widget = new PlayerControlPreview(this);
     refreshConfiguration();
@@ -78,14 +76,14 @@ void ControllerDialog::showEvent(QShowEvent* ev) {
     if (toggle_view_action) {
         toggle_view_action->setChecked(isVisible());
     }
-    QWidget::showEvent(ev);
+    Spotlight::Dialog::showEvent(ev);
 }
 
 void ControllerDialog::hideEvent(QHideEvent* ev) {
     if (toggle_view_action) {
         toggle_view_action->setChecked(isVisible());
     }
-    QWidget::hideEvent(ev);
+    Spotlight::Dialog::hideEvent(ev);
 }
 
 void ControllerDialog::ControllerUpdate(Core::HID::ControllerTriggerType type) {

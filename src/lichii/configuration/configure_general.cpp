@@ -13,11 +13,12 @@
 #include <QMessageBox>
 #include "common/settings.h"
 #include "core/core.h"
-#include "qt_common/config/uisettings.h"
-#include "ui_configure_general.h"
 #include "lichii/configuration/configuration_shared.h"
 #include "lichii/configuration/configure_general.h"
+#include "lichii/configuration/settings_dialog.h"
 #include "lichii/configuration/shared_widget.h"
+#include "qt_common/config/uisettings.h"
+#include "ui_configure_general.h"
 
 ConfigureGeneral::ConfigureGeneral(const Core::System& system_,
                                    std::shared_ptr<std::vector<ConfigurationShared::Tab*>> group_,
@@ -97,12 +98,15 @@ void ConfigureGeneral::SetResetCallback(std::function<void()> callback) {
 }
 
 void ConfigureGeneral::ResetDefaults() {
-    QMessageBox::StandardButton answer = QMessageBox::question(
-        this, tr("Lichii"),
-        tr("This reset all settings and remove all per-game configurations. This will not delete "
-           "game directories, profiles, or input profiles. Proceed?"),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (answer == QMessageBox::No) {
+    SettingsCard::Message confirmation{
+        this,
+        470,
+        tr("Reset all settings?"),
+        tr("This removes your global settings and all per-game overrides. It does not delete "
+           "your games or saves. A running game must stop first."),
+        tr("Reset all settings"),
+        tr("Cancel")};
+    if (confirmation.exec() != QDialog::Accepted) {
         return;
     }
     UISettings::values.reset_to_defaults = true;

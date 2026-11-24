@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QLineEdit;
 
@@ -10,7 +10,7 @@ namespace Ui {
 class ConfigureTas;
 }
 
-class ConfigureTasDialog : public QDialog {
+class ConfigureTasDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <QKeyEvent>
 #include <QScreen>
 #include <QWindow>
@@ -11,13 +12,13 @@
 #include "hid_core/hid_types.h"
 #include "ui_overlay_dialog.h"
 #include "lichii/util/overlay_dialog.h"
+#include "lichii/spotlight/theme.h"
 
 namespace {
 
-constexpr float BASE_TITLE_FONT_SIZE = 14.0f;
-constexpr float BASE_FONT_SIZE = 18.0f;
-constexpr float BASE_WIDTH = 1280.0f;
-constexpr float BASE_HEIGHT = 720.0f;
+constexpr int MessageCardWidth = 530;
+constexpr int TextCheckCardWidth = 420;
+constexpr int CardPadding = 24;
 
 } // Anonymous namespace
 
@@ -27,6 +28,19 @@ OverlayDialog::OverlayDialog(QWidget* parent, Core::System& system, const QStrin
                              bool use_rich_text_)
     : QDialog(parent), ui{std::make_unique<Ui::OverlayDialog>()}, use_rich_text{use_rich_text_} {
     ui->setupUi(this);
+    for (auto* content : {ui->verticalLayout_2, ui->verticalLayout_3}) {
+        content->setContentsMargins(CardPadding, CardPadding, CardPadding, CardPadding);
+        content->setSpacing(12);
+    }
+    for (auto* buttons : {ui->horizontalLayout, ui->horizontalLayout_2}) {
+        buttons->setContentsMargins(0, 8, 0, 0);
+        buttons->setSpacing(10);
+        buttons->insertStretch(0);
+    }
+    for (auto* button :
+         {ui->button_cancel, ui->button_ok_label, ui->button_cancel_rich, ui->button_ok_rich}) {
+        button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
 
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowTitleHint |
                    Qt::WindowSystemMenuHint | Qt::CustomizeWindowHint);
@@ -70,9 +84,6 @@ void OverlayDialog::InitializeRegularTextDialog(const QString& title_text, const
 
     if (title_text.isEmpty()) {
         ui->label_title->hide();
-        ui->verticalLayout_2->setStretch(0, 0);
-        ui->verticalLayout_2->setStretch(1, 219);
-        ui->verticalLayout_2->setStretch(2, 82);
     }
 
     if (left_button_text.isEmpty()) {
@@ -122,9 +133,6 @@ void OverlayDialog::InitializeRichTextDialog(const QString& title_text, const QS
 
     if (title_text.isEmpty()) {
         ui->label_title_rich->hide();
-        ui->verticalLayout_3->setStretch(0, 0);
-        ui->verticalLayout_3->setStretch(1, 438);
-        ui->verticalLayout_3->setStretch(2, 82);
     }
 
     if (left_button_text.isEmpty()) {
@@ -160,31 +168,24 @@ void OverlayDialog::InitializeRichTextDialog(const QString& title_text, const QS
 
 void OverlayDialog::MoveAndResizeWindow() {
     const auto pos = parentWidget()->mapToGlobal(parentWidget()->rect().topLeft());
-    const auto width = static_cast<float>(parentWidget()->width());
-    const auto height = static_cast<float>(parentWidget()->height());
+    const int width = parentWidget()->width();
+    const int height = parentWidget()->height();
 
-    // High DPI
-    const float dpi_scale = screen()->logicalDotsPerInch() / 96.0f;
-
-    const auto title_text_font_size = BASE_TITLE_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-    const auto body_text_font_size =
-        BASE_FONT_SIZE * (((width / BASE_WIDTH) + (height / BASE_HEIGHT)) / 2.0f) / dpi_scale;
-    const auto button_text_font_size = BASE_FONT_SIZE * (height / BASE_HEIGHT) / dpi_scale;
-
-    QFont title_text_font(QStringLiteral("MS Shell Dlg 2"), title_text_font_size, QFont::Normal);
-    QFont body_text_font(QStringLiteral("MS Shell Dlg 2"), body_text_font_size, QFont::Normal);
-    QFont button_text_font(QStringLiteral("MS Shell Dlg 2"), button_text_font_size, QFont::Normal);
-
+    const QFont title_font = Spotlight::DisplayFont(22);
+    const QFont body_font = Spotlight::Font(14, 400);
+    const QFont button_font = Spotlight::Font(14, 600);
     if (use_rich_text) {
-        ui->label_title_rich->setFont(title_text_font);
-        ui->text_browser_dialog->setFont(body_text_font);
-        ui->button_cancel_rich->setFont(button_text_font);
-        ui->button_ok_rich->setFont(button_text_font);
+        ui->label_title_rich->setFont(title_font);
+        ui->text_browser_dialog->setFont(body_font);
+        ui->button_cancel_rich->setFont(button_font);
+        ui->button_ok_rich->setFont(button_font);
     } else {
-        ui->label_title->setFont(title_text_font);
-        ui->label_dialog->setFont(body_text_font);
-        ui->button_cancel->setFont(button_text_font);
-        ui->button_ok_label->setFont(button_text_font);
+        ui->label_title->setFont(title_font);
+        ui->label_dialog->setFont(body_font);
+        ui->button_cancel->setFont(button_font);
+        ui->button_ok_label->setFont(button_font);
+        const int card_width = ui->label_title->isHidden() ? TextCheckCardWidth : MessageCardWidth;
+        ui->contentDialog->setFixedWidth(std::min(card_width, width - 2 * CardPadding));
     }
 
     QDialog::move(pos);

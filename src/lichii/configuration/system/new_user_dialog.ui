@@ -2,191 +2,194 @@
 <ui version="4.0">
  <class>NewUserDialog</class>
  <widget class="QDialog" name="NewUserDialog">
-  <property name="geometry">
-   <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>448</width>
-    <height>220</height>
-   </rect>
-  </property>
-  <property name="windowTitle">
-   <string>New User</string>
-  </property>
-  <layout class="QGridLayout" name="gridLayout_2">
-   <item row="2" column="1" colspan="3">
-    <widget class="QDialogButtonBox" name="buttonBox">
-     <property name="orientation">
-      <enum>Qt::Orientation::Horizontal</enum>
-     </property>
-     <property name="standardButtons">
-      <set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Ok</set>
-     </property>
-    </widget>
+  <property name="windowTitle"><string>New User</string></property>
+  <property name="styleSheet"><string notr="true">QLabel[field="true"] { font: 600 13px "Lexend"; color: #ccffffff; }
+QLabel[hint="true"] { font: 400 12px "Lexend"; color: #9effffff; }
+QLineEdit { min-height: 38px; max-height: 38px; padding: 0 14px; border-radius: 12px; font: 500 14px "Lexend"; }
+QLineEdit[mono="true"] { font-family: monospace; }
+QPushButton[pill="true"] { font: 600 13px "Lexend"; min-height: 34px; max-height: 34px; padding: 0 16px;
+                           border-radius: 17px; background: #14ffffff; border: none; color: #ffffff; }
+QPushButton[pill="true"]:hover { background: #1fffffff; }
+QPushButton[pill="true"]:disabled { color: #73ffffff; }
+QPushButton[pill="true"][kind="destructive"] { background: #1fff8fae; color: #ff8fae; min-height: 36px; max-height: 36px; border-radius: 18px; }
+QPushButton[pill="true"][kind="destructive"]:hover { background: #2eff8fae; }
+QToolButton#revert { background: transparent; border: none; border-radius: 17px; }
+QToolButton#revert:hover { background: #14ffffff; }
+QGraphicsView#image { background: transparent; border: none; }</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>20</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
+   <item>
+    <layout class="QHBoxLayout" name="topRow">
+     <property name="spacing"><number>20</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
+     <item alignment="Qt::AlignmentFlag::AlignTop">
+      <widget class="QGraphicsView" name="image">
+       <property name="minimumSize"><size><width>112</width><height>112</height></size></property>
+       <property name="maximumSize"><size><width>112</width><height>112</height></size></property>
+       <property name="frameShape"><enum>QFrame::Shape::NoFrame</enum></property>
+       <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum></property>
+       <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum></property>
+       <property name="interactive"><bool>false</bool></property>
+      </widget>
+     </item>
+     <item>
+      <layout class="QVBoxLayout" name="nameColumn">
+       <property name="spacing"><number>8</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLabel" name="label_2">
+         <property name="text"><string>Name</string></property>
+         <property name="field" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="nameRow">
+         <property name="spacing"><number>8</number></property>
+         <property name="leftMargin"><number>0</number></property>
+         <property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property>
+         <property name="bottomMargin"><number>0</number></property>
+         <item>
+          <widget class="QLineEdit" name="username">
+           <property name="text"><string>Lichii</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="usernameVerified">
+           <property name="minimumSize"><size><width>16</width><height>16</height></size></property>
+           <property name="maximumSize"><size><width>16</width><height>16</height></size></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="imageRow">
+         <property name="spacing"><number>8</number></property>
+         <property name="leftMargin"><number>0</number></property>
+         <property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property>
+         <property name="bottomMargin"><number>0</number></property>
+         <item>
+          <widget class="QPushButton" name="setAvatar">
+           <property name="text"><string>Console avatars…</string></property>
+           <property name="pill" stdset="0"><bool>true</bool></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="selectImage">
+           <property name="text"><string>Image file…</string></property>
+           <property name="pill" stdset="0"><bool>true</bool></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QToolButton" name="revert">
+           <property name="minimumSize"><size><width>34</width><height>34</height></size></property>
+           <property name="maximumSize"><size><width>34</width><height>34</height></size></property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="spacer1">
+           <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+           <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+           <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+      </layout>
+     </item>
+    </layout>
    </item>
-   <item row="1" column="2">
-    <widget class="QPushButton" name="setAvatar">
-     <property name="text">
-      <string>Change Avatar</string>
-     </property>
-    </widget>
-   </item>
-   <item row="1" column="1">
-    <widget class="QPushButton" name="selectImage">
-     <property name="text">
-      <string>Set Image</string>
-     </property>
-    </widget>
-   </item>
-   <item row="1" column="3">
-    <widget class="QToolButton" name="revert">
-     <property name="text">
-      <string/>
-     </property>
-    </widget>
-   </item>
-   <item row="0" column="0" colspan="4">
-    <layout class="QGridLayout" name="gridLayout">
-     <item row="1" column="0">
+   <item>
+    <layout class="QVBoxLayout" name="uuidColumn">
+     <property name="spacing"><number>8</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
+     <item>
       <widget class="QLabel" name="label">
-       <property name="text">
-        <string>UUID</string>
-       </property>
+       <property name="text"><string>Profile ID</string></property>
+       <property name="field" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
-     <item row="0" column="1" colspan="2">
-      <widget class="QLineEdit" name="username">
-       <property name="text">
-        <string>Lichii</string>
-       </property>
-      </widget>
+     <item>
+      <layout class="QHBoxLayout" name="uuidRow">
+       <property name="spacing"><number>8</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QLineEdit" name="uuid">
+         <property name="mono" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="uuidVerified">
+         <property name="minimumSize"><size><width>16</width><height>16</height></size></property>
+         <property name="maximumSize"><size><width>16</width><height>16</height></size></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="generate">
+         <property name="text"><string>Generate</string></property>
+         <property name="pill" stdset="0"><bool>true</bool></property>
+        </widget>
+       </item>
+      </layout>
      </item>
-     <item row="1" column="1" colspan="2">
-      <widget class="QLineEdit" name="uuid"/>
-     </item>
-     <item row="0" column="0">
-      <widget class="QLabel" name="label_2">
-       <property name="text">
-        <string>Username</string>
-       </property>
-      </widget>
-     </item>
-     <item row="2" column="1">
+     <item>
       <widget class="QLabel" name="label_3">
-       <property name="font">
-        <font>
-         <italic>true</italic>
-        </font>
-       </property>
-       <property name="text">
-        <string>UUID must be 32 hex characters (0-9, A-F)</string>
-       </property>
-      </widget>
-     </item>
-     <item row="2" column="2">
-      <widget class="QPushButton" name="generate">
-       <property name="text">
-        <string>Generate</string>
-       </property>
-      </widget>
-     </item>
-     <item row="1" column="3">
-      <widget class="QLabel" name="uuidVerified">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="minimumSize">
-        <size>
-         <width>24</width>
-         <height>0</height>
-        </size>
-       </property>
-      </widget>
-     </item>
-     <item row="0" column="3">
-      <widget class="QLabel" name="usernameVerified">
-       <property name="text">
-        <string/>
-       </property>
+       <property name="text"><string>Locked for existing profiles. 32 hex characters.</string></property>
+       <property name="hint" stdset="0"><bool>true</bool></property>
       </widget>
      </item>
     </layout>
    </item>
-   <item row="1" column="0">
-    <widget class="QGraphicsView" name="image">
-     <property name="sizePolicy">
-      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-       <horstretch>0</horstretch>
-       <verstretch>0</verstretch>
-      </sizepolicy>
-     </property>
-     <property name="minimumSize">
-      <size>
-       <width>64</width>
-       <height>64</height>
-      </size>
-     </property>
-     <property name="maximumSize">
-      <size>
-       <width>64</width>
-       <height>64</height>
-      </size>
-     </property>
-     <property name="frameShape">
-      <enum>QFrame::Shape::NoFrame</enum>
-     </property>
-     <property name="frameShadow">
-      <enum>QFrame::Shadow::Plain</enum>
-     </property>
-     <property name="verticalScrollBarPolicy">
-      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-     </property>
-     <property name="horizontalScrollBarPolicy">
-      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-     </property>
-     <property name="interactive">
-      <bool>false</bool>
-     </property>
-    </widget>
+   <item>
+    <layout class="QHBoxLayout" name="bottomRow">
+     <property name="spacing"><number>10</number></property>
+     <property name="leftMargin"><number>0</number></property>
+     <property name="topMargin"><number>0</number></property>
+     <property name="rightMargin"><number>0</number></property>
+     <property name="bottomMargin"><number>0</number></property>
+     <item>
+      <widget class="QPushButton" name="deleteProfile">
+       <property name="text"><string>Delete profile</string></property>
+       <property name="pill" stdset="0"><bool>true</bool></property>
+       <property name="kind" stdset="0"><string notr="true">destructive</string></property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="spacer2">
+       <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+       <property name="sizeType"><enum>QSizePolicy::Policy::Expanding</enum></property>
+       <property name="sizeHint"><size><width>0</width><height>0</height></size></property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QDialogButtonBox" name="buttonBox">
+       <property name="standardButtons"><set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Save</set></property>
+      </widget>
+     </item>
+    </layout>
    </item>
   </layout>
  </widget>
  <resources/>
  <connections>
-  <connection>
-   <sender>buttonBox</sender>
-   <signal>accepted()</signal>
-   <receiver>NewUserDialog</receiver>
-   <slot>accept()</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>248</x>
-     <y>254</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>157</x>
-     <y>274</y>
-    </hint>
-   </hints>
-  </connection>
-  <connection>
-   <sender>buttonBox</sender>
-   <signal>rejected()</signal>
-   <receiver>NewUserDialog</receiver>
-   <slot>reject()</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>316</x>
-     <y>260</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>286</x>
-     <y>274</y>
-    </hint>
-   </hints>
-  </connection>
+  <connection><sender>buttonBox</sender><signal>accepted()</signal><receiver>NewUserDialog</receiver><slot>accept()</slot></connection>
+  <connection><sender>buttonBox</sender><signal>rejected()</signal><receiver>NewUserDialog</receiver><slot>reject()</slot></connection>
  </connections>
 </ui>

@@ -14,6 +14,9 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaType>
+#include <QPainter>
+#include <QStyledItemDelegate>
+#include <QTextDocument>
 #include <QTime>
 #include <QUrl>
 #include <QtConcurrentRun>
@@ -23,9 +26,18 @@
 #include "qt_common/game_list/game_list_p.h"
 #include "lichii/multiplayer/chat_room.h"
 #include "lichii/multiplayer/message.h"
+#include "lichii/spotlight/menu.h"
+#include "lichii/spotlight/theme.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/web_backend.h"
 #endif
+
+namespace {
+
+constexpr std::array<const char*, 8> PlayerColors = {"#7EE2A8", "#8FB5FF", "#FFD37A", "#C9B3FF",
+                                                     "#FF8FAE", "#6FCACF", "#F7CD8A", "#E6A3E0"};
+
+} // namespace
 
 class ChatMessage {
 public:
@@ -60,42 +72,28 @@ public:
         return contains_ping;
     }
 
-    /// Format the message using the players color
     QString GetPlayerChatMessage(u16 player) const {
-        const bool is_dark_theme = QIcon::themeName().contains(QStringLiteral("dark")) ||
-                                   QIcon::themeName().contains(QStringLiteral("midnight"));
-        auto color =
-            is_dark_theme ? player_color_dark[player % 16] : player_color_default[player % 16];
         QString name;
         if (username.isEmpty() || username == nickname) {
             name = nickname;
         } else {
             name = QStringLiteral("%1 (%2)").arg(nickname, username);
         }
-
-        QString style, text_color;
+        QString text = message.toHtmlEscaped();
         if (ContainsPing()) {
-            // Add a background color to these messages
-            style = QStringLiteral("background-color: %1").arg(QString::fromStdString(ping_color));
-            // Add a font color
-            text_color = QStringLiteral("color='#000000'");
+            text = QStringLiteral("<span style='background-color: #4d2a3a;'>%1</span>").arg(text);
         }
-
-        return QStringLiteral("[%1] <font color='%2'>&lt;%3&gt;</font> <font style='%4' "
-                              "%5>%6</font>")
-            .arg(timestamp, QString::fromStdString(color), name.toHtmlEscaped(), style, text_color,
-                 message.toHtmlEscaped());
+        return QStringLiteral("<table width='100%' cellspacing='0' cellpadding='0' "
+                              "style='margin-top: 4px;'><tr><td><span style='color: %1; "
+                              "font-weight: 600;'>%2</span></td><td align='right'><span "
+                              "style='font-family: monospace; font-size: 12px; color: "
+                              "rgba(255, 255, 255, 158);'>%3</span></td></tr></table>"
+                              "<div style='color: #ffffff;'>%4</div>")
+            .arg(QLatin1StringView(PlayerColors[player % PlayerColors.size()]),
+                 name.toHtmlEscaped(), timestamp, text);
     }
 
 private:
-    static constexpr std::array<const char*, 16> player_color_default = {
-        {"#0000FF", "#FF0000", "#8A2BE2", "#FF69B4", "#1E90FF", "#008000", "#00FF7F", "#B22222",
-         "#DAA520", "#FF4500", "#2E8B57", "#5F9EA0", "#D2691E", "#9ACD32", "#FF7F50", "#FFFF00"}};
-    static constexpr std::array<const char*, 16> player_color_dark = {
-        {"#559AD1", "#4EC9A8", "#D69D85", "#C6C923", "#B975B5", "#D81F1F", "#7EAE39", "#4F8733",
-         "#F7CD8A", "#6FCACF", "#CE4897", "#8A2BE2", "#D2691E", "#9ACD32", "#FF7F50", "#152ccd"}};
-    static constexpr char ping_color[] = "#FFFF00";
-
     QString timestamp;
     QString nickname;
     QString username;
@@ -105,22 +103,20 @@ private:
 
 class StatusMessage {
 public:
-    explicit StatusMessage(const QString& msg, QTime ts = {}) {
-        /// Convert the time to their default locale defined format
-        QLocale locale;
-        timestamp = locale.toString(ts.isValid() ? ts : QTime::currentTime(), QLocale::ShortFormat);
-        message = msg;
-    }
+    explicit StatusMessage(const QString& msg, bool is_success)
+        : message{msg}, success{is_success} {}
 
     QString GetSystemChatMessage() const {
-        return QStringLiteral("[%1] <font color='%2'>* %3</font>")
-            .arg(timestamp, QString::fromStdString(system_color), message);
+        return QStringLiteral("<div style='margin-top: 4px; color: rgba(255, 255, 255, 158);'><img "
+                              "src='chat:%1' width='14' height='14' style='vertical-align: "
+                              "middle;'>&nbsp;&nbsp;%2</div>")
+            .arg(success ? QStringLiteral("success") : QStringLiteral("info"),
+                 message.toHtmlEscaped());
     }
 
 private:
-    static constexpr const char system_color[] = "#FF8C00";
-    QString timestamp;
     QString message;
+    bool success;
 };
 
 class PlayerListItem : public QStandardItem {
@@ -169,6 +165,75 @@ public:
     }
 };
 
+namespace {
+
+constexpr int MemberRowHeight = 57;
+
+class MemberDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex&) const override {
+        return {option.rect.width(), MemberRowHeight};
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRect row = option.rect;
+        if (option.state & (QStyle::State_Selected | QStyle::State_MouseOver)) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(Spotlight::Color::FillFaint());
+            painter->drawRect(row);
+        }
+        if (index.row() + 1 < index.model()->rowCount()) {
+            painter->fillRect(QRect(row.left() + 14, row.bottom(), row.width() - 28, 1),
+                              Spotlight::Color::Divider());
+        }
+        const QRectF avatar(row.left() + 14, row.top() + (row.height() - 32) / 2.0, 32, 32);
+        const QPixmap picture = index.data(Qt::DecorationRole).value<QPixmap>();
+        const QString nickname = index.data(PlayerListItem::NicknameRole).toString();
+        if (!picture.isNull()) {
+            Spotlight::PaintWholeIcon(*painter, avatar, picture, 10);
+        } else {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(Spotlight::Color::Fill());
+            painter->drawRoundedRect(avatar, 10, 10);
+            painter->setPen(
+                QColor(QLatin1StringView(PlayerColors[index.row() % PlayerColors.size()])));
+            painter->setFont(Spotlight::Font(12, 600));
+            painter->drawText(avatar, Qt::AlignCenter, nickname.left(1).toUpper());
+        }
+        const QString username = index.data(PlayerListItem::UsernameRole).toString();
+        const QString name = username.isEmpty() || username == nickname
+                                 ? nickname
+                                 : QStringLiteral("%1 (%2)").arg(nickname, username);
+        QString game = index.data(PlayerListItem::GameNameRole).toString();
+        const QString version = index.data(PlayerListItem::GameVersionRole).toString();
+        if (!version.isEmpty()) {
+            game = QStringLiteral("%1 (%2)").arg(game, version);
+        }
+        const int text_left = row.left() + 14 + 32 + 12;
+        const int text_width = row.right() - 14 - text_left;
+        const QFont name_font = Spotlight::Font(14, 600);
+        const QFont game_font = Spotlight::Font(12, 400);
+        painter->setFont(name_font);
+        painter->setPen(Spotlight::Color::Text());
+        painter->drawText(QRect(text_left, row.top() + 10, text_width, 19),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(name_font).elidedText(name, Qt::ElideRight, text_width));
+        painter->setFont(game_font);
+        painter->setPen(Spotlight::Color::TextSecondary());
+        painter->drawText(QRect(text_left, row.top() + 30, text_width, 16),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(game_font).elidedText(game, Qt::ElideRight, text_width));
+        painter->restore();
+    }
+};
+
+} // namespace
+
 ChatRoom::ChatRoom(QWidget* parent) : QWidget(parent), ui(std::make_unique<Ui::ChatRoom>()) {
     ui->setupUi(this);
 
@@ -180,12 +245,32 @@ ChatRoom::ChatRoom(QWidget* parent) : QWidget(parent), ui(std::make_unique<Ui::C
     // set a header to make it look better though there is only one column
     player_list->insertColumns(0, 1);
     player_list->setHeaderData(0, Qt::Horizontal, tr("Members"));
+    ui->player_view->setHeaderHidden(true);
+    ui->player_view->setRootIsDecorated(false);
+    ui->player_view->setItemDelegate(new MemberDelegate(ui->player_view));
+    ui->player_view->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    ui->player_view->setFixedWidth(234);
+    ui->player_view->setStyleSheet(
+        QStringLiteral("QTreeView { background-color: rgba(255, 255, 255, 13); border: 1px solid "
+                       "rgba(255, 255, 255, 20); border-radius: 16px; }"));
+    ui->player_view->ensurePolished();
+
+    ui->chat_label->setFont(Spotlight::Font(13, 600));
+    ui->members_label->setFont(Spotlight::Font(11, 600));
+    ui->members_label->setStyleSheet(
+        QStringLiteral("color: rgba(255, 255, 255, 158); letter-spacing: 1px;"));
 
     ui->chat_history->document()->setMaximumBlockCount(max_chat_lines);
+    ui->chat_history->setFont(Spotlight::Font(14, 400));
+    ui->chat_history->setStyleSheet(
+        QStringLiteral("QTextEdit { background-color: rgba(255, 255, 255, 13); border: 1px solid "
+                       "rgba(255, 255, 255, 20); border-radius: 16px; padding: 8px 10px; }"));
+    AddIconResources();
 
-    auto font = ui->chat_history->font();
-    font.setPointSizeF(10);
-    ui->chat_history->setFont(font);
+    ui->send_message->setIcon(Spotlight::Icon(u"paper-plane-tilt", Spotlight::Color::Text(), 16));
+    ui->send_message->setMinimumHeight(40);
+    ui->send_message->setAutoDefault(false);
+    ui->chat_message->setMinimumHeight(40);
 
     // register the network structs to use in slots and signals
     qRegisterMetaType<Network::ChatEntry>();
@@ -227,11 +312,23 @@ void ChatRoom::RetranslateUi() {
 
 void ChatRoom::Clear() {
     ui->chat_history->clear();
+    AddIconResources();
     block_list.clear();
 }
 
-void ChatRoom::AppendStatusMessage(const QString& msg) {
-    ui->chat_history->append(StatusMessage(msg).GetSystemChatMessage());
+void ChatRoom::AddIconResources() {
+    auto* document = ui->chat_history->document();
+    const qreal ratio = devicePixelRatioF();
+    document->addResource(
+        QTextDocument::ImageResource, QUrl(QStringLiteral("chat:info")),
+        Spotlight::IconPixmap(u"info", 14, Spotlight::Color::TextSecondary(), ratio));
+    document->addResource(
+        QTextDocument::ImageResource, QUrl(QStringLiteral("chat:success")),
+        Spotlight::IconPixmap(u"check-circle", 14, Spotlight::Color::Success(), ratio));
+}
+
+void ChatRoom::AppendStatusMessage(const QString& msg, bool success) {
+    ui->chat_history->append(StatusMessage(msg, success).GetSystemChatMessage());
 }
 
 void ChatRoom::AppendChatMessage(const QString& msg) {
@@ -372,8 +469,7 @@ void ChatRoom::UpdateIconDisplay() {
         if (icon_cache.count(avatar_url)) {
             item->setData(icon_cache.at(avatar_url), Qt::DecorationRole);
         } else {
-            item->setData(QIcon::fromTheme(QStringLiteral("no_avatar")).pixmap(48),
-                          Qt::DecorationRole);
+            item->setData(QVariant(), Qt::DecorationRole);
         }
     }
 }
@@ -422,6 +518,8 @@ void ChatRoom::SetPlayerList(const Network::RoomMember::MemberList& member_list)
         player_list->invisibleRootItem()->appendRow(name_item);
     }
     UpdateIconDisplay();
+    ui->player_view->setMaximumHeight(std::max(1, player_list->rowCount()) * MemberRowHeight +
+                                      2 * ui->player_view->frameWidth());
     // TODO(B3N30): Restore row selection
 }
 
@@ -439,11 +537,15 @@ void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
     std::string nickname =
         player_list->item(item.row())->data(PlayerListItem::NicknameRole).toString().toStdString();
 
-    QMenu context_menu;
+    Spotlight::Menu context_menu;
+    const auto icon = [](QStringView name, const QColor& color = Spotlight::Color::MenuInk()) {
+        return Spotlight::Icon(name, color, 16);
+    };
 
     QString username = player_list->item(item.row())->data(PlayerListItem::UsernameRole).toString();
     if (!username.isEmpty()) {
-        QAction* view_profile_action = context_menu.addAction(tr("View Profile"));
+        QAction* view_profile_action =
+            context_menu.addAction(icon(u"user-circle"), tr("View Profile"));
         connect(view_profile_action, &QAction::triggered, [username] {
             QDesktopServices::openUrl(
                 QUrl(QStringLiteral("https://community.citra-emu.org/u/%1").arg(username)));
@@ -465,7 +567,7 @@ void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
             if (block_list.count(nickname)) {
                 block_list.erase(nickname);
             } else {
-                QMessageBox::StandardButton result = QMessageBox::question(
+                QMessageBox::StandardButton result = QMessageBox::warning(
                     this, tr("Block Player"),
                     tr("When you block a player, you will no longer receive chat messages from "
                        "them.<br><br>Are you sure you would like to block %1?")
@@ -480,20 +582,21 @@ void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
     if (has_mod_perms && nickname != cur_nickname) { // You can't kick or ban yourself
         context_menu.addSeparator();
 
-        QAction* kick_action = context_menu.addAction(tr("Kick"));
-        QAction* ban_action = context_menu.addAction(tr("Ban"));
+        QAction* kick_action = context_menu.addAction(icon(u"sign-out"), tr("Kick"));
+        QAction* ban_action =
+            context_menu.addAction(icon(u"prohibit", Spotlight::Color::AccentLight()), tr("Ban"));
 
         connect(kick_action, &QAction::triggered, [this, nickname] {
             QMessageBox::StandardButton result =
-                QMessageBox::question(this, tr("Kick Player"),
-                                      tr("Are you sure you would like to <b>kick</b> %1?")
-                                          .arg(QString::fromStdString(nickname)),
-                                      QMessageBox::Yes | QMessageBox::No);
+                QMessageBox::warning(this, tr("Kick Player"),
+                                     tr("Are you sure you would like to <b>kick</b> %1?")
+                                         .arg(QString::fromStdString(nickname)),
+                                     QMessageBox::Yes | QMessageBox::No);
             if (result == QMessageBox::Yes)
                 SendModerationRequest(Network::IdModKick, nickname);
         });
         connect(ban_action, &QAction::triggered, [this, nickname] {
-            QMessageBox::StandardButton result = QMessageBox::question(
+            QMessageBox::StandardButton result = QMessageBox::warning(
                 this, tr("Ban Player"),
                 tr("Are you sure you would like to <b>kick and ban</b> %1?\n\nThis would "
                    "ban both their forum username and their IP address.")

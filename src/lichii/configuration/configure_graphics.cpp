@@ -382,6 +382,18 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             nvidia_dlss_panel = new NvidiaDlssPanel(group);
             group_layout->addWidget(nvidia_dlss_panel);
             hold_graphics.emplace(setting->Id(), group);
+        } else if (auto* options = nvidia_dlss_panel != nullptr
+                                       ? nvidia_dlss_panel->findChild<QVBoxLayout*>(
+                                             QStringLiteral("dlssRuntimeOptions"))
+                                       : nullptr;
+                   options != nullptr &&
+                   (setting->Id() == Settings::values.nvidia_dlss_quality.Id() ||
+                    setting->Id() == Settings::values.nvidia_dlss_preset.Id())) {
+            if (auto* row = qobject_cast<QBoxLayout*>(widget->layout())) {
+                row->setDirection(QBoxLayout::TopToBottom);
+                row->setSpacing(6);
+            }
+            options->addWidget(widget);
 #endif
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             // AMD's files and a download button under the checkbox, shown for GPUs FSR 4 runs on.

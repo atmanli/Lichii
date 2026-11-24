@@ -6,13 +6,13 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 #include <QVariant>
-#include "network/network.h"
 #include "lichii/multiplayer/chat_room.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/dialog.h"
+#include "network/network.h"
 
 namespace Ui {
 class HostRoom;
@@ -28,11 +28,15 @@ class ComboBoxProxyModel;
 
 class ChatMessage;
 
+namespace Spotlight {
+class SegmentedControl;
+}
+
 namespace Network::VerifyUser {
 class Backend;
 };
 
-class HostRoomWindow : public QDialog {
+class HostRoomWindow : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -59,6 +63,7 @@ private:
     std::weak_ptr<Core::AnnounceMultiplayerSession> announce_multiplayer_session;
     QStandardItemModel* game_list;
     ComboBoxProxyModel* proxy;
+    Spotlight::SegmentedControl* host_type;
     Validation validation;
     Core::System& system;
 };

@@ -21,19 +21,29 @@
 #endif
 #include "lichii/applets/qt_amiibo_settings.h"
 #include "lichii/main_window.h"
+#include "lichii/spotlight/theme.h"
 
 QtAmiiboSettingsDialog::QtAmiiboSettingsDialog(QWidget* parent,
                                                Core::Frontend::CabinetParameters parameters_,
                                                InputCommon::InputSubsystem* input_subsystem_,
                                                std::shared_ptr<Service::NFC::NfcDevice> nfp_device_)
-    : QDialog(parent), ui(std::make_unique<Ui::QtAmiiboSettingsDialog>()),
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::QtAmiiboSettingsDialog>()),
       input_subsystem{input_subsystem_}, nfp_device{std::move(nfp_device_)},
       parameters(std::move(parameters_)) {
     ui->setupUi(this);
+    SetIcon(u"wave-sine", Spotlight::Color::Accent());
+    SetCardWidth(420);
+    for (auto* label : {ui->amiiboDataLabel, ui->gameDataLabel, ui->MountAmiiboGroup}) {
+        QFont font = Spotlight::Font(11, 600);
+        font.setCapitalization(QFont::AllUppercase);
+        font.setLetterSpacing(QFont::AbsoluteSpacing, 1);
+        label->setFont(font);
+    }
+    ui->amiiboDirectoryValue->addAction(
+        Spotlight::Icon(u"file", Spotlight::Color::TextSecondary(), 16),
+        QLineEdit::LeadingPosition);
 
     LoadInfo();
-
-    resize(0, 0);
 }
 
 QtAmiiboSettingsDialog::~QtAmiiboSettingsDialog() = default;
@@ -42,6 +52,7 @@ int QtAmiiboSettingsDialog::exec() {
     if (!is_initialized) {
         return QDialog::Rejected;
     }
+    setWindowFlag(Qt::FramelessWindowHint);
     return QDialog::exec();
 }
 
@@ -193,6 +204,7 @@ void QtAmiiboSettingsDialog::LoadAmiiboGameInfo() {
     if (application_result.IsFailure()) {
         ui->gameIdValue->setVisible(false);
         ui->gameIdLabel->setText(tr("No game data present"));
+        ui->gameIdLabel->setStyleSheet(QStringLiteral("font-weight: 400;"));
         return;
     }
 
@@ -231,17 +243,16 @@ void QtAmiiboSettingsDialog::SetGameDataName(u32 application_area_id) {
 void QtAmiiboSettingsDialog::SetSettingsDescription() {
     switch (parameters.mode) {
     case Service::NFP::CabinetMode::StartFormatter:
-        ui->cabinetActionDescriptionLabel->setText(
-            tr("The following amiibo data will be formatted:"));
+        SetSubtitle(tr("The following amiibo data will be formatted:"));
         break;
     case Service::NFP::CabinetMode::StartGameDataEraser:
-        ui->cabinetActionDescriptionLabel->setText(tr("The following game data will removed:"));
+        SetSubtitle(tr("The following game data will removed:"));
         break;
     case Service::NFP::CabinetMode::StartNicknameAndOwnerSettings:
-        ui->cabinetActionDescriptionLabel->setText(tr("Set nickname and owner:"));
+        SetSubtitle(tr("Set nickname and owner:"));
         break;
     case Service::NFP::CabinetMode::StartRestorer:
-        ui->cabinetActionDescriptionLabel->setText(tr("Do you wish to restore this amiibo?"));
+        SetSubtitle(tr("Do you wish to restore this amiibo?"));
         break;
     }
 }

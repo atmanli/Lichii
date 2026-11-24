@@ -3,7 +3,7 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QPushButton;
 
@@ -23,7 +23,7 @@ namespace Ui {
 class ConfigureInputProfileDialog;
 }
 
-class ConfigureInputProfileDialog : public QDialog {
+class ConfigureInputProfileDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

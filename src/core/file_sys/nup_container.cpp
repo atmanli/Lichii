@@ -1301,8 +1301,17 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
         LOG_ERROR(Loader, "NUP integrity check could not create a hash or a decoder");
         return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
     }
-    std::vector<u8> input(InputChunk);
-    std::vector<u8> output(ZSTD_DStreamOutSize());
+    // A failed allocation fails the check, as a missing hash or decoder does, rather than leaving
+    // the call (an archive of empty members needs neither buffer, but they are made up front).
+    std::vector<u8> input;
+    std::vector<u8> output;
+    try {
+        input.resize(InputChunk);
+        output.resize(ZSTD_DStreamOutSize());
+    } catch (const std::bad_alloc&) {
+        LOG_ERROR(Loader, "NUP integrity check could not allocate its buffers");
+        return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+    }
 
     for (std::size_t i = 0; i < files.size(); ++i) {
         const FileNode& node = files[i];

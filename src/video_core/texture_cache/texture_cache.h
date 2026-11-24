@@ -262,14 +262,30 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             IsDownloadable(image) && HasGuestRange(image);
         const bool covered =
             overlap_writeback && OverlapHasNewerData(image_id, image, keep, &keep_ticks);
-        if (must_download && !out_of_memory && QueueCollectorDownload(image_id)) {
-            download_queued = true;
-            ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
-                for (auto& download : overlap_downloads) {
-                    WritebackRanges::KeepNewerBytes(download, begin, end, image.modification_tick);
-                }
+        // A collector may already have landed only part of this range. Keep an overlapping
+        // live image for a later pass; actual memory pressure drains the collectors above.
+        if (must_download && std::ranges::any_of(async_overlap_downloads, [&](const auto& pending) {
+                return pending.collector && !pending.cancelled &&
+                       pending.cpu_addr < image.cpu_addr_end &&
+                       image.cpu_addr < pending.cpu_addr + pending.size;
+            })) {
+            return false;
+        }
+        const bool local_overlap = must_download &&
+            std::ranges::any_of(overlap_downloads, [&](const auto& pending) {
+                return pending.cpu_addr < image.cpu_addr_end &&
+                       image.cpu_addr < pending.cpu_addr + pending.size;
             });
-            KeepInWaitingWritebacks(image, image.modification_tick);
+        bool collector_queued = false;
+        try {
+            collector_queued = must_download && !out_of_memory && !local_overlap &&
+                               QueueCollectorDownload(image_id);
+        } catch (const std::bad_alloc&) {
+            NoteHostOutOfMemory("queue collector write back", image);
+            return false;
+        }
+        if (collector_queued) {
+            download_queued = true;
             ++gc_download_deletes;
         } else if (must_download) {
             auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
@@ -659,6 +675,12 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
             image.guest_size_bytes > CollectorMaxBytes - collector_held_bytes) {
             return false;
         }
+        // Do not publish a collector then allocate keep ranges in other pending downloads.
+        // Non-collector overlaps use the existing synchronous path; collector overlaps are
+        // retained by the GC until their pending write-back finishes.
+        if (WritebackPendingOver(image.cpu_addr, image.guest_size_bytes)) {
+            return false;
+        }
         const auto memory = AddressSpaceMemory(image.address_space);
         if (!memory || memory->GpuToCpuAddress(image.gpu_addr) != image.cpu_addr ||
             !memory->IsContinuousRange(image.gpu_addr, image.guest_size_bytes)) {
@@ -683,9 +705,7 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
         KeepNewerLanded(image, image.modification_tick, keep);
         const auto keep_end = trace ? std::chrono::steady_clock::now() : start;
         collector_scratch.reserve(CollectorChunkBytes);
-        // Allocate the lifetime holder before removing the image from the cache.
-        auto source = std::make_shared<Image>(NullImageParams{});
-        async_overlap_downloads.push_back(AsyncOverlapDownload{
+        AsyncOverlapDownload download{
             .gpu_tick = 0,
             .gpu_addr = image.gpu_addr,
             .cpu_addr = image.cpu_addr,
@@ -699,25 +719,71 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
             .address_space = image.address_space,
             .collector = true,
             .collector_source_id = image_id,
-            .collector_source = std::move(source),
-        });
-        collector_held_bytes += image.guest_size_bytes;
-        ++collector_count;
+        };
+        // Reserve history before publishing the queue entry or its cached-page reference.
+        // A failed reserve may change capacity, but leaves every existing record unchanged.
+        const DAddr first_page = image.cpu_addr >> OverlapPageBits;
+        const DAddr last_page = (image.cpu_addr + image.guest_size_bytes - 1) >> OverlapPageBits;
+        std::vector<DAddr> new_ticks;
+        std::vector<DAddr> new_ranges;
+        new_ticks.reserve(last_page - first_page + 1);
+        new_ranges.reserve(last_page - first_page + 1);
+        bool enqueued = false;
+        bool committed = false;
+        SCOPE_EXIT {
+            if (!committed) {
+                if (enqueued) {
+                    async_overlap_downloads.pop_back();
+                }
+                for (DAddr page : new_ticks) {
+                    overlap_writeback_ticks.erase(page);
+                }
+                for (DAddr page : new_ranges) {
+                    overlap_writeback_ranges.erase(page);
+                }
+            }
+        };
+        for (DAddr page = first_page; page <= last_page; ++page) {
+            const bool tick_inserted = overlap_writeback_ticks.try_emplace(page).second;
+            if (tick_inserted) {
+                new_ticks.push_back(page);
+            }
+            const auto [ranges_it, ranges_inserted] = overlap_writeback_ranges.try_emplace(page);
+            if (ranges_inserted) {
+                new_ranges.push_back(page);
+            }
+            auto& records = ranges_it->second;
+            ASSERT(records.size() <= WritebackRanges::MaxPageRecords);
+            records.reserve(records.size() + 1);
+        }
+        // Allocate the lifetime holder before removing the image from the cache.
+        download.collector_source = std::make_shared<Image>(NullImageParams{});
+        async_overlap_downloads.push_back(std::move(download));
+        enqueued = true;
         const auto allocation_end = trace ? std::chrono::steady_clock::now() : start;
         device_memory.UpdatePagesCachedCount(image.cpu_addr, image.guest_size_bytes, 1);
         const auto pages_end = trace ? std::chrono::steady_clock::now() : start;
+        // Existing nodes and reserved vectors, including CapPageRecords' bounded scratch, do not
+        // allocate here. Only now may the image be detached and the queue own its page reference.
         NoteOverlapWriteback(image);
+        collector_held_bytes += image.guest_size_bytes;
+        ++collector_count;
+        committed = true;
         if (trace) {
             const auto finish = std::chrono::steady_clock::now();
             const auto us = [](auto elapsed) {
                 return std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
             };
-            LOG_INFO(Render_Vulkan,
-                     "TCTRACE collector-queue id={} gpu={:#x} bytes={} held={} us={} "
-                     "keep_us={} allocation_us={} pages_us={} records_us={}",
-                     image_id.Value(), image.gpu_addr, image.guest_size_bytes, collector_held_bytes,
-                     us(finish - start), us(keep_end - start), us(allocation_end - keep_end),
-                     us(pages_end - allocation_end), us(finish - pages_end));
+            try {
+                LOG_INFO(Render_Vulkan,
+                         "TCTRACE collector-queue id={} gpu={:#x} bytes={} held={} us={} "
+                         "keep_us={} allocation_us={} pages_us={} records_us={}",
+                         image_id.Value(), image.gpu_addr, image.guest_size_bytes, collector_held_bytes,
+                         us(finish - start), us(keep_end - start), us(allocation_end - keep_end),
+                         us(pages_end - allocation_end), us(finish - pages_end));
+            } catch (const std::bad_alloc&) {
+                // The entry is committed: logging failure must not skip its source transfer.
+            }
         }
         return true;
     }
@@ -775,18 +841,21 @@ void TextureCache<P>::LandCollectorChunk(AsyncOverlapDownload& download) {
     if (u64{chunk.width} * chunk.height * 2 != chunk.guest_size) {
         DAddr cursor = begin;
         for (const auto& [keep_begin, keep_end] : download.keep) {
-            if (keep_end <= cursor || keep_begin >= end) {
+            if (keep_begin >= end) {
+                break;
+            }
+            if (keep_end <= cursor) {
                 continue;
             }
             const DAddr next = (std::min)(keep_begin, end);
             if (cursor < next) {
-                device_memory.ReadBlockUnsafe(cursor, collector_scratch.data() + cursor - begin,
+                device_memory.ReadBlockUnsafe(cursor, collector_scratch.data() + (cursor - begin),
                                               next - cursor);
             }
             cursor = (std::max)(cursor, (std::min)(keep_end, end));
         }
         if (cursor < end) {
-            device_memory.ReadBlockUnsafe(cursor, collector_scratch.data() + cursor - begin,
+            device_memory.ReadBlockUnsafe(cursor, collector_scratch.data() + (cursor - begin),
                                           end - cursor);
         }
     }
@@ -799,19 +868,24 @@ void TextureCache<P>::LandCollectorChunk(AsyncOverlapDownload& download) {
     // by the actual store while this queue lands. Never touching those bytes preserves both.
     DAddr cursor = begin;
     for (const auto& [keep_begin, keep_end] : download.keep) {
-        if (keep_end <= cursor || keep_begin >= end) {
+        if (keep_begin >= end) {
+            break;
+        }
+        if (keep_end <= cursor) {
             continue;
         }
         const DAddr next = (std::min)(keep_begin, end);
         if (cursor < next) {
-            device_memory.WriteBlockUnsafe(cursor, collector_scratch.data() + cursor - begin,
+            device_memory.WriteBlockUnsafe(cursor, collector_scratch.data() + (cursor - begin),
                                            next - cursor);
+            ClearStale(cursor, next - cursor);
         }
         cursor = (std::max)(cursor, (std::min)(keep_end, end));
     }
     if (cursor < end) {
-        device_memory.WriteBlockUnsafe(cursor, collector_scratch.data() + cursor - begin,
+        device_memory.WriteBlockUnsafe(cursor, collector_scratch.data() + (cursor - begin),
                                        end - cursor);
+        ClearStale(cursor, end - cursor);
     }
     download.collector_cursor += chunk.guest_size;
     if (trace) {
@@ -880,7 +954,6 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
                 }
                 const auto staging_end = trace_tail ? std::chrono::steady_clock::now() : tail_begin;
                 if (!download.cancelled) {
-                    ClearStale(download.cpu_addr, download.size);
                     ReloadUnderLanded(download.cpu_addr, download.size, download.tick);
                 }
                 collector_held_bytes -= download.size;
@@ -1392,7 +1465,24 @@ template <class P>
 void TextureCache<P>::KeepNewerLanded(const ImageBase& image, u64 tick, KeepRanges& keep,
                                       std::span<const WritebackRanges::TickedRange> queued) {
     keep.clear();
+    // Unlike a whole-image transfer, a collector can have visible bytes while still pending.
+    // Protect only its landed prefix from older synchronous or asynchronous snapshots.
+    if (collector_count != 0) {
+        ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
+            for (const auto& pending : async_overlap_downloads) {
+                if (!pending.collector || pending.cancelled || pending.tick <= tick) {
+                    continue;
+                }
+                const DAddr first = (std::max)(begin, pending.cpu_addr);
+                const DAddr last = (std::min)(end, pending.cpu_addr + pending.collector_cursor);
+                if (first < last) {
+                    keep.emplace_back(first, last);
+                }
+            }
+        });
+    }
     if (overlap_writeback_ranges.empty()) {
+        WritebackRanges::MergeRanges(keep);
         return;
     }
     const auto waiting = [this, queued](const WritebackRange& range) {

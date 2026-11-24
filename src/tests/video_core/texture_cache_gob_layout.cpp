@@ -4,7 +4,9 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -32,20 +34,23 @@ struct TestAsyncBuffer {
 
 struct TestRuntime {
     TestAsyncBuffer DownloadStagingBuffer(size_t size, bool deferred = false) {
-        REQUIRE(deferred);
-        staging.resize(size);
         max_download_bytes = (std::max)(max_download_bytes, size);
         ++downloads;
-        return {staging};
+        return AllocateStaging(size);
     }
-    void FreeDeferredStagingBuffer(TestAsyncBuffer&) {
-        staging.clear();
+    TestAsyncBuffer AllocateStaging(size_t size) {
+        staging.push_back(std::make_unique<std::vector<u8>>(size));
+        return {*staging.back()};
+    }
+    void FreeDeferredStagingBuffer(TestAsyncBuffer& map) {
+        std::erase_if(staging, [&](const auto& buffer) {
+            return buffer->data() == map.mapped_span.data();
+        });
         freed_staging_tick = CurrentTick();
     }
     TestAsyncBuffer UploadStagingBuffer(size_t size, bool deferred = false) {
         REQUIRE(deferred);
-        staging.resize(size);
-        return {staging};
+        return AllocateStaging(size);
     }
     void AccelerateImageUpload(auto&, const TestAsyncBuffer&,
                                std::span<const VideoCommon::SwizzleParameters>, u32, u32) {
@@ -70,7 +75,7 @@ struct TestRuntime {
     bool HasNativeBgr() const {
         return false;
     }
-    std::vector<u8> staging;
+    std::vector<std::unique_ptr<std::vector<u8>>> staging;
     u64 current_tick{1};
     u64 completed_tick{};
     u64 freed_staging_tick{};
@@ -85,7 +90,12 @@ struct TestImage : VideoCommon::ImageBase {
     TestImage(TestRuntime&, const VideoCommon::ImageInfo& image_info, GPUVAddr gpu_address,
               DAddr cpu_address)
         : ImageBase{image_info, gpu_address, cpu_address} {}
-    explicit TestImage(const VideoCommon::NullImageParams& params) : ImageBase{params} {}
+    explicit TestImage(const VideoCommon::NullImageParams& params) : ImageBase{params} {
+        if (fail_holder_allocation) {
+            throw std::bad_alloc{};
+        }
+    }
+    static inline bool fail_holder_allocation{};
     TestImage(TestImage&&) = default;
     TestImage& operator=(TestImage&&) = default;
     void DownloadMemory(const TestAsyncBuffer& map,
@@ -213,6 +223,49 @@ struct TextureCacheTestAccess {
     template <class C>
     static bool CollectDownload(C& cache, ImageId id) {
         return cache.QueueCollectorDownload(id);
+    }
+    template <class C>
+    static void FinishWritebacks(C& cache) {
+        cache.FinishAsyncOverlapDownloads(true);
+    }
+    template <class C>
+    static void CollectPass(C& cache) {
+        cache.frame_tick = 10000;
+        cache.expected_memory = 1;
+        cache.critical_memory = ~u64{0};
+        cache.RunGarbageCollector(false, false);
+    }
+    template <class C>
+    static bool Contains(const C& cache, ImageId id) {
+        return cache.slot_images.contains(id);
+    }
+    template <class C>
+    static auto CollectorState(const C& cache) {
+        return std::tuple{cache.collector_count, cache.collector_held_bytes,
+                          cache.async_overlap_downloads.size()};
+    }
+    template <class C>
+    static void MarkStale(C& cache, const ImageBase& image) {
+        cache.MarkStale(image);
+    }
+    template <class C>
+    static bool Stale(const C& cache, DAddr addr, u64 size) {
+        return cache.stale_pages.IsAll(addr, size);
+    }
+    template <class C>
+    static void NoteWriteback(C& cache, const ImageBase& image) {
+        cache.NoteOverlapWriteback(image);
+    }
+    template <class C>
+    static auto History(const C& cache) {
+        std::vector<std::tuple<DAddr, DAddr, DAddr, u64, bool>> result;
+        for (const auto& [page, ranges] : cache.overlap_writeback_ranges) {
+            for (const auto& range : ranges) {
+                result.emplace_back(page, range.begin, range.end, range.tick, range.lost);
+            }
+        }
+        std::ranges::sort(result);
+        return result;
     }
     template <class C>
     static void NoteFlushed(C& cache, const ImageBase& image, u64 tick) {
@@ -431,6 +484,185 @@ TEST_CASE("An evicted depth image survives slot reuse and intervening byte write
     cache.DownloadMemory(cpu + size - 1, 1);
     CHECK(f.runtime.max_download_bytes <= (4U << 20));
     CHECK(std::equal(expected.begin(), expected.end(), f.bytes));
+}
+
+TEST_CASE("An older collector queued behind newer data preserves that data",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    const auto older = Access::Insert(cache, info, gpu, cpu);
+    Access::WriteGpu(cache, older, std::vector<u8>(size, 0x28));
+    const auto newer = Access::Insert(cache, info, gpu, cpu);
+    Access::WriteGpu(cache, newer, std::vector<u8>(size, 0xC3));
+    REQUIRE(Access::CollectDownload(cache, newer));
+    Access::Delete(cache, newer);
+    SECTION("The newer image has not started landing") {}
+    SECTION("The newer image has already landed its first chunk") {
+        Access::PollWritebacks(cache);
+        f.runtime.completed_tick = f.runtime.current_tick++;
+        Access::PollWritebacks(cache);
+        REQUIRE(f.bytes[0] == 0xC3);
+        REQUIRE(f.bytes[size - 1] == 0);
+    }
+    REQUIRE_FALSE(Access::CollectDownload(cache, older));
+    const auto downloads = f.runtime.downloads;
+    Access::CollectPass(cache);
+    CHECK(Access::Contains(cache, older));
+    CHECK(f.runtime.downloads == downloads);
+    f.runtime.allow_wait = true;
+    Access::FinishWritebacks(cache);
+    REQUIRE(Access::CollectDownload(cache, older));
+    Access::Delete(cache, older);
+    Access::FinishWritebacks(cache);
+    CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0xC3; }));
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+}
+
+TEST_CASE("A pending collector protects its landed prefix from an older color flush",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr u32 first_chunk = 2U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto color = MakeInfo();
+    color.size = {4096, 2048, 1};
+    color.block = {0, 5, 0};
+    color.native_tiling = true;
+    const auto older = Access::Insert(cache, color, gpu, cpu);
+    Access::WriteGpu(cache, older, std::vector<u8>(size, 0x28));
+    Access::QueueDownload(cache, older);
+    cache.CommitAsyncFlushes();
+
+    auto depth = color;
+    depth.format = PixelFormat::D16_UNORM;
+    depth.size = {4096, 4096, 1};
+    const auto newer = Access::Insert(cache, depth, gpu, cpu);
+    Access::WriteGpu(cache, newer, std::vector<u8>(size, 0xC3));
+    REQUIRE(Access::CollectDownload(cache, newer));
+    Access::Delete(cache, newer);
+    Access::PollWritebacks(cache);
+    f.runtime.completed_tick = f.runtime.current_tick++;
+    Access::PollWritebacks(cache);
+    REQUIRE(f.bytes[0] == 0xC3);
+    REQUIRE(f.bytes[first_chunk] == 0);
+
+    // This non-D16 image cannot use collector chunking either. The real GC must retain it.
+    const auto downloads = f.runtime.downloads;
+    Access::CollectPass(cache);
+    REQUIRE(Access::Contains(cache, older));
+    CHECK(f.runtime.downloads == downloads);
+    cache.PopAsyncFlushes();
+    CHECK(std::all_of(f.bytes, f.bytes + first_chunk, [](u8 byte) { return byte == 0xC3; }));
+    CHECK(std::all_of(f.bytes + first_chunk, f.bytes + size,
+                      [](u8 byte) { return byte == 0x28; }));
+    f.runtime.allow_wait = true;
+    Access::FinishWritebacks(cache);
+    CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0xC3; }));
+}
+
+TEST_CASE("Collector landing clears stale pages only when it writes them",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    const bool old_ampere = Tegra::g_nx2_ampere.exchange(true);
+    SCOPE_EXIT { Tegra::g_nx2_ampere.store(old_ampere); };
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    const auto id = Access::Insert(cache, info, gpu, cpu);
+    Access::WriteGpu(cache, id, std::vector<u8>(size, 0x45));
+    Access::MarkStale(cache, Access::Image(cache, id));
+    REQUIRE(Access::Stale(cache, cpu, 4096));
+    REQUIRE(Access::CollectDownload(cache, id));
+    Access::Delete(cache, id);
+    Access::PollWritebacks(cache);
+    f.runtime.completed_tick = f.runtime.current_tick++;
+    Access::PollWritebacks(cache);
+    REQUIRE(f.bytes[0] == 0x45);
+    CHECK_FALSE(Access::Stale(cache, cpu, 4096));
+
+    auto page_info = MakeInfo();
+    page_info.size = {32, 32, 1};
+    ImageBase later_lost{page_info, gpu, cpu};
+    later_lost.flags = ImageFlagBits::GpuModified;
+    Access::MarkStale(cache, later_lost);
+    constexpr u32 kept_offset = size / 2;
+    cache.WriteMemory(cpu + kept_offset, 4096);
+    std::fill_n(f.bytes + kept_offset, 4096, 0xE9);
+    later_lost.cpu_addr = cpu + kept_offset;
+    Access::MarkStale(cache, later_lost);
+    REQUIRE(Access::Stale(cache, cpu + kept_offset, 4096));
+
+    f.runtime.allow_wait = true;
+    cache.DownloadMemory(cpu + size - 1, 1);
+    CHECK(Access::Stale(cache, cpu, 4096));
+    CHECK(Access::Stale(cache, cpu + kept_offset, 4096));
+    CHECK_FALSE(Access::Stale(cache, cpu + size - 4096, 4096));
+    CHECK(std::all_of(f.bytes + kept_offset, f.bytes + kept_offset + 4096,
+                      [](u8 byte) { return byte == 0xE9; }));
+    CHECK(f.bytes[size - 1] == 0x45);
+}
+
+TEST_CASE("Collector allocation failure leaves the live image and history intact",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    const auto id = Access::Insert(cache, info, gpu, cpu);
+    Access::WriteGpu(cache, id, std::vector<u8>(size, 0x65));
+    ImageBase existing{MakeInfo(), gpu + 8192, cpu + 8192};
+    Access::NoteWriteback(cache, existing);
+    const auto pages = Access::WritebackPageCounts(cache);
+    const auto history = Access::History(cache);
+    const auto watched = f.device.IsRangeCached(cpu, size);
+    // Fail after reserving all history nodes, but before publishing the collector entry.
+    TestImage::fail_holder_allocation = true;
+    SCOPE_EXIT { TestImage::fail_holder_allocation = false; };
+    REQUIRE_THROWS_AS(Access::CollectDownload(cache, id), std::bad_alloc);
+    CHECK(Access::WritebackPageCounts(cache) == pages);
+    CHECK(Access::History(cache) == history);
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(f.device.IsRangeCached(cpu, size) == watched);
+    CHECK(Access::Image(cache, id).gpu_bytes.size() == size);
+    CHECK(f.runtime.downloads == 0);
+    REQUIRE_NOTHROW(Access::CollectPass(cache));
+    CHECK(Access::Contains(cache, id));
+    CHECK(Access::WritebackPageCounts(cache) == pages);
+    CHECK(Access::History(cache) == history);
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(f.runtime.downloads == 0);
+    TestImage::fail_holder_allocation = false;
+    REQUIRE(Access::CollectDownload(cache, id));
+    Access::Delete(cache, id);
+    f.runtime.allow_wait = true;
+    cache.DownloadMemory(cpu, size);
+    CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0x65; }));
 }
 
 TEST_CASE("Async image downloads and the delete tick both hold the image alive",

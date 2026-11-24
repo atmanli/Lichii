@@ -544,6 +544,20 @@ bool ComputePipelineCacheKey::operator==(const ComputePipelineCacheKey& rhs) con
     return std::memcmp(&rhs, this, sizeof *this) == 0;
 }
 
+size_t ComputePipelineLookupKey::Hash() const noexcept {
+    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(this), sizeof *this);
+    return static_cast<size_t>(hash);
+}
+
+bool ComputePipelineLookupKey::operator==(const ComputePipelineLookupKey& rhs) const noexcept {
+    return std::memcmp(&rhs, this, sizeof *this) == 0;
+}
+
+ComputePipelineLookupKey RecordLookupKey(const ComputePipelineCacheKey& key,
+                                         const VideoCommon::FileEnvironment& env) {
+    return {key, env.LocalMemorySize(), env.RecordedLocalMemoryHighSize().value_or(0U)};
+}
+
 size_t GraphicsPipelineCacheKey::Hash() const noexcept {
     const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(this), Size());
     return static_cast<size_t>(hash);
@@ -1155,6 +1169,14 @@ bool PipelineCache::StaleNullPointerSlot(const ComputePipelineCacheEntry& entry)
     return false;
 }
 
+ComputePipelineLookupKey PipelineCache::DispatchLookupKey(
+    const ComputePipelineCacheKey& key) const {
+    const auto& qmd{kepler_compute->launch_description};
+    const u32 high{kepler_compute->IsNativeMode() ? static_cast<u32>(qmd.local_crs_alloc.Value())
+                                                  : 0U};
+    return {key, qmd.local_pos_alloc + qmd.local_crs_alloc, high};
+}
+
 ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
     VideoCommon::GpuSplit::BackOwned("PipelineCache::CurrentComputePipeline");
 
@@ -1169,23 +1191,30 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
-    const auto [pair, is_new]{compute_cache.try_emplace(key)};
-    auto& entry{pair->second};
+    const ComputePipelineLookupKey lookup{DispatchLookupKey(key)};
+    auto it{FindComputePipeline(compute_cache, lookup)};
+    const bool is_new{it == compute_cache.end()};
+    if (is_new) {
+        auto created{CreateComputePipeline(key, shader)};
+        const bool any_layout{created.pipeline && !created.uses_local_memory};
+        it = compute_cache.try_emplace(any_layout ? AnyLayoutKey(key) : lookup).first;
+        it->second = std::move(created);
+    }
+    ComputePipelineCacheEntry* entry{&it->second};
     const auto replace = [&](ComputePipelineCacheEntry&& rebuilt) {
-        if (entry.pipeline) {
-            retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
-                                                   std::move(entry.pipeline));
-        }
-        rebuilt.rebuilds = entry.rebuilds + 1;
-        rebuilt.used = entry.used;
-        entry = std::move(rebuilt);
+        it = PublishComputeRebuild(compute_cache, it, std::move(rebuilt),
+                                   [&](std::unique_ptr<ComputePipeline>&& pipeline) {
+                                       retired_compute_pipelines.emplace_back(
+                                           scheduler.CurrentTick(), std::move(pipeline));
+                                   });
+        entry = &it->second;
     };
     if (is_new) {
-        entry = CreateComputePipeline(key, shader);
-    } else if (entry.pending_rebuild) {
-        if (entry.pending_rebuild->pipeline->IsBuilt()) {
-            auto rebuilt{std::move(*entry.pending_rebuild)};
-            entry.pending_rebuild.reset();
+        // Built above
+    } else if (entry->pending_rebuild) {
+        if (entry->pending_rebuild->pipeline->IsBuilt()) {
+            auto rebuilt{std::move(*entry->pending_rebuild)};
+            entry->pending_rebuild.reset();
             if (rebuilt.pipeline->IsBound()) {
                 replace(std::move(rebuilt));
             } else {
@@ -1193,20 +1222,20 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
                             key.unique_hash);
                 retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
                                                        std::move(rebuilt.pipeline));
-                entry.rebuilds = MaxComputeRebuilds;
+                entry->rebuilds = MaxComputeRebuilds;
             }
         }
-    } else if (!entry.null_pointer_slots.empty() && entry.rebuilds < MaxComputeRebuilds &&
-               StaleNullPointerSlot(entry)) {
+    } else if (!entry->null_pointer_slots.empty() && entry->rebuilds < MaxComputeRebuilds &&
+               StaleNullPointerSlot(*entry)) {
         // The translation dropped accesses through a pointer that was null back then. Which slots
         // the game fills depends on the area, so the new one keeps binding every pointer this one
         // binds, null now or not: a null pointer binds nothing.
-        auto rebuilt{CreateComputePipeline(key, shader, entry.mapped_pointers)};
+        auto rebuilt{CreateComputePipeline(key, shader, entry->mapped_pointers)};
         // The current translation keeps running until the new one's driver compile is done.
-        if (rebuilt.pipeline && entry.pipeline && !rebuilt.pipeline->IsBuilt()) {
-            entry.pending_rebuild =
+        if (rebuilt.pipeline && entry->pipeline && !rebuilt.pipeline->IsBuilt()) {
+            entry->pending_rebuild =
                 std::make_unique<ComputePipelineCacheEntry>(std::move(rebuilt));
-        } else if (rebuilt.pipeline && (!entry.pipeline || rebuilt.pipeline->IsBound())) {
+        } else if (rebuilt.pipeline && (!entry->pipeline || rebuilt.pipeline->IsBound())) {
             replace(std::move(rebuilt));
         } else {
             // Keep the working translation when the new one cannot be built (for example a
@@ -1219,16 +1248,20 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
                 retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
                                                        std::move(rebuilt.pipeline));
             }
-            entry.rebuilds = MaxComputeRebuilds;
+            entry->rebuilds = MaxComputeRebuilds;
         }
     }
-    if (VideoCommon::StutterTrace::Enabled() && !std::exchange(entry.used, true)) {
+    if (!ServesLookup(it->first, lookup)) {
+        // A rebuild for another dispatch's layout finished: this one needs its own.
+        return CurrentComputePipeline(native_key);
+    }
+    if (VideoCommon::StutterTrace::Enabled() && !std::exchange(entry->used, true)) {
         VideoCommon::StutterTrace::CountLookup(
             is_new ? VideoCommon::StutterTrace::Lookup::ComputeNew
                    : VideoCommon::StutterTrace::Lookup::ComputePrebuilt);
     }
-    return entry.Get(kepler_compute->IsNativeMode(),
-                     kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
+    return entry->Get(kepler_compute->IsNativeMode(),
+                      kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
 ComputePipeline* PipelineCache::UnlentComputePipeline(u64& native_key) {
@@ -1243,7 +1276,7 @@ ComputePipeline* PipelineCache::UnlentComputePipeline(u64& native_key) {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
-    const auto it{compute_cache.find(key)};
+    const auto it{FindComputePipeline(compute_cache, DispatchLookupKey(key))};
     if (it == compute_cache.end()) {
         return nullptr;
     }
@@ -1813,6 +1846,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                             break;
                         }
                     }
+                    const ComputePipelineLookupKey lookup{
+                        !entry.pipeline              ? ComputePipelineLookupKey{}
+                        : entry.uses_local_memory ? RecordLookupKey(key, candidates[chosen].env)
+                                                  : AnyLayoutKey(key)};
                     std::scoped_lock lock{state.mutex};
                     AddUnchosenComputeTranslations(candidates, chosen, read_properties,
                                                    state.incomplete, state.copies);
@@ -1820,14 +1857,14 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                         built_one();
                         return {};
                     }
-                    return [this, &state, &built_one, key, entry = std::move(entry)]() mutable {
+                    return [this, &state, &built_one, lookup, entry = std::move(entry)]() mutable {
                         const auto begin = std::chrono::steady_clock::now();
                         entry.pipeline->Build();
                         const auto elapsed = std::chrono::steady_clock::now() - begin;
                         std::scoped_lock driver_lock{state.mutex};
                         state.driver_builds.Add(elapsed);
                         state.compute_built += entry.pipeline->IsBound() ? 1 : 0;
-                        compute_cache.emplace(key, std::move(entry));
+                        compute_cache.emplace(lookup, std::move(entry));
                         built_one();
                     };
                 },
@@ -2168,14 +2205,17 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::stop_token stop_loading,
                 ++file_entries;
                 // Programs already in the disk cache were built above, and those an earlier
                 // precache built before it was skipped are in the driver's cache; leave them out.
-                if (compute_cache.contains(key)) {
+                if (FindComputePipeline(compute_cache, RecordLookupKey(key, env)) !=
+                    compute_cache.end()) {
                     ++in_cache;
                     continue;
                 }
-                if (built_before.contains(key.Hash())) {
+                // Two layouts of one key are two programs (old progress entries match neither)
+                const u64 progress_key{RecordLookupKey(key, env).Hash()};
+                if (built_before.contains(progress_key)) {
                     continue;
                 }
-                job_keys.push_back(key.Hash());
+                job_keys.push_back(progress_key);
                 const u64 cpu_bytes = TranslationBytes(env.MemorySize());
                 jobs.push_back({
                     .translate = [this, key,
@@ -3733,6 +3773,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
     std::shared_ptr<ShaderPools> emit_pools = TakeSparePools();
     ShaderPools& pools = *emit_pools;
     auto entry{CreateComputePipeline(pools, key, env, nullptr, true, std::move(emit_pools))};
+    entry.dispatch_key = DispatchLookupKey(key);
     if (const char* directory = std::getenv("EDEN_NX2_SHADER_DUMP");
         directory && !entry.pipeline && env.CanBeSerialized()) {
         const auto path = std::filesystem::path{directory} /
@@ -3792,6 +3833,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         throw Shader::RuntimeError("Compute program reads constant buffer mask {:#x}",
                                    program.info.constant_buffer_mask);
     }
+    const bool uses_local_memory{program.info.uses_local_memory};
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
@@ -3855,7 +3897,8 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},
             .mapped_pointers =
-                env.IsNativeProgram() ? env.MappedStoragePointerKeys() : std::vector<u64>{}};
+                env.IsNativeProgram() ? env.MappedStoragePointerKeys() : std::vector<u64>{},
+            .uses_local_memory = uses_local_memory};
 
 } catch (const Shader::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Compute pipeline compilation failed shader={:#016x} pipeline={:#016x}: {}",

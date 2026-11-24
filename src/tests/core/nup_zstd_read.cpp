@@ -485,6 +485,22 @@ TEST_CASE("Verifying a NUP of empty members reports nothing with a total of zero
     REQUIRE_FALSE(zero_total);
 }
 
+TEST_CASE("Verifying a NUP polls after an empty member as after any other", "[nup][nup-read]") {
+    // One stored byte, then an empty member: the first poll comes at the byte's end, the second
+    // after the empty member, with the same value, and a cancel there is a cancel.
+    const std::vector<u8> one{42};
+    const Member stored{one, 1, 0, {}, Sha256(one)};
+    const Member empty{{}, 0, 0, {}, Sha256({})};
+    NupContainer nup{Backing(BuildNup({stored, empty}))};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    std::vector<std::pair<std::size_t, std::size_t>> reports;
+    REQUIRE(nup.VerifyIntegrity([&](std::size_t done, std::size_t all) {
+        reports.emplace_back(done, all);
+        return reports.size() < 2;
+    }) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    REQUIRE(reports == std::vector<std::pair<std::size_t, std::size_t>>{{1, 1}, {1, 1}});
+}
+
 TEST_CASE("Verifying a NUP checks a compressed member's frames against its size",
           "[nup][nup-read]") {
     const auto first = Content(200 * 1024, 7);

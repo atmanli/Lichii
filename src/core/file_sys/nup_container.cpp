@@ -1269,17 +1269,15 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
     std::size_t done_bytes = 0;
     std::size_t reported_bytes = 0;
     u64 unpolled_output = 0;
-    // Called when the extent position has moved by ReportStep or a member has ended, and at least
-    // once per ReportStep of decoded output, when the value may repeat. False is a cancel.
+    // Called when the extent position has moved by ReportStep and whenever a member has ended,
+    // an empty one too, as the verifier before it polled after every member; and at least once
+    // per ReportStep of decoded output. Those two may repeat a value. False is a cancel.
     const auto report = [&](bool force) {
         if (!progress_callback || total_bytes == 0) {
             return true;
         }
         if (!force && done_bytes - reported_bytes < ReportStep) {
             return true;
-        }
-        if (force && done_bytes == reported_bytes) {
-            return true; // an empty member: nothing moved
         }
         reported_bytes = done_bytes;
         unpolled_output = 0;

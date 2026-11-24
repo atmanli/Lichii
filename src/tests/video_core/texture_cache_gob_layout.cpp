@@ -38,11 +38,28 @@ struct TestRuntime {
         ++downloads;
         return AllocateStaging(size);
     }
+    std::optional<TestAsyncBuffer> TryGetCollectorDownloadBuffer(size_t size) {
+        if (!collector_buffer) {
+            if (fail_collector_reservation) {
+                return std::nullopt;
+            }
+            collector_buffer = DownloadStagingBuffer(size, true);
+        }
+        REQUIRE(collector_buffer->mapped_span.size() >= size);
+        return collector_buffer;
+    }
     TestAsyncBuffer AllocateStaging(size_t size) {
+        if (fail_staging_allocation) {
+            throw std::bad_alloc{};
+        }
         staging.push_back(std::make_unique<std::vector<u8>>(size));
         return {*staging.back()};
     }
     void FreeDeferredStagingBuffer(TestAsyncBuffer& map) {
+        REQUIRE(
+            (!collector_buffer || collector_buffer->mapped_span.data() != map.mapped_span.data()));
+        REQUIRE(std::ranges::any_of(
+            staging, [&](const auto& buffer) { return buffer->data() == map.mapped_span.data(); }));
         std::erase_if(staging, [&](const auto& buffer) {
             return buffer->data() == map.mapped_span.data();
         });
@@ -76,6 +93,9 @@ struct TestRuntime {
         return false;
     }
     std::vector<std::unique_ptr<std::vector<u8>>> staging;
+    std::optional<TestAsyncBuffer> collector_buffer;
+    bool fail_collector_reservation{};
+    bool fail_staging_allocation{};
     u64 current_tick{1};
     u64 completed_tick{};
     u64 freed_staging_tick{};
@@ -222,18 +242,18 @@ struct TextureCacheTestAccess {
     }
     template <class C>
     static bool CollectDownload(C& cache, ImageId id) {
-        return cache.QueueCollectorDownload(id);
+        return cache.QueueCollectorDownload(id) == C::CollectorQueueResult::Queued;
     }
     template <class C>
     static void FinishWritebacks(C& cache) {
         cache.FinishAsyncOverlapDownloads(true);
     }
     template <class C>
-    static void CollectPass(C& cache) {
+    static void CollectPass(C& cache, bool out_of_memory = false) {
         cache.frame_tick = 10000;
         cache.expected_memory = 1;
         cache.critical_memory = ~u64{0};
-        cache.RunGarbageCollector(false, false);
+        cache.RunGarbageCollector(out_of_memory, false);
     }
     template <class C>
     static bool Contains(const C& cache, ImageId id) {
@@ -365,7 +385,10 @@ struct Fixture {
         system.Initialize();
         process = std::make_unique<Kernel::KProcess>(system.Kernel());
         auto& table = process->GetPageTable().GetImpl();
-        table.Resize(gpu_mapping_size > (1U << 23) ? 26 : 24, 12);
+        table.Resize(gpu_mapping_size > (1U << 26)   ? 27
+                     : gpu_mapping_size > (1U << 23) ? 26
+                                                     : 24,
+                     12);
         bytes = physical.GetPointerFromRaw<u8>(0x10000);
         std::memset(bytes, 0, backing_size);
         for (u64 page = 0; page < backing_size / 4096; ++page) {
@@ -650,19 +673,156 @@ TEST_CASE("Collector allocation failure leaves the live image and history intact
     CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
     CHECK(f.device.IsRangeCached(cpu, size) == watched);
     CHECK(Access::Image(cache, id).gpu_bytes.size() == size);
-    CHECK(f.runtime.downloads == 0);
+    CHECK(f.runtime.downloads == 1);
     REQUIRE_NOTHROW(Access::CollectPass(cache));
     CHECK(Access::Contains(cache, id));
     CHECK(Access::WritebackPageCounts(cache) == pages);
     CHECK(Access::History(cache) == history);
     CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
-    CHECK(f.runtime.downloads == 0);
+    CHECK(f.runtime.downloads == 1);
     TestImage::fail_holder_allocation = false;
     REQUIRE(Access::CollectDownload(cache, id));
     Access::Delete(cache, id);
     f.runtime.allow_wait = true;
     cache.DownloadMemory(cpu, size);
     CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0x65; }));
+}
+
+TEST_CASE("Collector staging is reserved before eviction and reused through every drain",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    const auto id = Access::Insert(cache, info, gpu, cpu);
+    Access::WriteGpu(cache, id, std::vector<u8>(size, 0x65));
+    const auto watched = f.device.IsRangeCached(cpu, size);
+    const auto pages = Access::WritebackPageCounts(cache);
+    const auto history = Access::History(cache);
+
+    f.runtime.fail_collector_reservation = true;
+    REQUIRE_NOTHROW(Access::CollectPass(cache));
+    CHECK(Access::Contains(cache, id));
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(Access::WritebackPageCounts(cache) == pages);
+    CHECK(Access::History(cache) == history);
+    CHECK(f.device.IsRangeCached(cpu, size) == watched);
+    CHECK(f.runtime.downloads == 0);
+    f.runtime.fail_collector_reservation = false;
+    f.runtime.fail_staging_allocation = true;
+    REQUIRE_NOTHROW(Access::CollectPass(cache));
+    CHECK(Access::Contains(cache, id));
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(Access::WritebackPageCounts(cache) == pages);
+    CHECK(Access::History(cache) == history);
+    CHECK(f.device.IsRangeCached(cpu, size) == watched);
+    CHECK_FALSE(f.runtime.collector_buffer.has_value());
+    CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0; }));
+    f.runtime.fail_collector_reservation = false;
+    f.runtime.fail_staging_allocation = false;
+    REQUIRE(Access::CollectDownload(cache, id));
+    Access::Delete(cache, id);
+    REQUIRE(f.runtime.collector_buffer.has_value());
+    const auto downloads = f.runtime.downloads;
+    // From here on, any staging allocation fails, including the old second-chunk site.
+    f.runtime.fail_staging_allocation = true;
+    Access::PollWritebacks(cache);
+    f.runtime.completed_tick = f.runtime.current_tick++;
+    Access::PollWritebacks(cache);
+    REQUIRE(f.bytes[0] == 0x65);
+    REQUIRE(f.bytes[size - 1] == 0);
+    f.runtime.allow_wait = true;
+    SECTION("Normal polling completes without another allocation") {
+        for (unsigned i = 0; i < 32; ++i) {
+            f.runtime.completed_tick = f.runtime.current_tick++;
+            Access::PollWritebacks(cache);
+        }
+        CHECK(f.runtime.waits == 0);
+    }
+    SECTION("A guest read drains the partially landed image") {
+        cache.DownloadMemory(cpu + size - 1, 1);
+        CHECK(f.runtime.waits > 0);
+    }
+    SECTION("Device OOM drains the partially landed image") {
+        Access::CollectPass(cache, true);
+        CHECK(f.runtime.waits > 0);
+    }
+    SECTION("Cancellation releases the source but retains the reservation for a new image") {
+        cache.UnmapGPUMemory(f.memory->GetID(), gpu, size);
+        f.runtime.completed_tick = f.runtime.current_tick++;
+        Access::PollWritebacks(cache);
+        CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+        const auto next = Access::Insert(cache, info, gpu, cpu);
+        Access::WriteGpu(cache, next, std::vector<u8>(size, 0x65));
+        REQUIRE(Access::CollectDownload(cache, next));
+        Access::Delete(cache, next);
+        cache.DownloadMemory(cpu, size);
+    }
+    CHECK(f.runtime.downloads == downloads);
+    CHECK(f.runtime.staging.size() == 1);
+    CHECK(f.runtime.max_download_bytes == (4U << 20));
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0x65; }));
+}
+
+TEST_CASE("Queued collectors share staging only after the prior GPU copy and landing",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{2 * size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    const auto first = Access::Insert(cache, info, gpu, cpu);
+    const auto second = Access::Insert(cache, info, gpu + size, cpu + size);
+    Access::WriteGpu(cache, first, std::vector<u8>(size, 0x31));
+    Access::WriteGpu(cache, second, std::vector<u8>(size, 0x72));
+    Access::Image(cache, first).lifetime = std::make_shared<int>();
+    const std::weak_ptr<int> first_lifetime = Access::Image(cache, first).lifetime;
+    REQUIRE(Access::CollectDownload(cache, first));
+    REQUIRE(Access::CollectDownload(cache, second));
+    Access::Delete(cache, first);
+    Access::Delete(cache, second);
+    f.runtime.fail_staging_allocation = true;
+    REQUIRE(f.runtime.downloads == 1);
+    REQUIRE(f.runtime.staging.size() == 1);
+    Access::PollWritebacks(cache);
+    bool cancelled = false;
+    SECTION("Both images finish in FIFO order") {}
+    SECTION("Cancelling the head still waits for its submitted copy") {
+        cache.UnmapGPUMemory(f.memory->GetID(), gpu, size);
+        cancelled = true;
+    }
+    Access::PollWritebacks(cache); // First copy has not completed on the GPU yet.
+    CHECK_FALSE(first_lifetime.expired());
+    CHECK(f.runtime.collector_buffer->mapped_span[0] == 0x31);
+    CHECK(std::all_of(f.bytes, f.bytes + 2 * size, [](u8 byte) { return byte == 0; }));
+    for (unsigned i = 0; i < 64; ++i) {
+        f.runtime.completed_tick = f.runtime.current_tick++;
+        Access::PollWritebacks(cache);
+    }
+    // The normal delete-tick keeper is retired by TickFrame, independently of the FIFO.
+    cache.TickFrame();
+    CHECK(first_lifetime.expired());
+    CHECK(f.runtime.waits == 0);
+    CHECK(f.runtime.downloads == 1);
+    CHECK(f.runtime.staging.size() == 1);
+    CHECK(Access::CollectorState(cache) == std::tuple{size_t{0}, u64{0}, size_t{0}});
+    CHECK(std::all_of(f.bytes, f.bytes + size,
+                      [cancelled](u8 byte) { return byte == (cancelled ? 0 : 0x31); }));
+    CHECK(std::all_of(f.bytes + size, f.bytes + 2 * size, [](u8 byte) { return byte == 0x72; }));
 }
 
 TEST_CASE("Async image downloads and the delete tick both hold the image alive",

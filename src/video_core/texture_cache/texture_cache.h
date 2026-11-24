@@ -276,15 +276,20 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
                 return pending.cpu_addr < image.cpu_addr_end &&
                        image.cpu_addr < pending.cpu_addr + pending.size;
             });
-        bool collector_queued = false;
+        auto collector_result = CollectorQueueResult::Unsupported;
         try {
-            collector_queued = must_download && !out_of_memory && !local_overlap &&
-                               QueueCollectorDownload(image_id);
+            if (must_download && !out_of_memory && !local_overlap) {
+                collector_result = QueueCollectorDownload(image_id);
+            }
         } catch (const std::bad_alloc&) {
             NoteHostOutOfMemory("queue collector write back", image);
             return false;
         }
-        if (collector_queued) {
+        if (collector_result == CollectorQueueResult::Deferred) {
+            // Keep the live image when the bounded staging reservation is unavailable.
+            return false;
+        }
+        if (collector_result == CollectorQueueResult::Queued) {
             download_queued = true;
             ++gc_download_deletes;
         } else if (must_download) {
@@ -657,9 +662,9 @@ std::shared_ptr<Tegra::MemoryManager> TextureCache<P>::AddressSpaceMemory(size_t
 }
 
 template <class P>
-bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
-    if constexpr (!requires { runtime.CurrentTick(); }) {
-        return false;
+auto TextureCache<P>::QueueCollectorDownload(ImageId image_id) -> CollectorQueueResult {
+    if constexpr (!requires { runtime.TryGetCollectorDownloadBuffer(CollectorChunkBytes); }) {
+        return CollectorQueueResult::Unsupported;
     } else {
         auto& image = slot_images[image_id];
         const auto& info = image.info;
@@ -673,34 +678,41 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
             info.is_sparse || image.HasScaled() || True(image.flags & excluded) ||
             !HasGuestRange(image) || image.guest_size_bytes < 32_MiB || collector_count >= 16 ||
             image.guest_size_bytes > CollectorMaxBytes - collector_held_bytes) {
-            return false;
+            return CollectorQueueResult::Unsupported;
         }
         // Do not publish a collector then allocate keep ranges in other pending downloads.
         // Non-collector overlaps use the existing synchronous path; collector overlaps are
         // retained by the GC until their pending write-back finishes.
         if (WritebackPendingOver(image.cpu_addr, image.guest_size_bytes)) {
-            return false;
+            return CollectorQueueResult::Unsupported;
         }
         const auto memory = AddressSpaceMemory(image.address_space);
         if (!memory || memory->GpuToCpuAddress(image.gpu_addr) != image.cpu_addr ||
             !memory->IsContinuousRange(image.gpu_addr, image.guest_size_bytes)) {
-            return false;
+            return CollectorQueueResult::Unsupported;
         }
         const WritebackChunks::Layout layout{info.size.width, info.size.height, 2,
                                              info.block.height};
         const auto first = WritebackChunks::Next(layout, 0, CollectorChunkBytes);
         if (!first) {
-            return false;
+            return CollectorQueueResult::Unsupported;
         }
         const u64 band_rows = u64{8} << info.block.height;
         const u64 guest_size =
             ((info.size.height + band_rows - 1) / band_rows) * band_rows * info.size.width * 2;
         if (guest_size != image.guest_size_bytes) {
-            return false;
+            return CollectorQueueResult::Unsupported;
         }
         const bool trace = TextureCacheTrace();
         const auto start =
             trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        // Reserve before detaching the source. Polling and forced drains must not allocate
+        // another staging buffer after any part of the image has already landed.
+        const auto map = runtime.TryGetCollectorDownloadBuffer(CollectorChunkBytes);
+        if (!map) {
+            return CollectorQueueResult::Deferred;
+        }
+        const auto staging_end = trace ? std::chrono::steady_clock::now() : start;
         KeepRanges keep;
         KeepNewerLanded(image, image.modification_tick, keep);
         const auto keep_end = trace ? std::chrono::steady_clock::now() : start;
@@ -712,7 +724,7 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
             .size = image.guest_size_bytes,
             .info = info,
             .copies = {},
-            .map = {},
+            .map = *map,
             .cancelled = false,
             .keep = std::move(keep),
             .tick = image.modification_tick,
@@ -777,15 +789,16 @@ bool TextureCache<P>::QueueCollectorDownload(ImageId image_id) {
             try {
                 LOG_INFO(Render_Vulkan,
                          "TCTRACE collector-queue id={} gpu={:#x} bytes={} held={} us={} "
-                         "keep_us={} allocation_us={} pages_us={} records_us={}",
-                         image_id.Value(), image.gpu_addr, image.guest_size_bytes, collector_held_bytes,
-                         us(finish - start), us(keep_end - start), us(allocation_end - keep_end),
+                         "staging_us={} keep_us={} allocation_us={} pages_us={} records_us={}",
+                         image_id.Value(), image.gpu_addr, image.guest_size_bytes,
+                         collector_held_bytes, us(finish - start), us(staging_end - start),
+                         us(keep_end - staging_end), us(allocation_end - keep_end),
                          us(pages_end - allocation_end), us(finish - pages_end));
             } catch (const std::bad_alloc&) {
                 // The entry is committed: logging failure must not skip its source transfer.
             }
         }
-        return true;
+        return CollectorQueueResult::Queued;
     }
 }
 
@@ -801,7 +814,7 @@ void TextureCache<P>::SubmitCollectorChunk(AsyncOverlapDownload& download, u64 b
         const auto chunk = WritebackChunks::Next(layout, download.collector_cursor, budget);
         ASSERT(chunk.has_value());
         const u64 linear_size = u64{chunk->width} * chunk->height * 2;
-        auto map = runtime.DownloadStagingBuffer(linear_size, true);
+        ASSERT(download.map.mapped_span.size() >= linear_size);
         const BufferImageCopy copy{
             .buffer_offset = 0,
             .buffer_size = static_cast<size_t>(linear_size),
@@ -812,8 +825,7 @@ void TextureCache<P>::SubmitCollectorChunk(AsyncOverlapDownload& download, u64 b
             .image_extent = {chunk->width, chunk->height, 1},
         };
         download.gpu_tick = runtime.CurrentTick();
-        download.collector_source->DownloadMemory(map, std::span{&copy, 1});
-        download.map = std::move(map);
+        download.collector_source->DownloadMemory(download.map, std::span{&copy, 1});
         download.collector_chunk = *chunk;
         download.collector_copy_pending = true;
         if (trace) {
@@ -933,8 +945,8 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
                     if (trace_tail) {
                         tail_begin = std::chrono::steady_clock::now();
                     }
-                    runtime.FreeDeferredStagingBuffer(download.map);
-                    download.map = {};
+                    // The runtime retains this shared reservation. FIFO processing reuses it
+                    // only after the previous GPU copy and CPU landing have both finished.
                     download.collector_copy_pending = false;
                 }
                 if (!download.cancelled && download.collector_cursor < download.size) {

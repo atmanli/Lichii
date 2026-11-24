@@ -836,7 +836,8 @@ private:
     /// The GPU memory of an address space the cache has seen, or null.
     [[nodiscard]] std::shared_ptr<Tegra::MemoryManager> AddressSpaceMemory(size_t as_id);
     void FinishAsyncOverlapDownloads(bool wait_all);
-    bool QueueCollectorDownload(ImageId image_id);
+    enum class CollectorQueueResult { Unsupported, Deferred, Queued };
+    CollectorQueueResult QueueCollectorDownload(ImageId image_id);
     void SubmitCollectorChunk(AsyncOverlapDownload& download, u64 budget);
     void LandCollectorChunk(AsyncOverlapDownload& download);
     u64 collector_held_bytes{};

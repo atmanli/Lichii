@@ -34,6 +34,7 @@ struct TestRuntime {
     TestAsyncBuffer DownloadStagingBuffer(size_t size, bool deferred = false) {
         REQUIRE(deferred);
         staging.resize(size);
+        max_download_bytes = (std::max)(max_download_bytes, size);
         ++downloads;
         return {staging};
     }
@@ -57,7 +58,11 @@ struct TestRuntime {
     u64 CurrentTick() const { return current_tick; }
     bool IsFree(u64 tick) const { return completed_tick >= tick; }
     void FlushDeferredClear() {}
-    void Finish() { FAIL("A texture lookup must not wait for the GPU"); }
+    void Finish() {
+        REQUIRE(allow_wait);
+        ++waits;
+        completed_tick = current_tick;
+    }
 
     bool HasBrokenTextureViewFormats() const {
         return false;
@@ -71,6 +76,9 @@ struct TestRuntime {
     u64 freed_staging_tick{};
     u32 downloads{};
     u32 unswizzle_uploads{};
+    u32 waits{};
+    bool allow_wait{};
+    size_t max_download_bytes{};
 };
 
 struct TestImage : VideoCommon::ImageBase {
@@ -81,10 +89,31 @@ struct TestImage : VideoCommon::ImageBase {
     TestImage(TestImage&&) = default;
     TestImage& operator=(TestImage&&) = default;
     void DownloadMemory(const TestAsyncBuffer& map,
-                        std::span<const VideoCommon::BufferImageCopy>) {
+                        std::span<const VideoCommon::BufferImageCopy> copies) {
         auto dest = map.mapped_span.subspan(map.offset);
-        REQUIRE(dest.size() >= gpu_bytes.size());
-        std::ranges::copy(gpu_bytes, dest.begin());
+        if (dest.size() >= gpu_bytes.size()) {
+            std::ranges::copy(gpu_bytes, dest.begin());
+            return;
+        }
+        // A compact download of a rectangle of the D16 test image.
+        REQUIRE(info.format == VideoCore::Surface::PixelFormat::D16_UNORM);
+        REQUIRE(copies.size() == 1);
+        const auto& copy = copies.front();
+        REQUIRE(copy.image_subresource.base_level == 0);
+        REQUIRE(copy.image_subresource.base_layer == 0);
+        REQUIRE(copy.image_subresource.num_layers == 1);
+        const u32 pitch = copy.image_extent.width * 2;
+        REQUIRE((copy.buffer_row_length == 0 || copy.buffer_row_length == copy.image_extent.width));
+        REQUIRE(copy.image_offset.x >= 0);
+        REQUIRE(copy.image_offset.y >= 0);
+        REQUIRE(copy.buffer_offset + size_t{pitch} * copy.image_extent.height <= dest.size());
+        for (u32 row = 0; row < copy.image_extent.height; ++row) {
+            const size_t offset = (static_cast<size_t>(copy.image_offset.y + row) * info.size.width +
+                                   copy.image_offset.x) * 2;
+            REQUIRE(offset + pitch <= gpu_bytes.size());
+            std::copy_n(gpu_bytes.data() + offset, pitch,
+                        dest.data() + copy.buffer_offset + size_t{row} * pitch);
+        }
     }
     void UploadMemory(const TestAsyncBuffer&, std::span<const VideoCommon::BufferImageCopy>) {
         FAIL("Unexpected CPU decode upload");
@@ -182,6 +211,19 @@ struct TextureCacheTestAccess {
         cache.FinishAsyncOverlapDownloads(false);
     }
     template <class C>
+    static bool CollectDownload(C& cache, ImageId id) {
+        return cache.QueueCollectorDownload(id);
+    }
+    template <class C>
+    static void NoteFlushed(C& cache, const ImageBase& image, u64 tick) {
+        cache.NoteFlushed(image, tick);
+    }
+    template <class C>
+    static auto WritebackPageCounts(const C& cache) {
+        return std::pair{cache.overlap_writeback_ticks.size(),
+                         cache.overlap_writeback_ranges.size()};
+    }
+    template <class C>
     static const ImageInfo& Info(C& cache, ImageId id) {
         return cache.slot_images[id].info;
     }
@@ -263,15 +305,17 @@ struct Fixture {
     std::shared_ptr<Tegra::MemoryManager> memory;
     Tegra::Control::ChannelState state{0};
     u8* bytes{};
+    size_t backing_size;
 
-    Fixture() {
+    explicit Fixture(u32 gpu_mapping_size = 0x10000)
+        : backing_size{(std::max)(gpu_mapping_size, 0x40000U)} {
         system.Initialize();
         process = std::make_unique<Kernel::KProcess>(system.Kernel());
         auto& table = process->GetPageTable().GetImpl();
-        table.Resize(24, 12);
+        table.Resize(gpu_mapping_size > (1U << 23) ? 26 : 24, 12);
         bytes = physical.GetPointerFromRaw<u8>(0x10000);
-        std::memset(bytes, 0, 0x40000);
-        for (u64 page = 0; page < 64; ++page) {
+        std::memset(bytes, 0, backing_size);
+        for (u64 page = 0; page < backing_size / 4096; ++page) {
             table.entries.GetAndFault(0x10 + page)
                 .Store(false, Common::PageType::Memory, 1,
                        reinterpret_cast<uintptr_t>(bytes) - 0x10000);
@@ -279,11 +323,11 @@ struct Fixture {
         process->GetMemory().SetCurrentPageTable(*process);
         asid = device.RegisterProcess(&process->GetMemory());
         device.BindInterface(&rasterizer);
-        device.Map(0x10000, 0x10000, 0x40000, asid);
+        device.Map(0x10000, 0x10000, backing_size, asid);
         memory = std::make_shared<Tegra::MemoryManager>(system, device, 32, 1ULL << 31, 16);
         memory->BindRasterizer(&rasterizer);
         memory->EnableNativeTiling();
-        memory->Map(0x100000, 0x10000, 0x10000, Tegra::PTEKind::PITCH, true);
+        memory->Map(0x100000, 0x10000, gpu_mapping_size, Tegra::PTEKind::PITCH, true);
         state.memory_manager = memory.get();
         state.payload.emplace(system, *memory, state);
         cache = std::make_unique<Cache>(runtime, device);
@@ -293,13 +337,101 @@ struct Fixture {
     ~Fixture() {
         cache.reset();
         memory.reset();
-        device.Unmap(0x10000, 0x40000);
+        device.Unmap(0x10000, backing_size);
         device.UnregisterProcess(asid);
         system.Kernel().UnregisterKernelObject(process.get());
     }
 };
 
 } // namespace
+
+TEST_CASE("An evicted depth image survives slot reuse and intervening byte writes",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    REQUIRE(CalculateGuestSizeInBytes(info) == size);
+    const auto id = Access::Insert(cache, info, gpu, cpu);
+    std::vector<u8> linear(size);
+    for (size_t i = 0; i < linear.size(); ++i) {
+        linear[i] = static_cast<u8>(0x40 + (i ^ (i >> 12) ^ (i >> 17)) % 0x80);
+    }
+    std::vector<u8> expected(size);
+    Tegra::Texture::SwizzleTexture(expected, linear, 2, 4096, 4096, 1, 5, 0, 0, true);
+    Access::WriteGpu(cache, id, std::move(linear));
+    REQUIRE(Access::CollectDownload(cache, id));
+    Access::Delete(cache, id);
+    REQUIRE(Access::Insert(cache, MakeInfo(), gpu + size + 0x20000, cpu + 0x2000) == id);
+
+    // Let the first transfer finish, with the tail of the old allocation still pending.
+    Access::PollWritebacks(cache);
+    for (u32 i = 0; i < 3 && f.bytes[0] == 0; ++i) {
+        f.runtime.completed_tick = f.runtime.current_tick++;
+        Access::PollWritebacks(cache);
+    }
+    REQUIRE(f.bytes[0] == expected[0]);
+    REQUIRE(f.bytes[size - 1] == 0);
+    CHECK(f.runtime.waits == 0);
+
+    SECTION("An unrelated flush creates no history when ordinary overlap writebacks are off") {
+        const auto saved_program_id = Settings::GetCurrentProgramID();
+        SCOPE_EXIT { Settings::SetCurrentProgramID(saved_program_id); };
+        Settings::SetCurrentProgramID(0);
+        const auto pages = Access::WritebackPageCounts(cache);
+        const TestImage unrelated{f.runtime, MakeInfo(), gpu + size, cpu + size};
+        Access::NoteFlushed(cache, unrelated, 100);
+        CHECK(Access::WritebackPageCounts(cache) == pages);
+
+        // A newer image has already written this part of the pending depth image to the guest.
+        constexpr u32 offset = size / 2;
+        const TestImage overlapping{f.runtime, MakeInfo(), gpu + offset, cpu + offset};
+        std::fill_n(f.bytes + offset, overlapping.guest_size_bytes, 0xE7);
+        std::fill_n(expected.begin() + offset, overlapping.guest_size_bytes, 0xE7);
+        Access::NoteFlushed(cache, overlapping, 101);
+    }
+    SECTION("An overlapping guest read combines scattered stores with the old GPU image") {
+        for (u32 i = 0; i < 40; ++i) {
+            const u32 offset = size / 2 + i * 71;
+            expected[offset] = static_cast<u8>(i);
+            if (i % 2 == 0) {
+                f.bytes[offset] = expected[offset];
+                cache.WriteMemory(cpu + offset, 1);
+            } else {
+                cache.WriteMemory(cpu + offset, 1);
+                f.bytes[offset] = expected[offset];
+            }
+        }
+    }
+    SECTION("A partially unmapped allocation keeps the bytes still mapped") {
+        constexpr u32 offset = size / 2;
+        constexpr u32 span = 0x10000;
+        cache.UnmapGPUMemory(f.memory->GetID(), gpu + offset, span);
+        f.memory->Unmap(gpu + offset, span);
+        std::fill_n(f.bytes + offset, span, 0xD3);
+        std::fill_n(expected.begin() + offset, span, 0xD3);
+    }
+    SECTION("Fully unmapping a pending image stops its remaining transfers") {
+        const auto downloads = f.runtime.downloads;
+        cache.UnmapGPUMemory(f.memory->GetID(), gpu, size);
+        f.runtime.completed_tick = f.runtime.current_tick++;
+        Access::PollWritebacks(cache);
+        CHECK(f.runtime.downloads == downloads);
+        CHECK(f.bytes[size - 1] == 0);
+        return;
+    }
+    f.runtime.allow_wait = true;
+    cache.DownloadMemory(cpu + size - 1, 1);
+    CHECK(f.runtime.max_download_bytes <= (4U << 20));
+    CHECK(std::equal(expected.begin(), expected.end(), f.bytes));
+}
 
 TEST_CASE("Async image downloads and the delete tick both hold the image alive",
           "[video_core][texture_cache][image_lifetime]") {

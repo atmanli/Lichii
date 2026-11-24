@@ -1252,14 +1252,12 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
     // asks for more is refused for a member the reader spills, as reading it is, and otherwise
     // hashed through the reader with a cache of the verification's own, which holds the member
     // whole (at most half the cache cap, whatever its record says) until it ends; so a member
-    // verifies when it can be read and its hash matches. One exception: zstd decodes a frame
-    // with a known content size that fits the output in one pass, without the window limit,
-    // when the whole frame is in the input it is given; a small large-window frame that lies
-    // across a reader chunk but inside one of ours verifies, where a spilled read refuses it.
+    // verifies exactly when it can be read and its hash matches. The stream decoder gets a
+    // compressed member's extent in the reader's pieces and output room: zstd decodes a frame with
+    // a known content size in one pass, without the window limit, when the whole frame is in the
+    // piece it is given, so both then accept and refuse the same frames.
     constexpr std::size_t InputChunk = 1 << 20;
-    // Our chunks end where the reader's do, so a frame the stream decoder refuses for its window
-    // the reader also gets in pieces and refuses: the refusal below for a spilled member holds.
-    static_assert(InputChunk % DecodeInputChunk == 0);
+    static_assert(DecodeInputChunk <= InputChunk);
     constexpr std::size_t ReportStep = 4 << 20;
     // Progress is in extent bytes, which the open checked against the file.
     u64 total = 0;
@@ -1336,9 +1334,10 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
         bool through_reader = false;
         u64 produced = 0;
         std::size_t last_result = 0;
+        const std::size_t step = compressed ? DecodeInputChunk : InputChunk;
         for (u64 consumed = 0; consumed < node.extent_size && !through_reader;) {
             const auto length =
-                static_cast<std::size_t>(std::min<u64>(InputChunk, node.extent_size - consumed));
+                static_cast<std::size_t>(std::min<u64>(step, node.extent_size - consumed));
             if (file->Read(input.data(), length,
                            static_cast<std::size_t>(node.extent_offset + consumed)) != length) {
                 return fail("short read");

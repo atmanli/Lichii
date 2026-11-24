@@ -678,6 +678,42 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
     }
 }
 
+TEST_CASE("Verifying a NUP refuses a small large-window frame wherever a read refuses it",
+          "[nup][nup-read]") {
+    // zstd decodes a frame with a known content size in one pass, without the window limit, when
+    // the whole frame is in the input it is given. A small frame declaring a 256 MiB window that
+    // starts 100 bytes before a 128 KiB boundary reaches a spilled reader in two pieces, which
+    // refuses it; the verifier must too.
+    const auto raw_block = [](std::vector<u8>& frame, std::span<const u8> data) {
+        const u32 block = static_cast<u32>(data.size() << 3) | 1; // last block, raw
+        frame.insert(frame.end(), {static_cast<u8>(block), static_cast<u8>(block >> 8),
+                                   static_cast<u8>(block >> 16)});
+        frame.insert(frame.end(), data.begin(), data.end());
+    };
+    const auto filler = Content(128 * 1024 - 9 - 100, 47);
+    const auto small = Content(4096, 48);
+    // No content size, a 128 KiB window: ends 100 bytes before the boundary.
+    std::vector<u8> extent{0x28, 0xB5, 0x2F, 0xFD, 0x00, 7 << 3};
+    raw_block(extent, filler);
+    REQUIRE(extent.size() == 128 * 1024 - 100);
+    // A 4-byte content size of 4096 and a 2^28 window.
+    extent.insert(extent.end(), {0x28, 0xB5, 0x2F, 0xFD, 0x80, 18 << 3, 0x00, 0x10, 0x00, 0x00});
+    raw_block(extent, small);
+    std::vector<u8> content = filler;
+    content.insert(content.end(), small.begin(), small.end());
+    const Member member{extent, content.size(), 1, {}, Sha256(content)};
+    TempDir t;
+    // 64 KiB spills the member.
+    NupContainer nup{Backing(BuildNup({member})), std::size_t{64} << 10, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    // A read gets the first frame and fails at the second.
+    const auto file = nup.OpenFile(0);
+    REQUIRE(ReadMatches(file, content, 0, filler.size()));
+    std::vector<u8> buffer(small.size());
+    REQUIRE(file->Read(buffer.data(), buffer.size(), filler.size()) == 0);
+}
+
 TEST_CASE("Verifying a NUP polls its callback while a small extent decodes to much",
           "[nup][nup-read]") {
     // 64 MiB of zeros in a few KiB: one input chunk decodes to far more than the 4 MiB step, and

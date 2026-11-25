@@ -110,6 +110,10 @@ public:
 
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
+    // Lazy, bounded reservation shared by FIFO collector downloads. The pool owns it until
+    // teardown; callers must not return it through FreeDeferredStagingBuffer.
+    std::optional<StagingBufferRef> TryGetCollectorDownloadBuffer(size_t size);
+
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
     void TickFrame();
@@ -283,6 +287,7 @@ public:
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
     StagingBufferPool& staging_buffer_pool;
+    std::optional<StagingBufferRef> collector_download_buffer;
     BlitImageHelper& blit_image_helper;
     RenderPassCache& render_pass_cache;
     DescriptorPool& descriptor_pool;

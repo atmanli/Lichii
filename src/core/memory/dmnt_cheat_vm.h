@@ -320,7 +320,8 @@ private:
     std::size_t instruction_ptr = 0;
     std::size_t condition_depth = 0;
     bool decode_success = false;
-    bool warned_stray_skip = false; ///< Logged once per program
+    /// Per loaded cheat, in cheat_ends' order: whether its stray else was logged.
+    std::vector<bool> warned_stray_skip;
     /// Where each loaded cheat's words end in the program, with its name, in program order.
     std::vector<std::pair<std::size_t, std::string>> cheat_ends;
     std::array<u32, MaximumProgramOpcodeCount> program{};

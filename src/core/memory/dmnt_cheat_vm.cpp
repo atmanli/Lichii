@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <optional>
+#include <string>
+#include <string_view>
 
-#include "common/assert.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "core/memory/dmnt_cheat_types.h"
 #include "core/memory/dmnt_cheat_vm.h"
@@ -661,13 +665,34 @@ void DmntCheatVm::SkipConditionalBlock(bool is_if) {
             }
         }
     } else {
-        // Skipping, but condition_depth = 0.
-        // This is an error condition.
-        // However, I don't actually believe it is possible for this to happen.
-        // I guess we'll throw a fatal error here, so as to encourage me to fix the VM
-        // in the event that someone triggers it? I don't know how you'd do that.
-        UNREACHABLE_MSG("Invalid condition depth in DMNT Cheat VM");
+        // Skipping, but condition_depth = 0: an else outside any conditional block, which the
+        // cheat text can contain. Atmosphere's VM aborts here; a cheat file must not end the
+        // emulator, so the cheat it is in ends there instead, as if the block it skips ran to the
+        // cheat's end, and the cheats after it run.
+        const std::size_t word = instruction_ptr - 1; // the else, a single word
+        const auto cheat = CheatAt(word);
+        if (!warned_stray_skip) {
+            warned_stray_skip = true;
+            LOG_WARNING(CheatEngine,
+                        "Cheat \"{}\" has an else outside any conditional block at word {:X}; "
+                        "it ends there",
+                        cheat == cheat_ends.end() ? std::string_view{} : cheat->second, word);
+        }
+        instruction_ptr = cheat == cheat_ends.end() ? num_opcodes : cheat->first;
     }
+}
+
+std::vector<std::pair<std::size_t, std::string>>::const_iterator DmntCheatVm::CheatAt(
+    std::size_t word) const {
+    return std::ranges::upper_bound(cheat_ends, word, {},
+                                    [](const auto& cheat_end) { return cheat_end.first; });
+}
+
+u64 DmntCheatVm::ShiftCount(u64 count) {
+    // The counts come from the cheat text. The console's VM shifts 64-bit registers with
+    // instructions that take the count modulo 64 (AArch64 LSLV/LSRV), whatever the operation's
+    // width, which is applied to the result afterwards; a C++ shift by 64 or more is undefined.
+    return count & 63;
 }
 
 u64 DmntCheatVm::GetVmInt(VmInt value, u32 bit_width) {
@@ -713,18 +738,24 @@ void DmntCheatVm::ResetState() {
 bool DmntCheatVm::LoadProgram(const std::vector<CheatEntry>& entries) {
     // Reset opcode count.
     num_opcodes = 0;
+    warned_stray_skip = false;
+    cheat_ends.clear();
 
     for (std::size_t i = 0; i < entries.size(); i++) {
         if (entries[i].enabled) {
             // Bounds check.
             if (entries[i].definition.num_opcodes + num_opcodes > MaximumProgramOpcodeCount) {
                 num_opcodes = 0;
+                cheat_ends.clear();
                 return false;
             }
 
             for (std::size_t n = 0; n < entries[i].definition.num_opcodes; n++) {
                 program[num_opcodes++] = entries[i].definition.opcodes[n];
             }
+            const auto& name = entries[i].definition.readable_name;
+            cheat_ends.emplace_back(num_opcodes,
+                                    std::string{name.data(), strnlen(name.data(), name.size())});
         }
     }
 
@@ -781,6 +812,13 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
                    std::holds_alternative<BeginRegisterConditionalOpcode>(opcode.opcode)) {
             ++conditional_depth;
         } else if (const auto* end_cond = std::get_if<EndConditionalOpcode>(&opcode.opcode)) {
+            if (end_cond->is_else && conditional_depth == 0) {
+                // Execute ends the cheat there (SkipConditionalBlock): its later stores never run.
+                if (position < ends.size()) {
+                    vm.instruction_ptr = ends[position].first;
+                }
+                continue;
+            }
             if (!end_cond->is_else && conditional_depth) {
                 --conditional_depth;
             }
@@ -1000,11 +1038,11 @@ void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {
                 break;
             case RegisterArithmeticType::LeftShift:
                 registers[perform_math_static->reg_index] <<=
-                    static_cast<u64>(perform_math_static->value);
+                    ShiftCount(perform_math_static->value);
                 break;
             case RegisterArithmeticType::RightShift:
                 registers[perform_math_static->reg_index] >>=
-                    static_cast<u64>(perform_math_static->value);
+                    ShiftCount(perform_math_static->value);
                 break;
             default:
                 // Do not handle extensions here.
@@ -1057,10 +1095,10 @@ void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {
                 res_val = operand_1_value * operand_2_value;
                 break;
             case RegisterArithmeticType::LeftShift:
-                res_val = operand_1_value << operand_2_value;
+                res_val = operand_1_value << ShiftCount(operand_2_value);
                 break;
             case RegisterArithmeticType::RightShift:
-                res_val = operand_1_value >> operand_2_value;
+                res_val = operand_1_value >> ShiftCount(operand_2_value);
                 break;
             case RegisterArithmeticType::LogicalAnd:
                 res_val = operand_1_value & operand_2_value;

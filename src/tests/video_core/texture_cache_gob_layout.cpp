@@ -229,6 +229,16 @@ struct TextureCacheTestAccess {
         return id;
     }
     template <class C>
+    static ImageId InsertForCollection(C& cache, const ImageInfo& info, GPUVAddr gpu, DAddr cpu) {
+        const auto id = Insert(cache, info, gpu, cpu);
+        const auto [it, is_new] = cache.image_allocs_table.try_emplace(gpu);
+        if (is_new) {
+            it->second = cache.slot_image_allocs.insert();
+        }
+        cache.slot_image_allocs[it->second].images.push_back(id);
+        return id;
+    }
+    template <class C>
     static ImageId Find(C& cache, const ImageInfo& info, GPUVAddr gpu_addr) {
         bool retry = false;
         return cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry);
@@ -253,8 +263,8 @@ struct TextureCacheTestAccess {
         cache.FinishAsyncOverlapDownloads(true);
     }
     template <class C>
-    static void CollectPass(C& cache, bool out_of_memory = false) {
-        cache.frame_tick = 10000;
+    static void CollectPass(C& cache, bool out_of_memory = false, u64 frame_tick = 10000) {
+        cache.frame_tick = frame_tick;
         cache.expected_memory = 1;
         cache.critical_memory = ~u64{0};
         cache.RunGarbageCollector(out_of_memory, false);
@@ -624,11 +634,11 @@ TEST_CASE("Retained writebacks leave room for a clean eviction in the same GC pa
     std::vector<ImageId> held;
     for (u32 i = 0; i < 21; ++i) {
         const auto offset = i * 0x4000;
-        const auto id = Access::Insert(cache, MakeInfo(), gpu + offset, cpu + offset);
+        const auto id = Access::InsertForCollection(cache, MakeInfo(), gpu + offset, cpu + offset);
         Access::WriteGpu(cache, id, std::vector<u8>(0x4000, 0x27));
         held.push_back(id);
     }
-    const auto clean = Access::Insert(cache, MakeInfo(), gpu + size, cpu + size);
+    const auto clean = Access::InsertForCollection(cache, MakeInfo(), gpu + size, cpu + size);
     Access::CollectPass(cache);
     CHECK_FALSE(Access::Contains(cache, clean));
     CHECK(std::ranges::all_of(held, [&](ImageId id) { return Access::Contains(cache, id); }));
@@ -649,7 +659,7 @@ TEST_CASE("GC can still reclaim clean images after a writeback allocation fails"
     info.native_tiling = true;
     std::array<ImageId, 3> held;
     for (auto& id : held) {
-        id = Access::Insert(cache, info, gpu, cpu);
+        id = Access::InsertForCollection(cache, info, gpu, cpu);
         Access::WriteGpu(cache, id, {});
     }
     SECTION("The Vulkan staging reservation is unavailable") {
@@ -660,8 +670,8 @@ TEST_CASE("GC can still reclaim clean images after a writeback allocation fails"
     }
     Access::CollectPass(cache);
     CHECK(f.runtime.collector_reservation_attempts == 1);
-    const auto clean = Access::Insert(cache, MakeInfo(), gpu + size, cpu + size);
-    Access::CollectPass(cache);
+    const auto clean = Access::InsertForCollection(cache, MakeInfo(), gpu + size, cpu + size);
+    Access::CollectPass(cache, false, 20000);
     CHECK_FALSE(Access::Contains(cache, clean));
     CHECK(std::ranges::all_of(held, [&](ImageId id) { return Access::Contains(cache, id); }));
 }

@@ -4043,7 +4043,10 @@ private:
                 m_outputs.push_back({image, width, height, frame.pts, frame.end});
                 const bool current_generation = generation == m_decoded.Generation();
                 if (frame.end && current_generation) {
-                    m_movie_playback.SetActive(false);
+                    if (parallel) {
+                        // A later stream can publish a picture while the old EOS waits for its image.
+                        m_movie_playback.SetActive(m_decoded.HasPicture());
+                    }
                     m_stream_ended = true;
                     m_end_queued = false;
                     m_ready->room.store(false, std::memory_order_relaxed);
@@ -4173,9 +4176,6 @@ private:
             pictures.clear();
             return;
         }
-        if (parallel && !pictures.empty()) {
-            m_movie_playback.SetActive(true);
-        }
         const size_t capacity =
             parallel ? Nx2VideoFrameQueue::Capacity : std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < pictures.size(); ++i) {
@@ -4198,6 +4198,9 @@ private:
             // Set EOS before publishing the last frame: the output worker may take it immediately.
             m_decoded.Push({std::move(picture), pts, input.end && i + 1 == pictures.size()},
                            generation, capacity);
+            if (parallel) {
+                m_movie_playback.SetActive(true);
+            }
             m_cv.notify_all();
         }
         if (input.end && pictures.empty()) {

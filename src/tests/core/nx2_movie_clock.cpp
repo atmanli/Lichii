@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/hle/service/nx2_movie_clock.h"
+#include "core/hle/service/nx2_video_frame_queue.h"
 #include "video_core/nx2_movie_playback.h"
 
 namespace {
@@ -23,6 +24,29 @@ TEST_CASE("NX2 movie playback ends with the last active decoder session", "[nx2_
         REQUIRE(second.AnyActive());
     }
     REQUIRE_FALSE(first.AnyActive());
+}
+
+TEST_CASE("An in-flight movie EOS preserves a later picture from the same session",
+          "[nx2_movie_clock]") {
+    Service::Nx2VideoFrameQueue queue;
+    VideoCore::Nx2MoviePlayback playback;
+    const auto generation = queue.Generation();
+    REQUIRE(queue.Push({Tegra::Host1x::Nx2Picture{}, 0, true}, generation));
+    playback.SetActive(true);
+    const auto old_end = queue.Pop();
+    REQUIRE(old_end.end);
+
+    // The output worker is writing the old EOS. The producer starts another stream without
+    // reconfiguring and publishes its picture behind an empty end marker.
+    REQUIRE(queue.Push({std::nullopt, 0, true}, generation));
+    REQUIRE(queue.Push({Tegra::Host1x::Nx2Picture{}, 0, true}, generation));
+    playback.SetActive(queue.HasPicture());
+    REQUIRE(playback.AnyActive());
+    REQUIRE_FALSE(queue.Pop().picture.has_value());
+    REQUIRE(queue.Pop().end);
+    REQUIRE(queue.Push({std::nullopt, 0, true}, generation));
+    playback.SetActive(queue.HasPicture());
+    REQUIRE_FALSE(playback.AnyActive());
 }
 
 TEST_CASE("NX2 movie clock ignores frames acquired ahead of it", "[nx2_movie_clock]") {

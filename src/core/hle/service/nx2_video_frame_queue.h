@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <deque>
 #include <optional>
@@ -29,6 +30,10 @@ public:
     }
     bool Empty() const {
         return frames.empty();
+    }
+    bool HasPicture() const {
+        return std::ranges::any_of(frames,
+                                   [](const Frame& frame) { return frame.picture.has_value(); });
     }
     size_t Size() const {
         return frames.size();

@@ -41,6 +41,7 @@ struct TestRuntime {
     }
     std::optional<TestAsyncBuffer> TryGetCollectorDownloadBuffer(size_t size) {
         if (!collector_buffer) {
+            ++collector_reservation_attempts;
             if (fail_collector_reservation) {
                 return std::nullopt;
             }
@@ -95,6 +96,7 @@ struct TestRuntime {
     }
     std::vector<std::unique_ptr<std::vector<u8>>> staging;
     std::optional<TestAsyncBuffer> collector_buffer;
+    u32 collector_reservation_attempts{};
     bool fail_collector_reservation{};
     bool fail_staging_allocation{};
     u64 current_tick{1};
@@ -597,6 +599,71 @@ TEST_CASE("A pending collector protects its landed prefix from an older color fl
     f.runtime.allow_wait = true;
     Access::FinishWritebacks(cache);
     CHECK(std::all_of(f.bytes, f.bytes + size, [](u8 byte) { return byte == 0xC3; }));
+}
+
+TEST_CASE("Retained writebacks leave room for a clean eviction in the same GC pass",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto depth = MakeInfo();
+    depth.format = PixelFormat::D16_UNORM;
+    depth.size = {4096, 4096, 1};
+    depth.block = {0, 5, 0};
+    depth.native_tiling = true;
+    const auto source = Access::Insert(cache, depth, gpu, cpu);
+    Access::WriteGpu(cache, source, std::vector<u8>(size, 0x42));
+    REQUIRE(Access::CollectDownload(cache, source));
+    Access::Delete(cache, source);
+
+    // These small dirty images all overlap the queued source. Their age puts them before
+    // the clean image, and their number exceeds the high-priority pass's 20 evictions.
+    std::vector<ImageId> held;
+    for (u32 i = 0; i < 21; ++i) {
+        const auto offset = i * 0x4000;
+        const auto id = Access::Insert(cache, MakeInfo(), gpu + offset, cpu + offset);
+        Access::WriteGpu(cache, id, std::vector<u8>(0x4000, 0x27));
+        held.push_back(id);
+    }
+    const auto clean = Access::Insert(cache, MakeInfo(), gpu + size, cpu + size);
+    Access::CollectPass(cache);
+    CHECK_FALSE(Access::Contains(cache, clean));
+    CHECK(std::ranges::all_of(held, [&](ImageId id) { return Access::Contains(cache, id); }));
+}
+
+TEST_CASE("GC can still reclaim clean images after a writeback allocation fails",
+          "[video_core][texture_cache][collector_writeback]") {
+    using namespace VideoCommon;
+    constexpr u32 size = 32U << 20;
+    constexpr DAddr cpu = 0x10000;
+    constexpr GPUVAddr gpu = 0x100000;
+    Fixture f{size + 0x10000};
+    auto& cache = *f.cache;
+    auto info = MakeInfo();
+    info.format = PixelFormat::D16_UNORM;
+    info.size = {4096, 4096, 1};
+    info.block = {0, 5, 0};
+    info.native_tiling = true;
+    std::array<ImageId, 3> held;
+    for (auto& id : held) {
+        id = Access::Insert(cache, info, gpu, cpu);
+        Access::WriteGpu(cache, id, {});
+    }
+    SECTION("The Vulkan staging reservation is unavailable") {
+        f.runtime.fail_collector_reservation = true;
+    }
+    SECTION("Host allocation fails") {
+        f.runtime.fail_staging_allocation = true;
+    }
+    Access::CollectPass(cache);
+    CHECK(f.runtime.collector_reservation_attempts == 1);
+    const auto clean = Access::Insert(cache, MakeInfo(), gpu + size, cpu + size);
+    Access::CollectPass(cache);
+    CHECK_FALSE(Access::Contains(cache, clean));
+    CHECK(std::ranges::all_of(held, [&](ImageId id) { return Access::Contains(cache, id); }));
 }
 
 TEST_CASE("Collector landing clears stale pages only when it writes them",

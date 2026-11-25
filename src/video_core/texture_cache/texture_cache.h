@@ -171,6 +171,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     bool aggressive_mode = false;
     bool evict_old_costly = false;
     bool evict_bad_overlaps = false;
+    bool writeback_allocation_failed = false;
     u64 mode_age = 0;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
@@ -243,15 +244,15 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode, &CanEvict,
                           &evict_bad_overlaps, &keep, &keep_ticks, out_of_memory,
-                          &overlap_downloads, download_overlaps, async_downloads](ImageId image_id) {
+                          &overlap_downloads, download_overlaps, async_downloads,
+                          &writeback_allocation_failed](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
         bool must_download = false;
-        if (!CanEvict(image_id, &must_download)) {
+        if (!CanEvict(image_id, &must_download) || (must_download && writeback_allocation_failed)) {
             return false;
         }
-        --num_iterations;
         auto& image = slot_images[image_id];
         bool download_queued = false;
         // A GPU-written overlap the collector may write back, and whether newer write-backs
@@ -283,10 +284,12 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             }
         } catch (const std::bad_alloc&) {
             NoteHostOutOfMemory("queue collector write back", image);
+            writeback_allocation_failed = true;
             return false;
         }
         if (collector_result == CollectorQueueResult::Deferred) {
-            // Keep the live image when the bounded staging reservation is unavailable.
+            // Look for an image that needs no readback before trying another allocation.
+            writeback_allocation_failed = true;
             return false;
         }
         if (collector_result == CollectorQueueResult::Queued) {
@@ -310,6 +313,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
                 written = WriteBackImage(image, copies, map.mapped_span, newer);
             } catch (const std::bad_alloc&) {
                 NoteHostOutOfMemory("write back", image);
+                writeback_allocation_failed = true;
                 return false;
             }
             if (!written) {
@@ -363,6 +367,10 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             }
             MarkStale(image); // before UntrackImage (see MarkStale)
         }
+        // Only an actual eviction spends the pass's allowance. Releasing its image can also
+        // make room for a staging allocation that failed earlier in this pass.
+        --num_iterations;
+        writeback_allocation_failed = false;
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
         }

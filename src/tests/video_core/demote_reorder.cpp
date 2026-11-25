@@ -77,6 +77,11 @@ struct Assembler {
     void Branch(u32 pred, const std::string& target) {
         insns.push_back({0xe24000000000000fULL | (u64{pred} << 16), target});
     }
+    /// R[dest] = R[src] + imm when P[pred]
+    void AddImmIf(u32 pred, u32 dest, u32 src, u32 imm) {
+        Emit((0x1c00000000070000ULL & ~(u64{0xf} << 16)) | (u64{pred} << 16) | dest |
+             (u64{src} << 8) | (u64{imm} << 20));
+    }
     /// @P[pred] KIL
     void Kill(u32 pred) {
         Emit(0xe33000000000000fULL | (u64{pred} << 16));
@@ -152,6 +157,33 @@ std::vector<u64> LoopThenKill() {
     a.Branch(2, "head");
     a.SetPred(1, 0, 2, 9);
     a.Kill(1);
+    a.Store(0, 0);
+    a.Exit();
+    return a.Code();
+}
+
+/// Two KILs: one on R0 == 7, then, on every other input, one that is not the first block of a
+/// selection: it follows a predicated instruction (`predicated`) or a loop (otherwise) inside
+/// the branch around it. Every input discards, input 7 through the first KIL.
+std::vector<u64> TwoKills(bool predicated) {
+    Assembler a;
+    a.LoadConst(0, 0, false);
+    a.LoadConst(2, 0x310, true);
+    a.SetPred(1, 0, 2, 7);
+    a.Kill(1);
+    a.Branch(1, "skip");
+    if (predicated) {
+        a.SetPred(2, 0, 2, 2);
+        a.AddImmIf(2, 0, 0, 1);
+    } else {
+        a.AddImm(20, 255, 2);
+        a.Label("head");
+        a.AddImm(20, 20, 0xffffffff);
+        a.SetPred(2, 20, 4, 0, true);
+        a.Branch(2, "head");
+    }
+    a.Kill(7);
+    a.Label("skip");
     a.Store(0, 0);
     a.Exit();
     return a.Code();
@@ -610,5 +642,23 @@ TEST_CASE("Demote reordering moves a demote after a loop and leaves the one insi
             discards |= ++r0 == 5;
         }
         CHECK(Discards(program, input) == (discards || r0 == 9));
+    }
+}
+
+TEST_CASE("Demote reordering keeps a demote it cannot move along with one it could",
+          "[shader][demote_reorder]") {
+    for (const bool predicated : {true, false}) {
+        for (const bool reorder : {false, true}) {
+            INFO("predicated " << predicated << " reorder " << reorder);
+            ObjectPool<IR::Inst> inst_pool;
+            ObjectPool<IR::Block> block_pool;
+            const auto code = TwoKills(predicated);
+            IR::Program program = Translate(inst_pool, block_pool, code, reorder);
+            CHECK(DominanceProblems(program).empty());
+            for (u32 input = 0; input < 10; ++input) {
+                INFO("input " << input);
+                CHECK(Discards(program, input));
+            }
+        }
     }
 }

@@ -906,12 +906,21 @@ private:
         std::vector<IR::U1> demote_conds;
         u32 num_epilogues{};
         u32 branch_depth{};
+        // A demote in a loop stays: its condition is one iteration's value, and a break before
+        // it can leave the loop on a path that never computed it
+        u32 loop_depth{};
         for (const IR::AbstractSyntaxNode& node : syntax_list) {
             if (node.type == Type::If) {
                 ++branch_depth;
             }
             if (node.type == Type::EndIf) {
                 --branch_depth;
+            }
+            if (node.type == Type::Loop) {
+                ++loop_depth;
+            }
+            if (node.type == Type::Repeat) {
+                --loop_depth;
             }
             if (node.type != Type::Block) {
                 continue;
@@ -920,7 +929,7 @@ private:
                 const IR::Opcode op{inst.GetOpcode()};
                 if (op == IR::Opcode::DemoteToHelperInvocation) {
                     // Skip reordering nested demote branches.
-                    if (branch_depth <= 1) {
+                    if (branch_depth <= 1 && loop_depth == 0) {
                         demote_blocks.push_back(node.data.block);
                     }
                     break;

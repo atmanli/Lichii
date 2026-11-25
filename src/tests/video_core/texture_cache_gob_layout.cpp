@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "common/page_table.h"
 #include "common/scope_exit.h"
@@ -125,21 +126,22 @@ struct TestImage : VideoCommon::ImageBase {
             std::ranges::copy(gpu_bytes, dest.begin());
             return;
         }
-        // A compact download of a rectangle of the D16 test image.
-        REQUIRE(info.format == VideoCore::Surface::PixelFormat::D16_UNORM);
+        using VideoCore::Surface::PixelFormat;
+        REQUIRE((info.format == PixelFormat::D16_UNORM || info.format == PixelFormat::D32_FLOAT));
+        const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(info.format);
         REQUIRE(copies.size() == 1);
         const auto& copy = copies.front();
         REQUIRE(copy.image_subresource.base_level == 0);
         REQUIRE(copy.image_subresource.base_layer == 0);
         REQUIRE(copy.image_subresource.num_layers == 1);
-        const u32 pitch = copy.image_extent.width * 2;
+        const u32 pitch = copy.image_extent.width * bytes_per_pixel;
         REQUIRE((copy.buffer_row_length == 0 || copy.buffer_row_length == copy.image_extent.width));
         REQUIRE(copy.image_offset.x >= 0);
         REQUIRE(copy.image_offset.y >= 0);
         REQUIRE(copy.buffer_offset + size_t{pitch} * copy.image_extent.height <= dest.size());
         for (u32 row = 0; row < copy.image_extent.height; ++row) {
             const size_t offset = (static_cast<size_t>(copy.image_offset.y + row) * info.size.width +
-                                   copy.image_offset.x) * 2;
+                                   copy.image_offset.x) * bytes_per_pixel;
             REQUIRE(offset + pitch <= gpu_bytes.size());
             std::copy_n(gpu_bytes.data() + offset, pitch,
                         dest.data() + copy.buffer_offset + size_t{row} * pitch);
@@ -430,8 +432,9 @@ TEST_CASE("An evicted depth image survives slot reuse and intervening byte write
     Fixture f{size + 0x10000};
     auto& cache = *f.cache;
     auto info = MakeInfo();
-    info.format = PixelFormat::D16_UNORM;
-    info.size = {4096, 4096, 1};
+    info.format = GENERATE(PixelFormat::D16_UNORM, PixelFormat::D32_FLOAT);
+    const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(info.format);
+    info.size = {4096, size / (4096 * bytes_per_pixel), 1};
     info.block = {0, 5, 0};
     info.native_tiling = true;
     REQUIRE(CalculateGuestSizeInBytes(info) == size);
@@ -441,7 +444,8 @@ TEST_CASE("An evicted depth image survives slot reuse and intervening byte write
         linear[i] = static_cast<u8>(0x40 + (i ^ (i >> 12) ^ (i >> 17)) % 0x80);
     }
     std::vector<u8> expected(size);
-    Tegra::Texture::SwizzleTexture(expected, linear, 2, 4096, 4096, 1, 5, 0, 0, true);
+    Tegra::Texture::SwizzleTexture(expected, linear, bytes_per_pixel, info.size.width,
+                                 info.size.height, 1, 5, 0, 0, true);
     Access::WriteGpu(cache, id, std::move(linear));
     REQUIRE(Access::CollectDownload(cache, id));
     Access::Delete(cache, id);

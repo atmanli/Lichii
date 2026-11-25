@@ -120,27 +120,6 @@ macro(sleep time)
     execute_process(COMMAND ${CMAKE_COMMAND} -E sleep ${time})
 endmacro()
 
-# Github release assets throttle unauthenticated clients; authenticate the
-# handful of hosts CPMUtil fetches from when the CI token is in GITHUB_TOKEN.
-# NETRC_FILE tells curl to send the credentials only to matching hosts, so the
-# presigned asset URL after the redirect keeps working.
-function(cpmutil_netrc_args out_args)
-    if(DEFINED ENV{GITHUB_TOKEN})
-        if(NOT CPMUTIL_NETRC OR NOT EXISTS "${CPMUTIL_NETRC}")
-            set(CPMUTIL_NETRC "${CMAKE_BINARY_DIR}/.cpmutil_netrc" CACHE INTERNAL
-                "Path to a netrc file for GitHub downloads" FORCE)
-            file(WRITE "${CPMUTIL_NETRC}" "")
-        endif()
-        file(CHMOD "${CPMUTIL_NETRC}" PERMISSIONS OWNER_READ OWNER_WRITE)
-        file(WRITE "${CPMUTIL_NETRC}"
-            "machine github.com login oauth2 password $ENV{GITHUB_TOKEN}\n")
-        set(${out_args} NETRC OPTIONAL NETRC_FILE "${CPMUTIL_NETRC}")
-    else()
-        unset(${out_args})
-    endif()
-    return(PROPAGATE ${out_args})
-endfunction()
-
 # Get a package's effective URL.
 function(get_package_url)
     set(oneValueArgs
@@ -196,7 +175,7 @@ function(get_cache_path package key out)
 endfunction()
 
 # Download a URL to file, with a sha512 hash
-# And retry transient failures
+# And retry 5 times
 function(cpm_download url file)
     echo("Downloading ${url} to ${file}")
     list(LENGTH ARGN argn_len)
@@ -207,35 +186,23 @@ function(cpm_download url file)
         unset(args)
     endif()
 
-    cpmutil_netrc_args(netrc_args)
-
-    foreach(attempt RANGE 1 8)
-        file(DOWNLOAD "${url}" "${file}"
+    foreach(i RANGE 5)
+        file(DOWNLOAD ${url} ${file}
             ${args}
-            ${netrc_args}
-            STATUS ret
-            TIMEOUT 300
-            INACTIVITY_TIMEOUT 60)
+            STATUS ret)
 
         list(GET ret 0 code)
-        list(GET ret 1 error_message)
         if (code EQUAL 0)
             break()
         endif()
 
-        file(REMOVE "${file}")
-        if(attempt LESS 8)
-            math(EXPR retry_delay "${attempt} * 5")
-            if(retry_delay GREATER 30)
-                set(retry_delay 30)
-            endif()
-            echo_error("Download failed: ${error_message}. Retrying in ${retry_delay} seconds")
-            sleep(${retry_delay})
-        endif()
+        echo_error("Download failed. Trying again in 5 seconds")
+        sleep(5)
     endforeach()
 
+    # TODO: use return code or something
     if (NOT code EQUAL 0)
-        fatal("Download for ${url} failed after 8 tries: ${error_message}")
+        fatal("Download for ${pkg_url} failed after 5 tries")
     endif()
 endfunction()
 
@@ -1084,65 +1051,46 @@ function(AddCIPackage)
         get_cache_path(${ARTIFACT_PACKAGE} ${ARTIFACT_KEY} artifact_cache_path)
         set(cached_sha512_file "${artifact_cache_path}/.cpm_archive_sha512")
 
-        # A cached package was already verified against its sha512sum; reuse that hash.
+        # A package already in the cache was verified against its sha512sum when it was
+        # downloaded; reuse that hash so configuring works while the host is unreachable
         if(EXISTS "${cached_sha512_file}")
             file(READ "${cached_sha512_file}" sha512sum_hash)
             string(STRIP "${sha512sum_hash}" sha512sum_hash)
         else()
             set(sha512sum_url
                 "https://${ARTIFACT_GIT_HOST}/${ARTIFACT_REPO}/releases/download/${ARTIFACT_VERSION}/${ARTIFACT}.sha512sum")
-            # Keep the checksum beside the package cache so it survives reconfigures.
-            get_cache_path(${ARTIFACT_PACKAGE} "${ARTIFACT_KEY}" ci_cache_path)
-            set(sha512sum_file "${ci_cache_path}.sha512sum")
+            set(sha512sum_file
+                "${CMAKE_CURRENT_BINARY_DIR}/.cpmutil_${ARTIFACT}_sha512sum")
 
             set(sha512sum_error 1)
-            set(sha512sum_error_message "checksum not cached")
-            if(NOT EXISTS "${sha512sum_file}")
-                cpmutil_netrc_args(sha512sum_netrc_args)
-                foreach(attempt RANGE 1 8)
-                    file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
-                        ${sha512sum_netrc_args}
-                        STATUS sha512sum_status
-                        TIMEOUT 60
-                        INACTIVITY_TIMEOUT 30)
-                    list(GET sha512sum_status 0 sha512sum_error)
-                    list(GET sha512sum_status 1 sha512sum_error_message)
-                    if(NOT sha512sum_error)
-                        break()
-                    endif()
-
-                    file(REMOVE "${sha512sum_file}")
-                    if(attempt LESS 8)
-                        math(EXPR retry_delay "${attempt} * 5")
-                        if(retry_delay GREATER 30)
-                            set(retry_delay 30)
-                        endif()
-                        message(WARNING "Retrying ${ARTIFACT_NAME} checksum download after: "
-                            "${sha512sum_error_message}")
-                        execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep ${retry_delay})
-                    endif()
-                endforeach()
-
-                if(sha512sum_error)
-                    message(FATAL_ERROR "[CPMUtil] Failed to download sha512sum "
-                        "for ${ARTIFACT_NAME} from ${sha512sum_url}: ${sha512sum_error_message}")
+            foreach(_cpm_try RANGE 1 5)
+                file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
+                    INACTIVITY_TIMEOUT 30
+                    STATUS sha512sum_status)
+                list(GET sha512sum_status 0 sha512sum_error)
+                if(NOT sha512sum_error)
+                    break()
                 endif()
+                message(STATUS "[CPMUtil] sha512sum download attempt ${_cpm_try} "
+                    "for ${ARTIFACT_NAME} failed, retrying in 5s...")
+                execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 5)
+            endforeach()
+
+            if(sha512sum_error)
+                message(FATAL_ERROR "[CPMUtil] Failed to download sha512sum "
+                    "for ${ARTIFACT_NAME} from ${sha512sum_url}")
             endif()
 
             file(READ "${sha512sum_file}" sha512sum_hash)
             string(STRIP "${sha512sum_hash}" sha512sum_hash)
-            if(NOT sha512sum_hash)
-                file(REMOVE "${sha512sum_file}")
-                message(FATAL_ERROR "[CPMUtil] Cached checksum for ${ARTIFACT_NAME} is empty. "
-                    "The stale checksum was removed; re-run CMake configuration "
-                    "to download it again.")
-            endif()
+            file(REMOVE "${sha512sum_file}")
 
             # Caches extracted before hashes were recorded get the hash now
             if(EXISTS "${artifact_cache_path}/.cpm_patch_key")
                 file(WRITE "${cached_sha512_file}" "${sha512sum_hash}")
             endif()
         endif()
+
         AddPackage(
             NAME ${ARTIFACT_PACKAGE}
             REPO ${ARTIFACT_REPO}

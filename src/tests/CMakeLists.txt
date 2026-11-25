@@ -68,7 +68,6 @@ add_executable(tests
     video_core/vulkan_address_map.cpp
     video_core/texture_rect_descriptor.cpp
     video_core/join_whole_copy.cpp
-    video_core/mip_chain_overlap.cpp
     video_core/padded_square.cpp
     audio_core/batch_decoder.cpp
     audio_core/adpcm_decode.cpp
@@ -128,6 +127,7 @@ add_executable(tests
     video_core/ampere_selevet_spills.cpp
     video_core/blit_dither.cpp
     video_core/maxwell_numeric.cpp
+    video_core/maxwell_r2p.cpp
     video_core/maxwell_permute_lod.cpp
     video_core/submission_policy.cpp
     video_core/native_pending_policy.cpp
@@ -313,6 +313,7 @@ add_executable(tests
     video_core/turing_macro_effects.cpp
     video_core/turing_macro_ram.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/vk_stream_ring.cpp
     video_core/usage_tracker.cpp
     video_core/nx2_backx.cpp
     video_core/vertex_input_cache.cpp

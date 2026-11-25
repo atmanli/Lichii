@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <new>
 #include <utility>
 
 #include "common/logging.h"
@@ -25,13 +26,20 @@ ImageReaper::~ImageReaper() {
 }
 
 void ImageReaper::Push(vk::Image image, u64 bytes) {
+    Entry entry{std::move(image), bytes};
     {
         std::scoped_lock lock{mutex};
         if (bytes > cap_bytes - pending_bytes) {
             ++refused;
             return;
         }
-        queue.push_back({std::move(image), bytes});
+        try {
+            queue.push_back(std::move(entry));
+        } catch (const std::bad_alloc&) {
+            // Fall back to destroying the image on the owner after unlocking.
+            ++refused;
+            return;
+        }
         pending_bytes += bytes;
         peak_bytes = (std::max)(peak_bytes, pending_bytes);
     }

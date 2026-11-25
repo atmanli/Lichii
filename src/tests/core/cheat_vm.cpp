@@ -193,3 +193,19 @@ TEST_CASE("Cheat VM's static stores leave out those after an else outside any bl
     CHECK(stores[0].cheat == 0);
     CHECK(stores[1].cheat == 1);
 }
+
+TEST_CASE("Cheat VM's static stores close the loops of a cheat that ends at a stray else",
+          "[core][cheats]") {
+    // The first cheat opens a loop (300R0000 on register 1) and ends at the else before its loop
+    // end: the next cheat's store runs once a run, outside any loop, and is listed as such.
+    const std::vector<u32> abandoned{0x30100000, 2, 0x21000000, 0x31100000};
+    const auto stores =
+        DmntCheatVm::MainStaticStores({Cheat(abandoned), Cheat(StoreStatic(4, 3))});
+    REQUIRE(stores.size() == 1);
+    CHECK(stores[0].cheat == 1);
+    CHECK(stores[0].begin == 0x1000);
+    // Execute agrees: the store happens.
+    const auto writes = Run(std::vector<std::vector<u32>>{abandoned, StoreStatic(4, 3)});
+    REQUIRE(writes.size() == 1);
+    CHECK(writes[0].value == 3);
+}

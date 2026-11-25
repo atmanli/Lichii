@@ -786,6 +786,7 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
     std::size_t loop_depth = 0;
     std::size_t conditional_depth = 0;
     std::size_t position = 0;
+    std::size_t cheat_loop_depth = 0; ///< loop_depth where the current cheat began
     const auto change = [&](u32 reg) { values[reg & 0xF].reset(); };
     const auto restores = [](SaveRestoreRegisterOpType type) {
         return type == SaveRestoreRegisterOpType::Restore ||
@@ -797,8 +798,11 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
         if (!vm.DecodeNextOpcode(opcode)) {
             break;
         }
-        while (position < ends.size() && start >= ends[position].first) {
-            ++position;
+        if (position < ends.size() && start >= ends[position].first) {
+            while (position < ends.size() && start >= ends[position].first) {
+                ++position;
+            }
+            cheat_loop_depth = loop_depth;
         }
         if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
             const auto offset = values[store->offset_register & 0xF];
@@ -813,10 +817,13 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
             ++conditional_depth;
         } else if (const auto* end_cond = std::get_if<EndConditionalOpcode>(&opcode.opcode)) {
             if (end_cond->is_else && conditional_depth == 0) {
-                // Execute ends the cheat there (SkipConditionalBlock): its later stores never run.
+                // Execute ends the cheat there (SkipConditionalBlock): its later stores never run,
+                // and the loop ends after the else are never reached, so the loops it opened
+                // leave nothing open for the next cheat. The registers it set stay set.
                 if (position < ends.size()) {
                     vm.instruction_ptr = ends[position].first;
                 }
+                loop_depth = cheat_loop_depth;
                 continue;
             }
             if (!end_cond->is_else && conditional_depth) {

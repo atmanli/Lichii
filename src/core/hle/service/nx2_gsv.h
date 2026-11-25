@@ -73,6 +73,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_movie_playback.h"
 #include "video_core/textures/decoders.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -3875,6 +3876,7 @@ private:
 
     // Called under m_mutex. The worker alone resets its codec, after an in-flight decode returns.
     void DiscardPendingFrames() {
+        m_movie_playback.SetActive(false);
         m_inputs.Clear();
         m_decoded.Reset();
         m_flush = true;
@@ -4041,6 +4043,7 @@ private:
                 m_outputs.push_back({image, width, height, frame.pts, frame.end});
                 const bool current_generation = generation == m_decoded.Generation();
                 if (frame.end && current_generation) {
+                    m_movie_playback.SetActive(false);
                     m_stream_ended = true;
                     m_end_queued = false;
                     m_ready->room.store(false, std::memory_order_relaxed);
@@ -4169,6 +4172,9 @@ private:
         if (discarded || m_quit) {
             pictures.clear();
             return;
+        }
+        if (parallel && !pictures.empty()) {
+            m_movie_playback.SetActive(true);
         }
         const size_t capacity =
             parallel ? Nx2VideoFrameQueue::Capacity : std::numeric_limits<size_t>::max();
@@ -4402,6 +4408,7 @@ private:
     u64 m_decoded_frames{};
     u64 m_frames_dropped{};
     Nx2MovieClock m_clock;
+    VideoCore::Nx2MoviePlayback m_movie_playback;
     u64 m_frame_interval{16667}; ///< us, from consecutive decoded frames
     u64 m_last_decoded_pts{};
     u32 m_dropped_in_a_row{};

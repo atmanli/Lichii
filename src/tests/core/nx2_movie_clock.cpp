@@ -3,11 +3,27 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/hle/service/nx2_movie_clock.h"
+#include "video_core/nx2_movie_playback.h"
 
 namespace {
 constexpr s64 Frame = 16667;
 constexpr s64 Start = 5'000'000;
 } // namespace
+
+TEST_CASE("NX2 movie playback ends with the last active decoder session", "[nx2_movie_clock]") {
+    VideoCore::Nx2MoviePlayback first;
+    REQUIRE_FALSE(first.AnyActive());
+    first.SetActive(true);
+    first.SetActive(true);
+    {
+        VideoCore::Nx2MoviePlayback second;
+        second.SetActive(true);
+        first.SetActive(false);
+        first.SetActive(false);
+        REQUIRE(second.AnyActive());
+    }
+    REQUIRE_FALSE(first.AnyActive());
+}
 
 TEST_CASE("NX2 movie clock ignores frames acquired ahead of it", "[nx2_movie_clock]") {
     // A player with two output images that takes each frame as soon as it is written, a frame

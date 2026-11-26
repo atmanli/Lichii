@@ -1805,6 +1805,14 @@ struct Nx2NativeObjects {
         return first;
     }
 
+    // An image that exists and is not a decoder output image (911), the only kind a decoded
+    // frame is written into. Ids are never reused, so a missing one cannot become such an image.
+    bool IsOtherImage(u32 id) {
+        std::scoped_lock lk{mutex};
+        const auto image = images.find(id);
+        return image != images.end() && !(image->second.decoder && image->second.decoder_mutex);
+    }
+
     std::shared_ptr<std::mutex> DecoderMutex(u32 id) {
         std::scoped_lock lk{mutex};
         const auto image = images.find(id);
@@ -3758,8 +3766,24 @@ private:
         return {~m_syncpoint, 0, value, 0};
     }
 
+    // 311 and 314 queue the image the guest names for decoded frames. An image of another kind
+    // is refused. A missing one (a release after 912, say) is queued as before, and WriteImage
+    // skips it.
+    bool RefuseNonDecoderImage(HLERequestContext& ctx, u32 image) {
+        if (!m_objects->IsOtherImage(image)) {
+            return false;
+        }
+        LOG_WARNING(Service, "{} {} refused: image {} is not a decoder image", GetServiceName(),
+                    ctx.GetCommand(), image);
+        TipcReplyResult(ctx, Kernel::ResultInvalidHandle);
+        return true;
+    }
+
     void RegisterBuffer(HLERequestContext& ctx) {
         Log(ctx, "register output");
+        if (RefuseNonDecoderImage(ctx, ctx.CommandBuffer()[2])) {
+            return;
+        }
         const auto handle = HandOut(ctx.CommandBuffer()[2], std::nullopt);
         TipcReplyWords(ctx, {handle[0], handle[1], handle[2], handle[3]});
     }
@@ -3767,6 +3791,9 @@ private:
     void ReleaseBuffer(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         Log(ctx, "release output");
+        if (RefuseNonDecoderImage(ctx, w[2])) {
+            return;
+        }
         {
             std::scoped_lock lk{m_mutex};
             const auto acquired = m_acquired_image;
@@ -4176,11 +4203,30 @@ private:
     // Writes a decoded frame into an output image; returns the size the frame reports.
     std::pair<u32, u32> WriteImage(Tegra::Host1x::Nx2VideoDecoder* decoder, u32 image_id,
                                    const Decoded& frame, std::vector<u8>& bytes) {
+        // Only a decoder image (911) takes a frame. The guest names the image (311/314), and a
+        // missing image, a window or native image (429, 1211, 1611: no decoder mutex) or one
+        // replaced since the mutex was read is skipped, never written unlocked.
         const auto image_mutex = m_objects->DecoderMutex(image_id);
-        std::unique_lock<std::mutex> image_lock;
-        if (image_mutex) {
-            image_lock = std::unique_lock{*image_mutex};
+        const auto skip = [&](const char* why) -> std::pair<u32, u32> {
+            if (Nx2VideoTraceEnabled()) {
+                LOG_INFO(Service, "nx2:vdec trace write skipped syncpoint={} image={} {}",
+                         m_syncpoint, image_id, why);
+            }
+            return {m_width, m_height};
+        };
+        if (!image_mutex) {
+            // A missing image (released after 912) is skipped quietly, as a destroyed one is.
+            if (!m_objects->IsOtherImage(image_id)) {
+                return skip("destroyed");
+            }
+            static std::atomic<bool> warned{};
+            if (!warned.exchange(true, std::memory_order_relaxed)) {
+                LOG_WARNING(Service, "nx2:vdec frame for image {}, not a decoder image: skipped",
+                            image_id);
+            }
+            return skip("not a decoder image");
         }
+        std::unique_lock image_lock{*image_mutex};
         u64 address{};
         u32 parent{};
         u64 parent_offset{};
@@ -4189,12 +4235,9 @@ private:
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(image_id);
-            if (image == m_objects->images.end() || image->second.decoder_mutex != image_mutex) {
-                if (Nx2VideoTraceEnabled()) {
-                    LOG_INFO(Service, "nx2:vdec trace write skipped syncpoint={} image={} destroyed",
-                             m_syncpoint, image_id);
-                }
-                return {m_width, m_height};
+            if (image == m_objects->images.end() || !image->second.decoder ||
+                image->second.decoder_mutex != image_mutex) {
+                return skip("destroyed");
             }
             layout = Nx2CalculateDecoderImageLayout(image->second.preference.data());
             block_linear = image->second.gpu_read &&

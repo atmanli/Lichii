@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <memory>
+#include <mutex>
 #include <optional>
 
 #include <catch2/catch_test_macros.hpp>
@@ -71,4 +73,19 @@ TEST_CASE("Memory ids are taken without wrapping", "[nx2_gsv]") {
     CHECK(objects.TakeMemoryId() == 0xFFFFFFFEU);
     CHECK(objects.TakeMemoryId() == std::nullopt);
     CHECK(objects.next_memory == 0xFFFFFFFF);
+}
+
+TEST_CASE("Only an existing image of another kind is refused decoded frames", "[nx2_gsv]") {
+    Service::Nx2NativeObjects objects;
+    auto& decoder = objects.images[1];
+    decoder.decoder = true;
+    decoder.decoder_mutex = std::make_shared<std::mutex>();
+    objects.images[2]; // a native image (429): no decoder mutex
+    auto& marked = objects.images[3];
+    marked.decoder = true; // marked a decoder image without its mutex
+    CHECK_FALSE(objects.IsOtherImage(1));
+    CHECK(objects.IsOtherImage(2));
+    CHECK(objects.IsOtherImage(3));
+    CHECK_FALSE(objects.IsOtherImage(4));
+    CHECK(objects.DecoderMutex(2) == nullptr);
 }

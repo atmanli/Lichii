@@ -21,6 +21,10 @@
 namespace Dynarmic {
 namespace A64 {
 
+/// An empty code cache for UserConfig::shared_code_cache (x64 backend only).
+/// Returns nullptr when the backend cannot safely share executable memory.
+std::shared_ptr<SharedCodeCache> MakeSharedCodeCache();
+
 class Jit final {
 public:
     explicit Jit(UserConfig conf);

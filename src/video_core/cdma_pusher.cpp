@@ -44,6 +44,11 @@ CDmaPusher::CDmaPusher(Host1x::Host1x& host1x_, s32 id)
 
             size_t i = 0;
             for (const auto value : command_list) {
+                // A stop ends the list in progress: what follows may use the device, or run
+                // syncpoint actions of services already gone, at shutdown.
+                if (stop_token.stop_requested()) {
+                    return;
+                }
                 i++;
                 if (mask != 0) {
                     const auto lbs = static_cast<u32>(std::countr_zero(mask));
@@ -92,7 +97,21 @@ CDmaPusher::CDmaPusher(Host1x::Host1x& host1x_, s32 id)
     });
 }
 
-CDmaPusher::~CDmaPusher() = default;
+CDmaPusher::~CDmaPusher() {
+    if (thread.joinable()) {
+        // Too late to be safe: the derived destructor has run and ProcessMethod is pure again.
+        LOG_ERROR(HW_GPU, "A CDmaPusher's thread outlived its derived destructor, which must call "
+                          "StopThread first");
+        StopThread();
+    }
+}
+
+void CDmaPusher::StopThread() {
+    if (thread.joinable()) {
+        thread.request_stop();
+        thread.join();
+    }
+}
 
 void CDmaPusher::ExecuteCommand(u32 method, u32 arg) {
     switch (current_class) {

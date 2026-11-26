@@ -75,6 +75,8 @@ public:
     ~GameList() override;
 
     QString GetLastFilterResultItem() const;
+    /// The games in the list, not counting Favorites' copies.
+    int GameCount() const;
     void ClearFilter();
     void SetFilterFocus();
     void SetFilterVisible(bool visibility);

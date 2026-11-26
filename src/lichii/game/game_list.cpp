@@ -112,7 +112,7 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
     connect(item_model, &GameListModel::SaveConfig, this, &GameList::SaveConfig);
     connect(item_model, &GameListModel::PopulatingStarted, this, &GameList::OnPopulate);
 
-    // TODO: impl on grid/carousel
+    // The grid and the carousel report theirs from OnTextChanged.
     connect(tree_view, &GameTree::FilterResultReady, search_field,
             [this](int visible, int total) { search_field->setFilterResult(visible, total); });
 
@@ -148,7 +148,29 @@ void GameList::SetupViews() {
 }
 
 QString GameList::GetLastFilterResultItem() const {
-    return tree_view->GetLastFilterResultItem();
+    if (m_isTreeMode) {
+        return tree_view->GetLastFilterResultItem();
+    }
+    // The grid and the carousel show the games without folders, and filter alike.
+    QString file_path;
+    for (int row = 0; row < item_model->rowCount(); ++row) {
+        if (!grid_view->isRowHidden(row)) {
+            file_path = item_model->item(row)->data(GameListItemPath::FullPathRole).toString();
+        }
+    }
+    return file_path;
+}
+
+int GameList::GameCount() const {
+    if (!m_isTreeMode) {
+        return item_model->rowCount();
+    }
+    int games = 0;
+    // The first row is Favorites and the last adds a directory; the rest are folders.
+    for (int i = 1; i < item_model->rowCount() - 1; ++i) {
+        games += item_model->item(i, 0)->rowCount();
+    }
+    return games;
 }
 
 void GameList::ClearFilter() {
@@ -288,7 +310,10 @@ void GameList::OnTextChanged(const QString& new_text) {
     if (m_isTreeMode) {
         tree_view->ApplyFilter(edit_filter_text, item_model);
     } else {
-        grid_view->ApplyFilter(edit_filter_text, item_model);
+        // Both views show the same flat list, and either can be switched to.
+        const int shown = grid_view->ApplyFilter(edit_filter_text, item_model);
+        carousel_view->ApplyFilter(edit_filter_text, item_model);
+        search_field->setFilterResult(shown, GameCount());
     }
 }
 
@@ -364,10 +389,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     m_populating = false;
     m_currentView->setEnabled(true);
 
-    int children_total = 0;
-    for (int i = 1; i < item_model->rowCount() - 1; ++i) {
-        children_total += item_model->item(i, 0)->rowCount();
-    }
+    const int children_total = GameCount();
 
     search_field->setFilterResult(children_total, children_total);
     if (children_total > 0) {

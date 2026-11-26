@@ -959,8 +959,41 @@ private:
         if (!std::ranges::all_of(demote_blocks, is_if_body)) {
             return;
         }
-        s64 last_iterator_offset{};
         auto& asl{syntax_list};
+        const auto epilogue_func{[](const IR::AbstractSyntaxNode& asn) {
+            if (asn.type != Type::Block) {
+                return false;
+            }
+            for (const auto& inst : asn.data.block->Instructions()) {
+                if (inst.GetOpcode() == IR::Opcode::Epilogue) {
+                    return true;
+                }
+            }
+            return false;
+        }};
+        // The combined demote goes before the last block with the epilogue, so that block must
+        // follow every demote's selection: a program whose only EXIT comes before a demote would
+        // use the demote's condition before computing it
+        const auto epilogue_it{std::find_if(asl.rbegin(), asl.rend(), epilogue_func)};
+        if (epilogue_it == asl.rend()) {
+            return;
+        }
+        const auto epilogue_index{std::distance(asl.begin(), epilogue_it.base()) - 1};
+        const auto ends_before_epilogue{[&](const IR::Block* demote_block) {
+            const auto if_it{std::ranges::find_if(asl, [&](const IR::AbstractSyntaxNode& asn) {
+                return asn.type == Type::If && asn.data.if_node.body == demote_block;
+            })};
+            const IR::Block* const merge{if_it->data.if_node.merge};
+            const auto end_if_it{
+                std::find_if(if_it, asl.end(), [&](const IR::AbstractSyntaxNode& asn) {
+                    return asn.type == Type::EndIf && asn.data.end_if.merge == merge;
+                })};
+            return std::distance(asl.begin(), end_if_it) < epilogue_index;
+        }};
+        if (!std::ranges::all_of(demote_blocks, ends_before_epilogue)) {
+            return;
+        }
+        s64 last_iterator_offset{};
         for (const IR::Block* demote_block : demote_blocks) {
             const auto start_it{asl.begin() + last_iterator_offset};
             auto asl_it{std::find_if(start_it, asl.end(), [&](const IR::AbstractSyntaxNode& asn) {
@@ -985,17 +1018,6 @@ private:
             });
             asl_it = asl.erase(asl_it);
         }
-        const auto epilogue_func{[](const IR::AbstractSyntaxNode& asn) {
-            if (asn.type != Type::Block) {
-                return false;
-            }
-            for (const auto& inst : asn.data.block->Instructions()) {
-                if (inst.GetOpcode() == IR::Opcode::Epilogue) {
-                    return true;
-                }
-            }
-            return false;
-        }};
         const auto reverse_it{std::find_if(asl.rbegin(), asl.rend(), epilogue_func)};
         const auto return_block_it{(reverse_it + 1).base()};
 

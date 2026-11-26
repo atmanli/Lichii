@@ -323,9 +323,13 @@ std::vector<u32> Emit(IR::Program& program, const std::string& name) {
     std::vector<u32> spirv = Backend::SPIRV::EmitSPIRV(profile, program);
     if (const char* const directory = std::getenv("EDEN_DEMOTE_REORDER_TEST_OUTPUT")) {
         std::filesystem::create_directories(directory);
-        std::ofstream file{std::filesystem::path{directory} / (name + ".spv"), std::ios::binary};
+        const std::filesystem::path path{std::filesystem::path{directory} / (name + ".spv")};
+        std::ofstream file{path, std::ios::binary};
         file.write(reinterpret_cast<const char*>(spirv.data()),
                    static_cast<std::streamsize>(spirv.size() * sizeof(u32)));
+        file.close();
+        INFO("writing " << path.string());
+        REQUIRE(file.good());
     }
     return spirv;
 }

@@ -292,6 +292,10 @@ NvResult nvhost_ctrl::IocCtrlClearEventWait(IocCtrlEventClearParams& params) {
     auto lock = NvEventsLock();
 
     auto& event = events[event_id];
+    // A slot never registered, or unregistered since, has no KEvent to clear.
+    if (!event.registered) {
+        return NvResult::BadParameter;
+    }
     const EventState previous =
         event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel);
     // Deregistered whatever the state was: a callback that already moved the event to

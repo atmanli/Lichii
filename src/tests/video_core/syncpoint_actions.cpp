@@ -248,13 +248,20 @@ TEST_CASE("Cancelling a running syncpoint action returns once it is done",
     while (!entered) {
         std::this_thread::yield();
     }
-    std::thread releaser{[&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        release = true;
+    // The cancel runs on its own thread: it must not return while the action still runs.
+    std::atomic<bool> cancelled{false};
+    std::thread canceller{[&] {
+        manager.DeregisterGuestAction(0, handle);
+        cancelled = true;
     }};
-    manager.DeregisterGuestAction(0, handle);
+    // A cancel that returned at once would show here; one too slow to have started yet only
+    // makes this check pass without testing, never fail wrongly.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK_FALSE(cancelled.load()); // CHECK: the threads below still get released and joined
+    release = true;
+    canceller.join();
+    REQUIRE(cancelled.load());
     REQUIRE(done);
-    releaser.join();
     incrementer.join();
 }
 
@@ -275,13 +282,20 @@ TEST_CASE("Cancelling a running host syncpoint action returns once it is done",
     while (!entered) {
         std::this_thread::yield();
     }
-    std::thread releaser{[&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        release = true;
+    // The cancel runs on its own thread: it must not return while the action still runs.
+    std::atomic<bool> cancelled{false};
+    std::thread canceller{[&] {
+        manager.DeregisterHostAction(0, handle);
+        cancelled = true;
     }};
-    manager.DeregisterHostAction(0, handle);
+    // A cancel that returned at once would show here; one too slow to have started yet only
+    // makes this check pass without testing, never fail wrongly.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK_FALSE(cancelled.load()); // CHECK: the threads below still get released and joined
+    release = true;
+    canceller.join();
+    REQUIRE(cancelled.load());
     REQUIRE(done);
-    releaser.join();
     incrementer.join();
 }
 

@@ -5140,7 +5140,7 @@ private:
         u64 relayout_address{};
         Nx2DecoderImageLayout relayout_layout{};
         {
-            std::scoped_lock lk{m_objects->mutex};
+            std::unique_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(handle);
             if (image == m_objects->images.end() || image->second.decoder_mutex != image_mutex) {
                 return false;
@@ -5154,7 +5154,11 @@ private:
                 Nx2NativeObjects::WarnOutsideMemory("query", handle, image->second.offset,
                                                     image->second.size,
                                                     Nx2NativeObjects::Limit(memory->second));
-                return false;
+                // An error, not the native-image reply, which would answer success with the
+                // memory's address and a layout past the bound.
+                lk.unlock();
+                TipcReplyResult(ctx, Kernel::ResultInvalidSize);
+                return true;
             }
             image->second.gpu_read = true;
             if (std::exchange(image->second.pitch_frame, false)) {

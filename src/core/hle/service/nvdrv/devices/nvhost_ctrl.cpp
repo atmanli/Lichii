@@ -29,7 +29,17 @@ nvhost_ctrl::nvhost_ctrl(Core::System& system_, EventInterface& events_interface
       syncpoint_manager{core_.GetSyncpointManager()} {}
 
 nvhost_ctrl::~nvhost_ctrl() {
+    // A wait still registered on Host1x's syncpoint manager would run after this device is gone,
+    // writing its event's status and signalling its freed KEvent. The syncpoint can still be
+    // incremented: by the GPU's fencing thread and by Host1x's device lists (Nvdec, Vic), which
+    // outlive nvdrv at shutdown, and by anything at all when the guest closes this device during
+    // play. Deregistering returns once an action already running has finished.
+    auto& host1x_syncpoint_manager = system.Host1x().GetSyncpointManager();
     for (auto& event : events) {
+        if (event.wait_handle != 0) {
+            host1x_syncpoint_manager.DeregisterHostAction(event.assigned_syncpt, event.wait_handle);
+            event.wait_handle = {};
+        }
         if (!event.registered) {
             continue;
         }

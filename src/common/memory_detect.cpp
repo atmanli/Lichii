@@ -300,17 +300,24 @@ void LimitHeapArenas() {
 
 #if defined(__linux__) && defined(__GLIBC__)
 namespace {
+// stdio rather than a stream: this runs on the trim thread when RAM is short, and a stream's
+// buffer allocation throwing there would terminate the emulator. A failed read counts as 0.
 u64 PrivateMemory() {
-    std::ifstream status{"/proc/self/status"};
-    u64 bytes = 0;
-    for (std::string line; std::getline(status, line);) {
-        for (const std::string_view key : {"RssAnon:", "VmSwap:"}) {
-            if (line.starts_with(key)) {
-                bytes += std::strtoull(line.c_str() + key.size(), nullptr, 10) << 10;
-            }
+    std::FILE* const file = std::fopen("/proc/self/status", "r");
+    if (file == nullptr) {
+        return 0;
+    }
+    u64 kib = 0;
+    char line[128];
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        unsigned long long value = 0;
+        if (std::sscanf(line, "RssAnon: %llu kB", &value) == 1 ||
+            std::sscanf(line, "VmSwap: %llu kB", &value) == 1) {
+            kib += value;
         }
     }
-    return bytes;
+    std::fclose(file);
+    return kib * 1024;
 }
 } // namespace
 #endif

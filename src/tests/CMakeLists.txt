@@ -94,6 +94,7 @@ add_executable(tests
     core/cheat_parser.cpp
     core/cheat_vm.cpp
     core/builtin_font_glyphs.cpp
+    core/parser_regressions.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_capture_end.cpp

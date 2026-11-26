@@ -2011,6 +2011,14 @@ inline constexpr u64 Nx2MaxDecoderPoolSize = u64{2} << 30;
 // keeps one command from taking the id space.
 inline constexpr u32 Nx2MaxNativeImages = 65536;
 
+// `count` images of `size` bytes, or none if the product does not fit in 64 bits (435, 1291).
+inline std::optional<u64> Nx2ImagesSize(u64 size, u32 count) {
+    if (size != 0 && count > ~u64{0} / size) {
+        return std::nullopt;
+    }
+    return size * count;
+}
+
 // The pool's layout if its preference and count are within the limits above.
 inline std::optional<Nx2DecoderImageLayout> Nx2CheckedDecoderPool(const u32* preference,
                                                                   u32 count) {
@@ -4881,7 +4889,14 @@ private:
     // 435(preference[16], u32 count): result, u64 size of a GPU native image.
     void CalculateNativeImageSize(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
-        const u64 size = Nx2CalculateImageLayout(w + 2).size * std::max<u32>(w[18], 1);
+        const auto total =
+            Nx2ImagesSize(Nx2CalculateImageLayout(w + 2).size, std::max<u32>(w[18], 1));
+        if (!total) {
+            LOG_WARNING(Service, "nx2:gsv 435 refused: count={} overflows the size", w[18]);
+            TipcReplyResult(ctx, Kernel::ResultInvalidSize);
+            return;
+        }
+        const u64 size = *total;
         LOG_DEBUG(Service, "nx2:gsv 435 count={} -> size={:#x}", w[18], size);
         TipcReplyWords(ctx, {static_cast<u32>(size), static_cast<u32>(size >> 32)});
     }
@@ -5009,7 +5024,14 @@ private:
     void CalculateChatImagePoolSize(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         const auto layout = Nx2CalculateImageLayout(w + 2);
-        const u64 size = layout.size * std::max<u32>(w[18], 1);
+        const auto total = Nx2ImagesSize(layout.size, std::max<u32>(w[18], 1));
+        if (!total) {
+            LOG_WARNING(Service, "nx2:gsv {} refused: {}x{} count={} overflows the size",
+                        ctx.GetCommand(), layout.width, layout.height, w[18]);
+            TipcReplyResult(ctx, Kernel::ResultInvalidSize);
+            return;
+        }
+        const u64 size = *total;
         LOG_DEBUG(Service, "nx2:gsv 1291 {}x{} count={} -> size={:#x}", layout.width,
                   layout.height, w[18], size);
         TipcReplyWords(ctx, {static_cast<u32>(size), static_cast<u32>(size >> 32),

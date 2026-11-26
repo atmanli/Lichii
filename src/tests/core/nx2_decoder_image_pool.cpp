@@ -113,3 +113,17 @@ TEST_CASE("A decoder image is written only within its memory", "[nx2_gsv]") {
     CHECK_FALSE(Nx2NativeObjects::Holds(empty, 0, 1));
     CHECK(Nx2NativeObjects::Limit(bound) == 0x4000);
 }
+
+TEST_CASE("An image pool's size is refused when it does not fit in 64 bits", "[nx2_gsv]") {
+    using Service::Nx2ImagesSize;
+    CHECK(Nx2ImagesSize(0x1000, 3) == 0x3000U);
+    CHECK(Nx2ImagesSize(0, 0xFFFFFFFF) == 0U);
+    CHECK(Nx2ImagesSize(u64{1} << 32, 0xFFFFFFFF) == (u64{1} << 32) * 0xFFFFFFFFULL);
+    CHECK(Nx2ImagesSize(u64{1} << 33, 0xFFFFFFFF) == std::nullopt);
+    CHECK(Nx2ImagesSize(~u64{0}, 1) == ~u64{0});
+    CHECK(Nx2ImagesSize(~u64{0}, 2) == std::nullopt);
+    // Exactly 2^64, and 2^64 - 2^31.
+    CHECK(Nx2ImagesSize(u64{1} << 33, 0x80000000) == std::nullopt);
+    CHECK(Nx2ImagesSize((u64{1} << 33) - 1, 0x80000000) ==
+          ((u64{1} << 33) - 1) * 0x80000000ULL);
+}

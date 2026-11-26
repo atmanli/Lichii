@@ -133,6 +133,12 @@ inline void TipcReplyWords(HLERequestContext& ctx, std::initializer_list<u32> wo
     TipcReplyWords(ctx, std::span<const u32>{words.begin(), words.size()});
 }
 
+// Replies to a TIPC request with a failure result and no data.
+inline void TipcReplyResult(HLERequestContext& ctx, Result result) {
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.PushRaw<u32>(result.raw);
+}
+
 // TIPC 0(u64 token) on the Switch 2 sessions: a handshake newer SDKs send first; the reply echoes
 // the token. (The auto stub's reply only echoed it by leaving the request's words in place.)
 inline void TipcHandshake(HLERequestContext& ctx, std::string_view session) {
@@ -1779,6 +1785,26 @@ struct Nx2NativeObjects {
     u32 next_memory{1};
     u32 next_image{1};
 
+    // Takes a memory id, or none once ids would wrap onto a live memory. Call with `mutex` held.
+    std::optional<u32> TakeMemoryId() {
+        if (next_memory == ~u32{0}) {
+            return std::nullopt;
+        }
+        return next_memory++;
+    }
+
+    // Takes `count` (at least 1) consecutive image ids, or none once ids would wrap (the client
+    // names image i of a pool id + i, so a wrapped id would land on a live image). Call with
+    // `mutex` held.
+    std::optional<u32> TakeImageIds(u32 count) {
+        if (count == 0 || count > ~u32{0} - next_image) {
+            return std::nullopt;
+        }
+        const u32 first = next_image;
+        next_image += count;
+        return first;
+    }
+
     std::shared_ptr<std::mutex> DecoderMutex(u32 id) {
         std::scoped_lock lk{mutex};
         const auto image = images.find(id);
@@ -1937,6 +1963,30 @@ inline Nx2DecoderImageLayout Nx2CalculateDecoderImageLayout(const u32* preferenc
     layout.chroma_offset = layout.pitch * Common::AlignUp(u64{layout.height}, BlockRows);
     layout.size = layout.chroma_offset +
                   (nv12 ? layout.pitch * Common::AlignUp((u64{layout.height} + 1) / 2, BlockRows) : 0);
+    return layout;
+}
+
+// Limits on a decoder image pool (991, 911), chosen far above any video's (no real service's are
+// known): a frame of up to 8192 rows of 8192 pixels, so at most 256 MiB an image, 64 images, 2 GiB
+// in all. Without them the guest's preference sizes an image's layout at up to 16 GiB (RGBA; 6 GiB
+// NV12), which the decode thread's frame buffers and the relayout allocate, and any number of
+// images.
+inline constexpr u32 Nx2MaxDecoderImageDimension = 8192;
+inline constexpr u32 Nx2MaxDecoderImages = 64;
+inline constexpr u64 Nx2MaxDecoderPoolSize = u64{2} << 30;
+// Native images one 429-family command reserves ids for, chosen: no real count is known, and this
+// keeps one command from taking the id space.
+inline constexpr u32 Nx2MaxNativeImages = 65536;
+
+// The pool's layout if its preference and count are within the limits above.
+inline std::optional<Nx2DecoderImageLayout> Nx2CheckedDecoderPool(const u32* preference,
+                                                                  u32 count) {
+    const auto layout = Nx2CalculateDecoderImageLayout(preference);
+    if (layout.width > Nx2MaxDecoderImageDimension ||
+        layout.height > Nx2MaxDecoderImageDimension || count > Nx2MaxDecoderImages ||
+        layout.size * count > Nx2MaxDecoderPoolSize) {
+        return std::nullopt;
+    }
     return layout;
 }
 
@@ -4737,8 +4787,16 @@ private:
     // bytes per pixel for the other codes; nothing is decoded into them yet.
     void CalculateDecoderImagePoolBuffer(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
-        const auto layout = Nx2CalculateDecoderImageLayout(w + 2);
         const u32 count = std::max<u32>(w[18], 1);
+        const auto checked = Nx2CheckedDecoderPool(w + 2, count);
+        if (!checked) {
+            const auto asked = Nx2CalculateDecoderImageLayout(w + 2);
+            LOG_WARNING(Service, "nx2:gsv 991 decoder image pool refused: code={} {}x{} count={}",
+                        asked.code, asked.width, asked.height, count);
+            TipcReplyResult(ctx, Kernel::ResultOutOfMemory);
+            return;
+        }
+        const auto& layout = *checked;
         const u64 size = layout.size * count;
         const u64 alignment = 64 * 128;
         LOG_INFO(Service, "nx2:gsv 991 decoder image pool code={} {}x{} count={} -> size={:#x}",
@@ -4764,7 +4822,13 @@ private:
         const auto* w = ctx.CommandBuffer();
         const u64 size = Pair(w, 3);
         std::scoped_lock lk{m_objects->mutex};
-        const u32 id = m_objects->next_memory++;
+        const auto taken = m_objects->TakeMemoryId();
+        if (!taken) {
+            LOG_WARNING(Service, "nx2:gsv 111 CreateNativeMemory refused: no memory ids left");
+            TipcReplyResult(ctx, Kernel::ResultOutOfResource);
+            return;
+        }
+        const u32 id = *taken;
         m_objects->memories[id] = {size, 0};
         LOG_INFO(Service, "nx2:gsv 111 CreateNativeMemory mode={} size={:#x} -> id {}", w[2] & 0xFF,
                  size, id);
@@ -4825,11 +4889,19 @@ private:
     void CreateNativeImage(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         std::scoped_lock lk{m_objects->mutex};
-        const u32 id = m_objects->next_image;
-        auto& image = m_objects->images[id];
-        image.count = std::max<u32>(w[18], 1);
+        const u32 count = std::max<u32>(w[18], 1);
         // nn::gs::sdk::CalculateNativeImageHandle(pool, i) is pool + i, so keep those free.
-        m_objects->next_image += image.count;
+        const auto taken =
+            count <= Nx2MaxNativeImages ? m_objects->TakeImageIds(count) : std::nullopt;
+        if (!taken) {
+            LOG_WARNING(Service, "nx2:gsv {} native image refused: count={}", ctx.GetCommand(),
+                        count);
+            TipcReplyResult(ctx, Kernel::ResultOutOfResource);
+            return;
+        }
+        const u32 id = *taken;
+        auto& image = m_objects->images[id];
+        image.count = count;
         image.memory = w[19];
         std::copy_n(w + 2, image.preference.size(), image.preference.begin());
         image.size = Nx2CalculateImageLayout(w + 2).size;
@@ -5043,10 +5115,23 @@ private:
     void CreateDecoderImage(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         const u32 count = std::max<u32>(w[18], 1);
-        const auto layout = Nx2CalculateDecoderImageLayout(w + 2);
+        const auto checked = Nx2CheckedDecoderPool(w + 2, count);
+        if (!checked) {
+            const auto asked = Nx2CalculateDecoderImageLayout(w + 2);
+            LOG_WARNING(Service, "nx2:gsv 911 decoder images refused: code={} {}x{} count={}",
+                        asked.code, asked.width, asked.height, count);
+            TipcReplyResult(ctx, Kernel::ResultOutOfMemory);
+            return;
+        }
+        const auto& layout = *checked;
         std::scoped_lock lk{m_objects->mutex};
-        const u32 first = m_objects->next_image;
-        m_objects->next_image += count;
+        const auto taken = m_objects->TakeImageIds(count);
+        if (!taken) {
+            LOG_WARNING(Service, "nx2:gsv 911 decoder images refused: no image ids left");
+            TipcReplyResult(ctx, Kernel::ResultOutOfResource);
+            return;
+        }
+        const u32 first = *taken;
         for (u32 i = 0; i < count; ++i) {
             auto& image = m_objects->images[first + i];
             image.memory = w[19];

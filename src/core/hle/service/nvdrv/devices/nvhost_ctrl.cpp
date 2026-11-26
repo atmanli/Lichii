@@ -292,12 +292,19 @@ NvResult nvhost_ctrl::IocCtrlClearEventWait(IocCtrlEventClearParams& params) {
     auto lock = NvEventsLock();
 
     auto& event = events[event_id];
-    if (event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel) ==
-        EventState::Waiting) {
+    const EventState previous =
+        event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel);
+    // Deregistered whatever the state was: a callback that already moved the event to
+    // Signalling is still running, and returning before it ends would let a new wait reuse the
+    // slot and the old callback's last store mark it Signalled. Deregistering waits for a
+    // running callback, which does not take events_mutex.
+    if (event.wait_handle != 0) {
         auto& host1x_syncpoint_manager = system.Host1x().GetSyncpointManager();
         host1x_syncpoint_manager.DeregisterHostAction(event.assigned_syncpt, event.wait_handle);
-        syncpoint_manager.UpdateMin(event.assigned_syncpt);
         event.wait_handle = {};
+    }
+    if (previous == EventState::Waiting) {
+        syncpoint_manager.UpdateMin(event.assigned_syncpt);
     }
     event.fails++;
     event.status.store(EventState::Cancelled, std::memory_order_release);

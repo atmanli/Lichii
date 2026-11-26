@@ -551,7 +551,7 @@ private:
 
     void EndRenderPass();
 
-    void AcquireNewChunk();
+    std::unique_ptr<CommandChunk> AcquireNewChunk();
 
     static void JoinActiveRecorders(std::source_location site);
 

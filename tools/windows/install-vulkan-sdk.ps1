@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# SPDX-FileCopyrightText: 2023 yuzu Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 $ErrorActionPreference = "Stop"
@@ -33,8 +34,17 @@ if (Test-Path $VULKAN_SDK) {
 }
 
 echo "Downloading Vulkan SDK $VulkanSDKVer from $Uri"
-$WebClient = New-Object System.Net.WebClient
-$WebClient.DownloadFile($Uri, $Destination)
+for ($i = 1; $i -le 5; $i++) {
+    try {
+        $WebClient = New-Object System.Net.WebClient
+        $WebClient.DownloadFile($Uri, $Destination)
+        break
+    } catch {
+        if ($i -eq 5) { throw }
+        Write-Host "Vulkan SDK download attempt $i failed, retrying in 5s..."
+        Start-Sleep -Seconds 5
+    }
+}
 echo "Finished downloading $ExeFile"
 
 $Arguments = "--root `"$VULKAN_SDK`" --accept-licenses --default-answer --confirm-command install"

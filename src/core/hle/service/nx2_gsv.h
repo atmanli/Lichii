@@ -4925,6 +4925,25 @@ private:
 
     void DestroyNativeMemory(HLERequestContext& ctx) {
         const u32 id = ctx.CommandBuffer()[2];
+        // The decode thread writes a frame into a decoder image holding only that image's mutex,
+        // after it read the image's memory address under m_objects->mutex. Hold the mutexes of
+        // the images this memory backs before it goes, taken before m_objects->mutex as
+        // WriteImage, 426/428 and 912 take them: a write in flight finishes first, and a later
+        // one finds the memory gone and skips its frame.
+        std::vector<std::shared_ptr<std::mutex>> image_mutexes;
+        {
+            std::scoped_lock lk{m_objects->mutex};
+            for (const auto& [image_id, image] : m_objects->images) {
+                if (image.memory == id && image.decoder_mutex) {
+                    image_mutexes.push_back(image.decoder_mutex);
+                }
+            }
+        }
+        std::vector<std::unique_lock<std::mutex>> image_locks;
+        image_locks.reserve(image_mutexes.size());
+        for (const auto& image_mutex : image_mutexes) {
+            image_locks.emplace_back(*image_mutex);
+        }
         std::vector<std::optional<std::pair<u64, u64>>> unmaps;
         {
             std::scoped_lock lk{m_objects->mutex};
@@ -4935,6 +4954,9 @@ private:
             }
             m_objects->memories.erase(id);
         }
+        // A write that comes now finds the memory gone. Unmapping can wait for the GPU thread,
+        // and the decode threads need not wait for it.
+        image_locks.clear();
         for (const auto& range : unmaps) {
             DropDecoderMapping(range);
         }

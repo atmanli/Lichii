@@ -27,6 +27,10 @@
 #include <string_view>
 #endif
 
+#if defined(__linux__) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -272,6 +276,53 @@ bool IsHostLowOnMemory() {
                   std::memory_order_relaxed);
     }
     return low.load(std::memory_order_relaxed);
+}
+
+bool SetsMallocTunables(std::string_view glibc_tunables) {
+    return glibc_tunables.starts_with("glibc.malloc.") ||
+           glibc_tunables.find(":glibc.malloc.") != std::string_view::npos;
+}
+
+void LimitHeapArenas() {
+#if defined(__linux__) && defined(__GLIBC__)
+    using namespace Common::Literals;
+    if (GetMemInfo().TotalPhysicalMemory > 18_GiB) {
+        return;
+    }
+    const char* const tunables = std::getenv("GLIBC_TUNABLES");
+    if (std::getenv("MALLOC_ARENA_MAX") != nullptr ||
+        (tunables != nullptr && SetsMallocTunables(tunables))) {
+        return;
+    }
+    mallopt(M_ARENA_MAX, 4);
+#endif
+}
+
+#if defined(__linux__) && defined(__GLIBC__)
+namespace {
+u64 PrivateMemory() {
+    std::ifstream status{"/proc/self/status"};
+    u64 bytes = 0;
+    for (std::string line; std::getline(status, line);) {
+        for (const std::string_view key : {"RssAnon:", "VmSwap:"}) {
+            if (line.starts_with(key)) {
+                bytes += std::strtoull(line.c_str() + key.size(), nullptr, 10) << 10;
+            }
+        }
+    }
+    return bytes;
+}
+} // namespace
+#endif
+
+HeapTrimResult TrimHeap() {
+    HeapTrimResult result;
+#if defined(__linux__) && defined(__GLIBC__)
+    result.before = PrivateMemory();
+    malloc_trim(0);
+    result.after = PrivateMemory();
+#endif
+    return result;
 }
 
 } // namespace Common

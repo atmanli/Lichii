@@ -1,4 +1,12 @@
-# Eglantine CI and release guide
+# CI and release guide
+
+## Lichii release builds
+
+Run `release-binaries` on the desired branch. Set `publish_release`, `include_whats_new`, and `nsight_aftermath` to false for an unpublished test of the full release matrix. The PGO mismatch summary runs only for the Linux x86_64 and Windows x86_64 PGO jobs. It counts compiler warnings, including how many report discarding nonzero counts and, for Linux, how many warn that a function has no profile data.
+
+Linux ARM64 PGO installations with the fallback updater (starting with build 116) select the standard ARM64 package on their next update to a release without PGO: AppImage for AppImage installations, `.tar.gz` for unpacked installations. A writable AppImage can be replaced in place; a tarball must be unpacked manually. Builds 75 and 83 match only PGO assets and can first update through an existing PGO release such as [build 386](https://github.com/zortos293/Lichii/releases/tag/build-386) while the updater still lists it. If no update appears, or if you use build 70, which shipped without an updater, download the standard ARM64 package from [GitHub Releases](https://github.com/zortos293/Lichii/releases).
+
+## Eglantine pipeline design (not Lichii's active workflow)
 
 This document describes the split GitHub Actions pipeline added with this change. It is not yet a live workflow until the files have been merged to the required branches and the repository settings below have been applied.
 
@@ -55,7 +63,7 @@ Open Actions → `ci` → Run workflow. Select the branch to build and choose:
 
 - **kind**: `branch` for a test build, or `daily` for a forced daily build of `nx2` only.
 - **platforms**: `all`, `linux`, `windows`, or `macos`. A single-platform run produces a partial release with only that platform's assets.
-- **pgo**: `none` or `both`. For manual runs, `none` is the default. `both` adds PGO variants where supported (Linux x86_64/ARM64 and Windows x86_64); macOS has no PGO variant.
+- **pgo**: `none` or `both`. For manual runs, `none` is the default. `both` adds the Linux x86_64 and Windows x86_64 PGO variants. Linux ARM64 and macOS have no PGO variant.
 - **publish**: enabled by default. Disable it to keep the build as workflow artifacts without creating/updating a GitHub release.
 
 For automatic `nx2` version releases and scheduled daily builds, the workflow requests both PGO variants by default. Label-triggered PR builds default to non-PGO to keep test builds quicker.
@@ -79,13 +87,43 @@ Both the scheme-preparation job and the publishing job check out CI helper scrip
 | Platform            | Default output               | Optional PGO output    |
 | ------------------- | ---------------------------- | ---------------------- |
 | Linux x86_64        | AppImage and `.tar.gz`       | AppImage and `.tar.gz` |
-| Linux aarch64       | AppImage and `.tar.gz`       | AppImage and `.tar.gz` |
+| Linux aarch64       | AppImage and `.tar.gz`       | Not built              |
 | Windows x86_64      | clang-cl + ThinLTO `.zip`    | clang-cl + ThinLTO + PGO `.zip` |
 | macOS Apple Silicon | App bundle `.zip` and `.dmg` | Not built              |
 
 The existing build steps use the repository's current CMake targets (`lichii` and `lichii-cmd`) and package the produced `eglantine` and `eden-cli` binaries. Linux AppImages require glibc 2.39 or newer. Linux tarballs hold the same files as the AppImage, unpacked, with `lichii` and `eden-cli` links at the top. The standard Windows build uses clang-cl from a pinned LLVM release (`tools/windows/install-llvm.ps1`, shared with the Windows build-check job) in Release mode with ThinLTO, against the MSVC headers, runtime and SDK. MSVC itself still builds the project for development but is not used for releases. Windows archives contain the deployed runtime dependencies. macOS artifacts are ad-hoc signed, not notarized; Gatekeeper may require the user to approve the app on first launch.
 
 Build artifacts are retained for seven days. Published GitHub Release assets remain available until a release is deleted. Daily releases are pruned to approximately the seven most recent; branch releases are rolling and are cleaned up when no longer needed.
+
+## Build caches
+
+`build-check.yml` and `release-binaries.yml` cache compiler objects (ccache on every platform, plus lld's ThinLTO cache for the Windows release builds), CPM downloads, the x86-64 release jobs' apt packages and fsr4-vk. A run can restore caches saved on its own ref and on `nx2`, the default branch, and the repository holds 10 GB of caches before GitHub evicts the least recently used.
+
+So only `nx2` saves compiler, CPM and apt caches. Pull requests and branch release builds restore `nx2`'s entries and save none: their own entries helped only that ref, and with one per pull request push they filled the 10 GB and evicted the release caches, whose builds then compiled from scratch. After each save, `tools/ci/prune-caches.sh` deletes the older `nx2` entries of the same family, and each build evicts the ccache entries it didn't use, so a family's entry stays one build's size. A run on `nx2` doesn't save when it was cancelled.
+
+The nightly `release-binaries` run (03:17 UTC) builds `nx2` without publishing to keep those caches close to `nx2`'s head. It skips a commit that already has a successful `nx2` build.
+
+## Linux PGO profile
+
+`linux-x86_64-pgo` is the `linux-x86_64` build compiled by clang (`PGO_LLVM_VERSION`) with `-fprofile-use=lichii-linux.profdata`. That profile is `eglantine.profdata`, weight 1, merged with an indexed profile of two sessions of about five minutes of Ocarina of Time gameplay on x86_64 Linux (a Steam Deck), weight 12, so the code Eglantine's profile covered keeps some weight and the Switch 2 paths Ocarina reaches get most of it. `eglantine.profdata` is no longer read by any build; it stays in the repository as the input for retraining.
+
+A profile names a file-local function (static, or in an anonymous namespace) by the path of its source file. The job and the training build therefore both pass `-mllvm -static-func-strip-dirname-prefix=N`, with N computed in the source root as
+
+```sh
+strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
+```
+
+so those names start at `src/` and a profile trained in any checkout matches the runner's. Without it about a seventh of the profile's functions silently get no data. It is an internal LLVM option, verified with clang 23.1.6; if a later LLVM drops it, the build fails on the unknown option.
+
+An older profile only produces warnings, and code it never reached is compiled as in the normal build. The job summary counts functions whose code changed since training (hash mismatches) and missing-profile warnings (`-mllvm -pgo-warn-missing-function`, one per function and translation unit the profile has no entry for), and warns when the second count passes `PGO_MISSING_MAX` (3000), which means the profile no longer fits the tree or its paths. A profile trained on the same tree gives about 1,100 such warnings, one keyed to another checkout's path about 13,800, and `eglantine.profdata` about 31,800. Train on the runner's distribution (Ubuntu 24.04) with the same clang: function hashes depend on the standard library headers, and a profile trained against another libstdc++ loses thousands of functions.
+
+To retrain:
+
+1. Configure a Release build as the `linux-x86_64-pgo` job does (build directory `build/release`), with clang `PGO_LLVM_VERSION` and `-fprofile-generate=<dir> -fprofile-update=atomic -mllvm -static-func-strip-dirname-prefix=$strip_n` in `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS` in place of `-fprofile-use`, `strip_n` computed as above in the checkout's root, and build `lichii`.
+2. Run it, play the scenes the profile should cover, and exit normally (counters are written at exit).
+3. Merge with the same LLVM. `eglantine.profdata` names its local functions with its author's checkout path, so strip that first: `llvm-profdata merge -text -o eglantine.txt eglantine.profdata`, `sed -E 's#^/home/[^/]+/Eglantine/##' eglantine.txt > eglantine-rel.txt`, `llvm-profdata merge -o eglantine-rel.profdata eglantine-rel.txt`. Then `llvm-profdata merge -o ocarina.profdata <dir>/*.profraw` and `llvm-profdata merge -o lichii-linux.profdata -weighted-input=1,eglantine-rel.profdata -weighted-input=12,ocarina.profdata`, and replace the file in the repository root. `llvm-profdata show --all-functions lichii-linux.profdata | grep -c '^  /'` should print 0.
+
+Retrain for each release build, or when the hash-mismatch count passes about a hundred: the profile loses roughly five functions per upstream commit.
 
 ## Windows PGO profile
 
@@ -99,18 +137,6 @@ To retrain:
 2. Run `lichii.exe` with `LLVM_PROFILE_FILE=<dir>/lichii-%m-%p.profraw`, play the scenes the profile should cover, and exit normally. Counters are written only at exit.
 3. Merge with that LLVM: `llvm-profdata merge -o lichii-windows.profdata <dir>/*.profraw`.
 4. Check that `llvm-profdata show --all-functions lichii-windows.profdata` lists names starting with `?`, then replace the file in the repository root.
-
-## Linux PGO profile
-
-`linux-x86_64-pgo` is the `linux-x86_64` build compiled by clang (`PGO_LLVM_VERSION`) with `-fprofile-use=lichii-linux.profdata`. That profile is `eglantine.profdata`, weight 1, merged with an indexed profile of two sessions of about five minutes of Ocarina of Time gameplay on x86_64 Linux (a Steam Deck), weight 12, so the code Eglantine's profile covered keeps some weight and the Switch 2 paths Ocarina reaches get most of it. `linux-aarch64-pgo` still uses `eglantine.profdata`: nobody has measured an aarch64 profile yet.
-
-As for Windows, an older profile only produces warnings, and code it never reached is compiled as in the normal build.
-
-To retrain:
-
-1. Configure a Release build as the `linux-x86_64-pgo` job does, with clang `PGO_LLVM_VERSION` and `-fprofile-generate=<dir> -fprofile-update=atomic` in `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS` in place of `-fprofile-use`, and build `lichii`.
-2. Run it with `LLVM_PROFILE_FILE=<dir>/lichii-%p.profraw`, play the scenes the profile should cover, and exit normally (counters are written at exit).
-3. Merge with the same LLVM: `llvm-profdata merge -o ocarina.profdata <dir>/*.profraw`, then `llvm-profdata merge -o lichii-linux.profdata -weighted-input=1,eglantine.profdata -weighted-input=12,ocarina.profdata`, and replace the file in the repository root.
 
 ## Release naming
 

@@ -29,15 +29,19 @@ add_executable(tests
     core/address_space.cpp
     core/nx2_streamplay.cpp
     core/nx2_gpu_only_regions.cpp
+    core/nx2_hdr_notifications.cpp
     core/nx2_video_ready.cpp
     core/general_channel.cpp
     core/home_menu.cpp
+    core/window_system.cpp
     core/native_home_bootstrap.cpp
     core/kernel_finish_termination.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
     core/nx2_zip.cpp
     core/nx2_present_pacer.cpp
+    core/nx2_present_queue.cpp
+    core/nx2_syncpoint_allocator.cpp
     core/nx2_fence_action.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
@@ -98,6 +102,7 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/vfs_real.cpp
     core/kip_ini.cpp
     core/add_on_application_id.cpp
     core/ncz_cache.cpp
@@ -114,12 +119,14 @@ add_executable(tests
     video_core/native_texture_header_index.cpp
     video_core/texture_alias_ticks.cpp
     video_core/texture_cache_gob_layout.cpp
+    video_core/image_view_slots.cpp
     video_core/sampled_views.cpp
     video_core/texture_handles.cpp
     video_core/ampere_selevet_modes.cpp
     video_core/ampere_selevet_spills.cpp
     video_core/blit_dither.cpp
     video_core/maxwell_numeric.cpp
+    video_core/maxwell_r2p.cpp
     video_core/maxwell_permute_lod.cpp
     video_core/submission_policy.cpp
     video_core/native_pending_policy.cpp
@@ -138,6 +145,7 @@ add_executable(tests
     video_core/ampere_fast_fusion.cpp
     video_core/ampere_async_copy.cpp
     video_core/ampere_trap_guards.cpp
+    video_core/astc_bcn_batches.cpp
     video_core/async_draw_policy.cpp
     video_core/bounded_store.cpp
     video_core/pipeline_eviction_policy.cpp
@@ -149,12 +157,15 @@ add_executable(tests
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp
     video_core/spirv_fragment_shuffle.cpp
+    video_core/phi_identity_operand.cpp
     video_core/mesh_fallback.cpp
     video_core/mesh_vertex_input.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/gpu_trace.cpp
     video_core/nx2_render_follower.cpp
+    video_core/buffer_arena.cpp
+    video_core/nx2_render_view.cpp
     video_core/gpu_written_pages.cpp
     video_core/nx2_semaphore_mirror.cpp
     video_core/command_writer.cpp
@@ -208,9 +219,11 @@ add_executable(tests
     video_core/spirv_software_matrix.cpp
     video_core/spirv_program_name.cpp
     video_core/spirv_builtin_capabilities.cpp
+    video_core/spirv_frag_depth_d24.cpp
     video_core/spirv_min_max_denorms.cpp
     video_core/spirv_nan_safe_min_max.cpp
     video_core/spirv_scalar_constants.cpp
+    video_core/spirv_emit_twice.cpp
     video_core/ssa_fixed_variables.cpp
     video_core/virtual_range_cache.cpp
     video_core/ocarina_upscale.cpp
@@ -233,6 +246,7 @@ add_executable(tests
     common/host_memory_failure.cpp
     common/host_memory_test_access.h
     core/host_memory_failure.cpp
+    common/library_exceptions.cpp
     common/memory_detect.cpp
     common/multi_level_page_table.cpp
     common/nextendo.cpp
@@ -298,6 +312,7 @@ add_executable(tests
     video_core/turing_macro_effects.cpp
     video_core/turing_macro_ram.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/vk_stream_ring.cpp
     video_core/usage_tracker.cpp
     video_core/nx2_backx.cpp
     video_core/vertex_input_cache.cpp
@@ -341,7 +356,8 @@ target_link_libraries(ncz_tests PRIVATE common OpenSSL::Crypto zstd::zstd
 add_test(NAME ncz_tests COMMAND ncz_tests)
 
 if (TARGET dynarmic::dynarmic)
-    target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/window_trace.cpp)
+    target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp
+        core/jit_vector_round_int16.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 
@@ -402,6 +418,30 @@ add_executable(log_file_flush_tests
     common/log_file_flush.cpp)
 target_link_libraries(log_file_flush_tests PRIVATE common Catch2::Catch2WithMain)
 add_test(NAME log_file_flush_tests COMMAND log_file_flush_tests)
+
+# One process per test case: the log backend is made once per process.
+add_executable(log_file_lock_tests
+    common/log_file_lock.cpp)
+target_link_libraries(log_file_lock_tests PRIVATE common Catch2::Catch2WithMain)
+add_test(NAME log_file_lock_parents
+    COMMAND log_file_lock_tests "The log folder is created with its missing parents")
+add_test(NAME log_file_lock_live
+    COMMAND log_file_lock_tests "A second Lichii leaves a log another one still writes")
+add_test(NAME log_file_lock_third
+    COMMAND log_file_lock_tests "A third Lichii takes the next free log")
+add_test(NAME log_file_lock_full
+    COMMAND log_file_lock_tests "A Lichii that finds every log held keeps no log file")
+# The live cases wait for child processes: fail instead of hanging the run if one never ends.
+set_tests_properties(log_file_lock_parents log_file_lock_live log_file_lock_third
+    log_file_lock_full PROPERTIES TIMEOUT 60)
+# Catch2 exits with 4 when its only case skips (no posix_spawn on Windows): report it as skipped.
+# Only from Catch2 3.7.1 on, where failed assertions exit with 42: before that the exit code was
+# their count, and four failures would have read as a skip. The bundled Catch2 defines no version
+# here and is newer; a system one says which it is.
+if (NOT DEFINED Catch2_VERSION OR NOT Catch2_VERSION VERSION_LESS 3.7.1)
+    set_tests_properties(log_file_lock_parents log_file_lock_live log_file_lock_third
+        log_file_lock_full PROPERTIES SKIP_RETURN_CODE 4)
+endif()
 
 if (TARGET SDL3::SDL3)
     add_executable(sdl_window_state_tests lichii_cmd/sdl_window_state.cpp)

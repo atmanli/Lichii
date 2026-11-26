@@ -267,7 +267,12 @@ TEST_CASE("Destroying the fence manager stops the fencing thread before its func
     };
     manager->on_destroy = [&] { destroying.set_value(); };
     manager->SignalFence([] {});
-    REQUIRE(waited.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    // The hooks capture state made after the manager: a REQUIRE unwinding here would destroy it
+    // before the manager, whose destructor then runs on_destroy on it. End the run instead.
+    if (waited.wait_for(std::chrono::seconds{5}) != std::future_status::ready) {
+        std::fputs("The fencing thread did not reach the first fence's wait in 5 s\n", stderr);
+        std::abort();
+    }
     manager->SignalFence([] {});
     std::promise<void> destroyed;
     auto done = destroyed.get_future();

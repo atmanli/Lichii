@@ -14,15 +14,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "common/page_table.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/core_timing.h"
-#include "core/device_memory.h"
-#include "core/hle/kernel/k_process.h"
-#include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
 #include "tests/core/system_test_context.h"
+#include "tests/video_core/host1x_test_process.h"
 #include "video_core/cdma_pusher.h"
 #include "video_core/host1x/host1x.h"
 
@@ -92,25 +89,14 @@ TEST_CASE("Destroying a CDmaPusher stops its thread and its list before its deri
         system.CoreTiming().Reset();
     };
     system.Initialize();
-    // There is no application process. The pusher's thread starts from an empty list made over
-    // System::ApplicationMemory(), a member call on that null process: harmless only because a
-    // GuestMemory of size 0 never touches its memory. Sanitizer builds that stop on undefined
-    // behaviour object to it. Making this process the application process would need it fully
-    // initialized: SetApplicationProcess opens and closes it, and the close destroys it.
     auto host1x = std::make_unique<Tegra::Host1x::Host1x>(system);
 
-    // One page of guest memory holds the command list: two writes to the class's method 0.
-    Kernel::KProcess process{system.Kernel()};
-    SCOPE_EXIT {
-        system.Kernel().UnregisterKernelObject(&process);
-    };
-    auto& table = process.GetPageTable().GetImpl();
-    table.Resize(20, 12);
-    u8* const backing = system.DeviceMemory().buffer.BackingBasePointer();
-    table.entries.GetAndFault(4).Store(false, Common::PageType::Memory, 1,
-                                       reinterpret_cast<uintptr_t>(backing) - (u64{4} << 12));
-    auto& memory = process.GetMemory();
-    memory.SetCurrentPageTable(process);
+    // One page of guest memory, in a process made the application process: a pusher's thread
+    // starts from System::ApplicationMemory().
+    Tests::Host1xTestProcess process{system};
+    auto& memory = process.Memory();
+    u8* const backing = process.Page();
+    // The command list: two writes to the class's method 0.
     const std::array<u32, 3> words{
         Immediate(Tegra::ThiMethod::SetMethod0, 0),
         Immediate(Tegra::ThiMethod::SetMethod1, 1),
@@ -130,7 +116,7 @@ TEST_CASE("Destroying a CDmaPusher stops its thread and its list before its deri
     };
     auto entered = probe.entered.get_future();
     auto pusher = std::make_unique<Pusher>(*host1x);
-    pusher->PushEntries(Tegra::ChCommandHeaderList{memory, 0x4000, words.size()});
+    pusher->PushEntries(Tegra::ChCommandHeaderList{memory, Tests::Host1xTestProcess::PageAddress, words.size()});
     REQUIRE(entered.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
     std::promise<void> destroyed;
     auto done = destroyed.get_future();

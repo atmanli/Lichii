@@ -1626,9 +1626,20 @@ void ConfigureInputPlayer::keyPressEvent(QKeyEvent* event) {
         return;
     }
     event->ignore();
-    if (event->key() != Qt::Key_Escape) {
+    if (event->key() == Qt::Key_Tab || event->key() == Qt::Key_Backtab) {
+        // Shift+Tab arrives as Backtab, but the key pressed is still Tab.
+        event->accept();
+        input_subsystem->GetKeyboard()->PressKey(Qt::Key_Tab);
+    } else if (event->key() != Qt::Key_Escape) {
         input_subsystem->GetKeyboard()->PressKey(event->key());
     }
+}
+
+bool ConfigureInputPlayer::focusNextPrevChild(bool next) {
+    if (input_setter) {
+        return false;
+    }
+    return QWidget::focusNextPrevChild(next);
 }
 
 bool ConfigureInputPlayer::eventFilter(QObject* object, QEvent* event) {

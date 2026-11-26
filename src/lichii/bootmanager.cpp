@@ -442,8 +442,10 @@ void GRenderWindow::keyPressEvent(QKeyEvent* event) {
         const auto key = QtKeyToSwitchKey(Qt::Key(event->key()));
         input_subsystem->GetKeyboard()->SetKeyboardModifiers(modifier);
         input_subsystem->GetKeyboard()->PressKeyboardKey(key);
-        // This is used for gamepads that can have any key mapped
-        input_subsystem->GetKeyboard()->PressKey(event->key());
+        // This is used for gamepads that can have any key mapped. Shift+Tab arrives as
+        // Backtab, so it still presses a Tab binding.
+        const int key_code = event->key() == Qt::Key_Backtab ? Qt::Key_Tab : event->key();
+        input_subsystem->GetKeyboard()->PressKey(key_code);
     }
 }
 
@@ -461,8 +463,10 @@ void GRenderWindow::keyReleaseEvent(QKeyEvent* event) {
         const auto key = QtKeyToSwitchKey(Qt::Key(event->key()));
         input_subsystem->GetKeyboard()->SetKeyboardModifiers(modifier);
         input_subsystem->GetKeyboard()->ReleaseKeyboardKey(key);
-        // This is used for gamepads that can have any key mapped
-        input_subsystem->GetKeyboard()->ReleaseKey(event->key());
+        // This is used for gamepads that can have any key mapped. Shift+Tab arrives as
+        // Backtab, so it still presses a Tab binding.
+        const int key_code = event->key() == Qt::Key_Backtab ? Qt::Key_Tab : event->key();
+        input_subsystem->GetKeyboard()->ReleaseKey(key_code);
     }
 }
 

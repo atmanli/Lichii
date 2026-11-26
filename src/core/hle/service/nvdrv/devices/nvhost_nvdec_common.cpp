@@ -100,10 +100,15 @@ NvResult nvhost_nvdec_common::Submit(IoctlSubmit& params, std::span<u8> data, De
 
     auto* session = core.GetSession(sessions[fd]);
 
+    // The guest gives the two counts separately: each increment raises its syncpoint's max, and
+    // its threshold is returned only where the guest made room for one.
     for (std::size_t i = 0; i < syncpt_increments.size(); i++) {
         const SyncptIncr& syncpt_incr = syncpt_increments[i];
-        fence_thresholds[i] =
+        const u32 threshold =
             syncpoint_manager.IncrementSyncpointMaxExt(syncpt_incr.id, syncpt_incr.increments);
+        if (i < fence_thresholds.size()) {
+            fence_thresholds[i] = threshold;
+        }
     }
 
     for (const auto& cmd_buffer : command_buffers) {

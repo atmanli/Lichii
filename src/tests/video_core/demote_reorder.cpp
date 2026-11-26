@@ -4,7 +4,8 @@
 // Demote reordering (HostTranslateInfo::needs_demote_reorder, AMD drivers) moves the demotes it
 // finds at most one selection deep to the end of a fragment program, OR-ing their conditions.
 // A demote inside a guest loop must not move: its condition is the value of one iteration, and
-// a break before it can leave the loop on a path that never computed it.
+// a break before it can leave the loop on a path that never computed it. Nor must a demote with
+// code beside it in its selection: only a demote alone in its selection moves.
 // EDEN_DEMOTE_REORDER_TEST_OUTPUT=<dir> writes the modules for spirv-val.
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -231,7 +233,80 @@ std::vector<u64> KillWithoutExit() {
     return a.Code();
 }
 
-/// Whether the guest program above discards for `input`.
+/// A KIL inside the branch that inputs other than 3 take, with code beside it in that branch:
+/// after the KIL (`after`), before it in its block (`before`), or both. Each piece adds to R0 and
+/// stores it; the store after the branch runs on every input.
+std::vector<u64> KillWithCode(bool before, bool after) {
+    Assembler a;
+    a.LoadConst(0, 0, false);
+    a.LoadConst(2, 0x310, true);
+    a.SetPred(0, 0, 2, 3);
+    a.Branch(0, "skip");
+    if (before) {
+        a.AddImm(0, 0, 7);
+        a.Store(0, 0x20);
+    }
+    a.Kill(7);
+    if (after) {
+        a.AddImm(0, 0, 5);
+        a.Store(0, 0x10);
+    }
+    a.Label("skip");
+    a.AddImm(0, 0, 1);
+    a.Store(0, 0xff0);
+    a.Exit();
+    return a.Code();
+}
+
+/// The stores (offset, value) the guest program above makes for `input`, in order.
+std::vector<std::pair<u32, u32>> KillWithCodeStores(bool before, bool after, u32 input) {
+    std::vector<std::pair<u32, u32>> stores;
+    u32 r0 = input;
+    if (r0 != 3) {
+        if (before) {
+            r0 += 7;
+            stores.emplace_back(0x20, r0);
+        }
+        if (after) {
+            r0 += 5;
+            stores.emplace_back(0x10, r0);
+        }
+    }
+    stores.emplace_back(0xff0, r0 + 1);
+    return stores;
+}
+
+/// Stores as text, so a failed check shows them.
+std::string Show(const std::vector<std::pair<u32, u32>>& stores) {
+    std::string text;
+    for (const auto& [offset, value] : stores) {
+        text += fmt::format(" [{:#x}]={}", offset, value);
+    }
+    return text;
+}
+
+/// A KIL on R0 == 3 alone in its selection, then the branch of KillWithCode with code after its
+/// KIL: the first demote moves to the end, the second stays where it is. Every input discards,
+/// input 3 only through the demote that moves.
+std::vector<u64> KillThenKillWithCode() {
+    Assembler a;
+    a.LoadConst(0, 0, false);
+    a.LoadConst(2, 0x310, true);
+    a.SetPred(1, 0, 2, 3);
+    a.Kill(1);
+    a.SetPred(0, 0, 2, 3);
+    a.Branch(0, "skip");
+    a.Kill(7);
+    a.AddImm(0, 0, 5);
+    a.Store(0, 0x10);
+    a.Label("skip");
+    a.AddImm(0, 0, 1);
+    a.Store(0, 0xff0);
+    a.Exit();
+    return a.Code();
+}
+
+/// Whether LoopWithKill(with_break) discards for `input`.
 bool ReferenceDiscards(bool with_break, u32 input) {
     u32 r0 = input;
     for (u32 iteration = 0; iteration < 3; ++iteration) {
@@ -409,7 +484,9 @@ std::vector<std::string> DominanceProblems(const IR::Program& program) {
 /// stores are not evaluated. Unknown instructions throw, and so does a condition on an undefined
 /// value. Values stay from earlier loop iterations, so a read of a value computed in an earlier
 /// iteration but not on the current path is not caught; one never computed at all throws.
-bool Discards(const IR::Program& program, u32 input) {
+/// With `stores`, storage buffer writes are recorded there as (offset, value).
+bool Discards(const IR::Program& program, u32 input,
+              std::vector<std::pair<u32, u32>>* stores = nullptr) {
     using IR::Opcode;
     using Type = IR::AbstractSyntaxNode::Type;
     struct Val {
@@ -499,10 +576,14 @@ bool Discards(const IR::Program& program, u32 input) {
                 case Opcode::ConditionRef:
                     result = args[0];
                     break;
+                case Opcode::WriteStorage32:
+                    if (stores) {
+                        stores->emplace_back(static_cast<u32>(arg(1)), static_cast<u32>(arg(2)));
+                    }
+                    break;
                 case Opcode::Prologue:
                 case Opcode::Epilogue:
                 case Opcode::Void:
-                case Opcode::WriteStorage32:
                 case Opcode::WriteGlobal32:
                     break;
                 case Opcode::UndefU1:
@@ -776,4 +857,75 @@ TEST_CASE("Demote reordering leaves a demote in a program without a return",
     REQUIRE(store_node);
     CHECK(*demote_node < *store_node);
     CHECK_NOTHROW(Emit(program, "no_return_reorder"));
+}
+
+TEST_CASE("Demote reordering leaves a demote with code beside it in its selection",
+          "[shader][demote_reorder]") {
+    // Moving the demote's block would run the code after the KIL on inputs that skip the
+    // branch, and moving it after the code that follows would read the values the code before
+    // the KIL computes before computing them
+    for (const auto& [before, after] : {std::pair{false, true}, {true, false}, {true, true}}) {
+        for (const bool reorder : {false, true}) {
+            INFO("before " << before << " after " << after << " reorder " << reorder);
+            ObjectPool<IR::Inst> inst_pool;
+            ObjectPool<IR::Block> block_pool;
+            const auto code = KillWithCode(before, after);
+            IR::Program program = Translate(inst_pool, block_pool, code, reorder);
+            CHECK(DominanceProblems(program).empty());
+            for (u32 input = 2; input < 6; ++input) {
+                INFO("input " << input);
+                std::vector<std::pair<u32, u32>> stores;
+                bool discards{};
+                REQUIRE_NOTHROW(discards = Discards(program, input, &stores));
+                CHECK(discards == (input != 3));
+                CHECK(Show(stores) == Show(KillWithCodeStores(before, after, input)));
+            }
+            CHECK_NOTHROW(Emit(program, fmt::format("code_beside{}{}{}", before ? "_before" : "",
+                                                    after ? "_after" : "",
+                                                    reorder ? "_reorder" : "")));
+        }
+    }
+}
+
+TEST_CASE("Demote reordering moves a demote alone in its selection next to one it leaves",
+          "[shader][demote_reorder]") {
+    ObjectPool<IR::Inst> inst_pool;
+    ObjectPool<IR::Block> block_pool;
+    const auto code = KillThenKillWithCode();
+    IR::Program program = Translate(inst_pool, block_pool, code, true);
+    CHECK(DominanceProblems(program).empty());
+    // In syntax list order: the demote left with its code, the last store, then the moved one
+    std::vector<size_t> demote_nodes;
+    std::optional<size_t> last_store_node;
+    const auto& list{program.syntax_list};
+    for (size_t index = 0; index < list.size(); ++index) {
+        if (list[index].type != IR::AbstractSyntaxNode::Type::Block) {
+            continue;
+        }
+        for (const IR::Inst& inst : *list[index].data.block) {
+            if (inst.GetOpcode() == IR::Opcode::DemoteToHelperInvocation) {
+                demote_nodes.push_back(index);
+            } else if (inst.GetOpcode() == IR::Opcode::WriteStorage32) {
+                last_store_node = index;
+            }
+        }
+    }
+    REQUIRE(demote_nodes.size() == 2);
+    REQUIRE(last_store_node);
+    CHECK(demote_nodes[0] < *last_store_node);
+    CHECK(demote_nodes[1] > *last_store_node);
+    for (u32 input = 2; input < 7; ++input) {
+        INFO("input " << input);
+        std::vector<std::pair<u32, u32>> stores;
+        bool discards{};
+        REQUIRE_NOTHROW(discards = Discards(program, input, &stores));
+        CHECK(discards);
+        std::vector<std::pair<u32, u32>> expected;
+        if (input != 3) {
+            expected.emplace_back(0x10, input + 5);
+        }
+        expected.emplace_back(0xff0, input + (input != 3 ? 6 : 1));
+        CHECK(Show(stores) == Show(expected));
+    }
+    CHECK_NOTHROW(Emit(program, "alone_and_beside_reorder"));
 }

@@ -960,6 +960,45 @@ private:
             return;
         }
         auto& asl{syntax_list};
+        // A demote moves only when its selection holds nothing else: the demote alone in the
+        // body block, then the empty block the kill opens, then the end of the selection. Code
+        // beside it keeps the demote in place, as a nested demote stays: moving the body would
+        // run the code after the demote on every invocation, and the code before it would move
+        // after the code that uses its values. The goto variables a label sets where the body
+        // starts are not read again outside loops, so they go with the demote.
+        const auto alone_in_selection{[&](const IR::Block* demote_block) {
+            const auto& insts{demote_block->Instructions()};
+            const auto demote_it{std::ranges::find_if_not(insts, [](const IR::Inst& inst) {
+                return inst.GetOpcode() == IR::Opcode::SetGotoVariable;
+            })};
+            if (demote_it == insts.end() ||
+                demote_it->GetOpcode() != IR::Opcode::DemoteToHelperInvocation ||
+                std::next(demote_it) != insts.end()) {
+                return false;
+            }
+            const auto if_it{std::ranges::find_if(asl, [&](const IR::AbstractSyntaxNode& asn) {
+                return asn.type == Type::If && asn.data.if_node.body == demote_block;
+            })};
+            const auto body_it{std::next(if_it)};
+            if (body_it == asl.end() || body_it->type != Type::Block ||
+                body_it->data.block != demote_block) {
+                return false;
+            }
+            const auto rest_it{std::next(body_it)};
+            if (rest_it == asl.end() || rest_it->type != Type::Block ||
+                !rest_it->data.block->Instructions().empty()) {
+                return false;
+            }
+            const auto end_if_it{std::next(rest_it)};
+            return end_if_it != asl.end() && end_if_it->type == Type::EndIf &&
+                   end_if_it->data.end_if.merge == if_it->data.if_node.merge;
+        }};
+        std::erase_if(demote_blocks, [&](const IR::Block* demote_block) {
+            return !alone_in_selection(demote_block);
+        });
+        if (demote_blocks.empty()) {
+            return;
+        }
         const auto epilogue_func{[](const IR::AbstractSyntaxNode& asn) {
             if (asn.type != Type::Block) {
                 return false;

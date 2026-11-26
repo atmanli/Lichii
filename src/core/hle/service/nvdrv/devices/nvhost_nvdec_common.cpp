@@ -82,6 +82,13 @@ NvResult nvhost_nvdec_common::SetNVMAPfd(IoctlSetNvmapFD& params) {
 
 NvResult nvhost_nvdec_common::Submit(IoctlSubmit& params, std::span<u8> data, DeviceFD fd) {
     LOG_DEBUG(Service_NVDRV, "called NVDEC Submit, cmd_buffer_count={}", params.cmd_buffer_count);
+    // A channel whose fd is past Host1x's devices has no device to run its lists: fail the
+    // submit before it raises the syncpoints' maximum, so the guest gets an error instead of
+    // waiting on a threshold nothing will reach.
+    if (!host1x.ValidFd(fd)) {
+        LOG_ERROR(Service_NVDRV, "No host1x device for fd {}: submit refused", fd);
+        return NvResult::BadParameter;
+    }
 
     // Instantiate param buffers
     std::vector<CommandBuffer> command_buffers(params.cmd_buffer_count);

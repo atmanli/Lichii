@@ -42,6 +42,7 @@ add_executable(tests
     core/nx2_present_pacer.cpp
     core/nx2_present_queue.cpp
     core/nx2_syncpoint_allocator.cpp
+    core/nvdrv_syncpoint_complete.cpp
     core/nx2_fence_action.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp

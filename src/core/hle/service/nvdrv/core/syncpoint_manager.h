@@ -91,6 +91,16 @@ public:
     u32 UpdateMin(u32 id);
 
     /**
+     * @brief Brings host1x's guest and host values of the syncpoint up to its maximum, as if
+     * every increment submitted to it had run, running the actions those increments meet; then
+     * synchronises its minimum. For a channel closed while work submitted to it was dropped:
+     * nothing waiting on its fences is left behind, and the syncpoint is reused without a deficit.
+     * Nothing else may increment it meanwhile.
+     * @return The new minimum value of the syncpoint
+     */
+    u32 CompleteSyncpoint(u32 id);
+
+    /**
      * @brief Frees the usage of a syncpoint.
      */
     void FreeSyncpoint(u32 id);

@@ -177,6 +177,7 @@ add_executable(tests
     video_core/page_filter.cpp
     video_core/query_flush_race.cpp
     video_core/query_stream.cpp
+    video_core/pipeline_cache_policy.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp

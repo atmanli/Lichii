@@ -67,6 +67,7 @@ class NupProgressDialog;
 class ShaderWarmDialog;
 class WhatsNewDialog;
 class NxTools;
+class ControllerHotSwap;
 class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
@@ -672,6 +673,7 @@ private:
 #endif
     QTimer mouse_hide_timer;
     QTimer update_input_timer;
+    std::unique_ptr<ControllerHotSwap> controller_hot_swap;
 
     QString startup_icon_theme;
 

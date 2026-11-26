@@ -127,7 +127,7 @@ protected:
 
 private:
     /// Invoke command class devices to execute the command based on the current state
-    void ExecuteCommand(u32 state_offset, u32 data);
+    void ExecuteCommand(u32 state_offset, u32 data, const std::stop_token& stop_token);
 
 protected:
     ThiRegisters thi_regs{};

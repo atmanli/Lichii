@@ -89,3 +89,27 @@ TEST_CASE("Only an existing image of another kind is refused decoded frames", "[
     CHECK_FALSE(objects.IsOtherImage(4));
     CHECK(objects.DecoderMutex(2) == nullptr);
 }
+
+TEST_CASE("A decoder image is written only within its memory", "[nx2_gsv]") {
+    using Service::Nx2NativeObjects;
+    const Nx2NativeObjects::Memory memory{.size = 0x10000};
+    CHECK(Nx2NativeObjects::Holds(memory, 0, 0x10000));
+    CHECK(Nx2NativeObjects::Holds(memory, 0x8000, 0x8000));
+    CHECK_FALSE(Nx2NativeObjects::Holds(memory, 0x8000, 0x8001));
+    CHECK_FALSE(Nx2NativeObjects::Holds(memory, 0x10001, 0));
+    // An offset and size whose sum wraps.
+    CHECK_FALSE(Nx2NativeObjects::Holds(memory, 0x8000, ~u64{0}));
+    // A memory 111 gave no size holds nothing.
+    CHECK_FALSE(Nx2NativeObjects::Holds(Nx2NativeObjects::Memory{}, 0, 1));
+    // Declared large at 111, bound smaller at 114: the bound range is the limit.
+    const Nx2NativeObjects::Memory bound{.size = 0x10000, .bound_size = 0x4000, .bound = true};
+    CHECK(Nx2NativeObjects::Holds(bound, 0, 0x4000));
+    CHECK_FALSE(Nx2NativeObjects::Holds(bound, 0, 0x4001));
+    // Bound larger than declared: the declared size is the limit.
+    const Nx2NativeObjects::Memory wide{.size = 0x4000, .bound_size = 0x10000, .bound = true};
+    CHECK_FALSE(Nx2NativeObjects::Holds(wide, 0x2000, 0x2001));
+    // Bound with size 0: the bound range is empty, though 111 declared a size.
+    const Nx2NativeObjects::Memory empty{.size = 0x4000, .bound_size = 0, .bound = true};
+    CHECK_FALSE(Nx2NativeObjects::Holds(empty, 0, 1));
+    CHECK(Nx2NativeObjects::Limit(bound) == 0x4000);
+}

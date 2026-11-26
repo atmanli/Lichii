@@ -1760,6 +1760,8 @@ struct Nx2NativeObjects {
     struct Memory {
         u64 size{};
         u64 address{}; // CPU (== GPU) address once bound by 114/423
+        u64 bound_size{}; // the range 114/423 bound, once `bound`
+        bool bound{};
         u32 parent{};
         u64 parent_offset{};
     };
@@ -1803,6 +1805,29 @@ struct Nx2NativeObjects {
         const u32 first = next_image;
         next_image += count;
         return first;
+    }
+
+    // Logs once that a decoder image does not fit the memory backing it (WriteImage, 426/428).
+    static void WarnOutsideMemory(const char* where, u32 image, u64 offset, u64 size,
+                                  u64 memory_size) {
+        static std::atomic<bool> warned{};
+        if (!warned.exchange(true, std::memory_order_relaxed)) {
+            LOG_WARNING(Service,
+                        "nx2:gsv {} decoder image {} at {:#x}+{:#x} outside its memory of {:#x}: "
+                        "skipped",
+                        where, image, offset, size, memory_size);
+        }
+    }
+
+    // The bytes `memory` holds: the size 111 declared (or 114/423's when 111 gave none) and, once
+    // bound, no more than the range 114/423 bound.
+    static u64 Limit(const Memory& memory) {
+        return memory.bound ? std::min(memory.size, memory.bound_size) : memory.size;
+    }
+    // Whether `size` bytes at `offset` lie within Limit(memory), without wrapping.
+    static bool Holds(const Memory& memory, u64 offset, u64 size) {
+        const u64 limit = Limit(memory);
+        return offset <= limit && size <= limit - offset;
     }
 
     // An image that exists and is not a decoder output image (911), the only kind a decoded
@@ -4243,7 +4268,12 @@ private:
             block_linear = image->second.gpu_read &&
                            layout.format != Tegra::Host1x::Nx2PictureFormat::Nv12;
             const auto memory = m_objects->memories.find(image->second.memory);
-            if (memory != m_objects->memories.end() && memory->second.address != 0) {
+            if (memory != m_objects->memories.end() && memory->second.address != 0 &&
+                !Nx2NativeObjects::Holds(memory->second, image->second.offset, layout.size)) {
+                Nx2NativeObjects::WarnOutsideMemory("write", image_id, image->second.offset,
+                                                    layout.size,
+                                                    Nx2NativeObjects::Limit(memory->second));
+            } else if (memory != m_objects->memories.end() && memory->second.address != 0) {
                 address = memory->second.address + image->second.offset;
                 parent = memory->second.parent;
                 parent_offset = memory->second.parent_offset + image->second.offset;
@@ -4901,7 +4931,10 @@ private:
     // memory.
     void BindNativeMemory(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
-        BindMemory(w[2], Pair(w, 3), Pair(w, 5), "114");
+        if (!BindMemory(w[2], Pair(w, 3), Pair(w, 5), "114")) {
+            TipcReplyResult(ctx, Kernel::ResultInvalidHandle);
+            return;
+        }
         TipcReplyWords(ctx, {});
     }
 
@@ -4910,22 +4943,34 @@ private:
     void BindNativeGpuMemory(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         LOG_DEBUG(Service, "nx2:gsv 423 parent={} offset={:#x}", w[7], Pair(w, 8));
-        BindMemory(w[2], Pair(w, 3), Pair(w, 5), "423", w[7], Pair(w, 8));
+        if (!BindMemory(w[2], Pair(w, 3), Pair(w, 5), "423", w[7], Pair(w, 8))) {
+            TipcReplyResult(ctx, Kernel::ResultInvalidHandle);
+            return;
+        }
         TipcReplyWords(ctx, {});
     }
 
-    void BindMemory(u32 id, u64 address, u64 size, const char* command, u32 parent = 0,
+    // Binds a memory 111 created; an id 111 never returned is refused, not created.
+    bool BindMemory(u32 id, u64 address, u64 size, const char* command, u32 parent = 0,
                     u64 parent_offset = 0) {
         std::scoped_lock lk{m_objects->mutex};
-        auto& memory = m_objects->memories[id];
+        const auto found = m_objects->memories.find(id);
+        if (found == m_objects->memories.end()) {
+            LOG_WARNING(Service, "nx2:gsv {} refused: no native memory {}", command, id);
+            return false;
+        }
+        auto& memory = found->second;
         memory.address = address;
         memory.parent = parent;
         memory.parent_offset = parent_offset;
+        memory.bound_size = size;
+        memory.bound = true;
         if (memory.size == 0) {
             memory.size = size;
         }
         LOG_INFO(Service, "nx2:gsv {} bind native memory {} at {:#x}+{:#x}", command, id, address,
                  size);
+        return true;
     }
 
     // 429(preference[16], u32 count, u32 memory id): result, u32 native image id.
@@ -5060,6 +5105,13 @@ private:
             if (memory == m_objects->memories.end() || memory->second.address == 0) {
                 return false;
             }
+            if (!Nx2NativeObjects::Holds(memory->second, image->second.offset,
+                                         image->second.size)) {
+                Nx2NativeObjects::WarnOutsideMemory("query", handle, image->second.offset,
+                                                    image->second.size,
+                                                    Nx2NativeObjects::Limit(memory->second));
+                return false;
+            }
             image->second.gpu_read = true;
             if (std::exchange(image->second.pitch_frame, false)) {
                 relayout_address = memory->second.address + image->second.offset;
@@ -5168,6 +5220,17 @@ private:
         }
         const auto& layout = *checked;
         std::scoped_lock lk{m_objects->mutex};
+        // The client sizes the pool's memory from 991's answer, so the pool must fit in it.
+        const auto memory = m_objects->memories.find(w[19]);
+        if (memory == m_objects->memories.end() ||
+            !Nx2NativeObjects::Holds(memory->second, 0, layout.size * count)) {
+            LOG_WARNING(Service,
+                        "nx2:gsv 911 decoder images refused: code={} {}x{} count={} do not fit "
+                        "memory {}",
+                        layout.code, layout.width, layout.height, count, w[19]);
+            TipcReplyResult(ctx, Kernel::ResultInvalidSize);
+            return;
+        }
         const auto taken = m_objects->TakeImageIds(count);
         if (!taken) {
             LOG_WARNING(Service, "nx2:gsv 911 decoder images refused: no image ids left");

@@ -150,7 +150,6 @@ GRenderWindow::GRenderWindow(MainWindow* parent,
 
     mouse_update_timer.setInterval(default_mouse_update_timeout);
     connect(&mouse_update_timer, &QTimer::timeout, this, &GRenderWindow::UpdateMouse);
-    mouse_update_timer.start();
 }
 
 void GRenderWindow::ExecuteProgram(std::size_t program_index) {
@@ -788,6 +787,7 @@ bool GRenderWindow::InitRenderTarget() {
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
     OnFramebufferSizeChanged();
     BackupGeometry();
+    mouse_update_timer.start();
 
     if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLSL ||
         Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLASM ||
@@ -797,6 +797,7 @@ bool GRenderWindow::InitRenderTarget() {
 }
 
 void GRenderWindow::ReleaseRenderTarget() {
+    mouse_update_timer.stop();
     if (child_widget) {
         layout()->removeWidget(child_widget);
         child_widget->deleteLater();

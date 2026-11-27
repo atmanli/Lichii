@@ -194,9 +194,11 @@ public:
             }
         }
         if (has_backup) {
+            // Fail closed: symlink_status returns file_type::none on error and not_found only when
+            // the path is absent. Treating any probe_ec as vacant would rename over unknown content.
             std::error_code probe_ec;
             const auto status = fs::symlink_status(destination, probe_ec);
-            if (!probe_ec && (fs::exists(status) || status.type() == fs::file_type::symlink)) {
+            if (status.type() != fs::file_type::not_found) {
                 throw std::runtime_error("Could not restore the old save: destination is occupied");
             }
             fs::rename(backup, destination, ec);

@@ -7,16 +7,21 @@
 #include <catch2/catch_test_macros.hpp>
 #include "common/core_pinning.h"
 #include "common/thread.h"
+#include "common/thread_reservation.h"
 #if defined(__linux__) && !defined(__ANDROID__)
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
 #include <thread>
 #include <utility>
 #include <sched.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include "common/scope_exit.h"
 #endif
@@ -300,6 +305,14 @@ public:
     ~HelperThread() {
         Finish();
         thread.join();
+        // join returns before the thread leaves /proc/self/task: a listing right after would
+        // still see it (and narrow it, or try to), so the next case's counts would include it.
+        // Bounded, in case a new thread of the process gets the id meanwhile.
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+        while (tid != 0 && syscall(SYS_tgkill, getpid(), tid, 0) == 0 &&
+               std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(std::chrono::microseconds{50});
+        }
     }
     pid_t Id() const {
         return tid;
@@ -436,5 +449,320 @@ TEST_CASE("Core pinning: a reservation keeps each thread's own mask and restores
             CHECK(CPU_EQUAL(&*after, &mask));
         }
     }
+}
+
+namespace {
+
+// The CPUs this process may use, and two of them to reserve; nothing if there are fewer than four.
+std::optional<std::pair<std::vector<u32>, std::vector<u32>>> ReservableCpus() {
+    const cpu_set_t allowed = ThreadMask(0);
+    std::vector<u32> cpus;
+    for (u32 cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &allowed)) {
+            cpus.push_back(cpu);
+        }
+    }
+    if (cpus.size() < 4) {
+        return std::nullopt;
+    }
+    std::vector<u32> reserved{cpus[cpus.size() - 2], cpus[cpus.size() - 1]};
+    return std::pair{std::move(cpus), std::move(reserved)};
+}
+
+void CheckMasksAsBefore(const std::vector<std::pair<pid_t, cpu_set_t>>& before) {
+    for (const auto& [tid, mask] : before) {
+        if (const auto now = MaskIfAlive(tid)) {
+            CHECK(CPU_EQUAL(&*now, &mask));
+        }
+    }
+}
+
+// After a failed reservation, a real one still works and is undone.
+void CheckReserveAndReleaseWork(std::span<const u32> reserved,
+                                const std::vector<std::pair<pid_t, cpu_set_t>>& before) {
+    CHECK(Common::ReserveCpusForCurrentThread(reserved).has_value());
+    Common::ReleaseReservedCpus();
+    CheckMasksAsBefore(before);
+}
+
+// A ThreadAccess made of std::function members, for tests: each defaults to the process's own.
+bool RealList(const std::function<void(int)>& visit) {
+    const auto real = Common::detail::ProcessThreadAccess();
+    return real.list(
+        real.context,
+        [](void* p, int tid) { (*static_cast<const std::function<void(int)>*>(p))(tid); },
+        const_cast<void*>(static_cast<const void*>(&visit)));
+}
+Common::detail::AffinityRead RealRead(int tid, void* mask, std::size_t size) {
+    const auto real = Common::detail::ProcessThreadAccess();
+    return real.read(real.context, tid, mask, size);
+}
+struct TestAccess {
+    std::function<bool(const std::function<void(int)>&)> list = RealList;
+    std::function<Common::detail::AffinityRead(int, void*, std::size_t)> read = RealRead;
+
+    Common::detail::ThreadAccess Get() {
+        return {&List, &Read, this};
+    }
+
+private:
+    static bool List(void* self, void (*visit)(void*, int), void* visit_context) {
+        return static_cast<TestAccess*>(self)->list([&](int tid) { visit(visit_context, tid); });
+    }
+    static Common::detail::AffinityRead Read(void* self, int tid, void* mask, std::size_t size) {
+        return static_cast<TestAccess*>(self)->read(tid, mask, size);
+    }
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Core pinning: a failed second listing undoes the reservation, an unvisited child too",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    HelperThread creator{};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    // The first listing works; the second fails on every attempt, after the creator (narrowed by
+    // then) has created a child the listing never reaches; the rollback's listing works.
+    int calls = 0;
+    pid_t child = 0;
+    TestAccess failing;
+    failing.list = [&](const std::function<void(int)>& visit) {
+        ++calls;
+        if (calls == 2) {
+            child = creator.Spawn();
+        }
+        if (calls >= 2 && calls <= 4) {
+            return false;
+        }
+        return RealList(visit);
+    };
+    CHECK(!Common::detail::ReserveCpusForCurrentThread(cpus->second, failing.Get()));
+    CHECK(calls == 5); // one, three attempts, and the rollback's
+    REQUIRE(child != 0);
+    CheckMasksAsBefore(before);
+    // The child started with its narrowed creator's mask; the rollback gave the reserved CPUs back.
+    const cpu_set_t child_after = ThreadMask(child);
+    CHECK(CPU_EQUAL(&child_after, &allowed));
+    CheckReserveAndReleaseWork(cpus->second, before);
+}
+
+TEST_CASE("Core pinning: an unreadable mask in the second listing undoes the reservation",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    HelperThread creator{};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    // A child created between the two listings, whose mask the second walk can't read once (not
+    // because it exited): the reservation must fail and be undone, the child included.
+    int calls = 0;
+    pid_t child = 0;
+    bool failed_once = false;
+    TestAccess failing;
+    failing.list = [&](const std::function<void(int)>& visit) {
+        if (++calls == 2) {
+            child = creator.Spawn();
+        }
+        return RealList(visit);
+    };
+    failing.read = [&](int tid, void* mask, std::size_t size) {
+        if (tid == child && child != 0 && !failed_once) {
+            failed_once = true;
+            return Common::detail::AffinityRead::Failed;
+        }
+        return RealRead(tid, mask, size);
+    };
+    CHECK(!Common::detail::ReserveCpusForCurrentThread(cpus->second, failing.Get()));
+    CHECK(failed_once);
+    CheckMasksAsBefore(before);
+    const cpu_set_t child_after = ThreadMask(child);
+    CHECK(CPU_EQUAL(&child_after, &allowed));
+    CheckReserveAndReleaseWork(cpus->second, before);
+}
+
+TEST_CASE("Core pinning: an unreadable mask in the first listing changes nothing",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    const HelperThread other{};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    TestAccess failing;
+    failing.read = [&](int tid, void* mask, std::size_t size) {
+        if (tid == other.Id()) {
+            return Common::detail::AffinityRead::Failed;
+        }
+        return RealRead(tid, mask, size);
+    };
+    CHECK(!Common::detail::ReserveCpusForCurrentThread(cpus->second, failing.Get()));
+    CheckMasksAsBefore(before);
+    CheckReserveAndReleaseWork(cpus->second, before);
+}
+
+TEST_CASE("Core pinning: a second listing that fails once is tried again without counting twice",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    const HelperThread off{MaskOf(std::vector<u32>{cpus->first[0]})};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    // A clean reservation's count, for comparison.
+    const auto clean = Common::ReserveCpusForCurrentThread(cpus->second);
+    REQUIRE(clean.has_value());
+    Common::ReleaseReservedCpus();
+    CheckMasksAsBefore(before);
+    // Before the second listing, the caller (never narrowed) creates a thread, which starts with
+    // the caller's whole mask: the second listing's first attempt narrows it and then fails, the
+    // second attempt sees it again, narrowed already, and succeeds. Counted once, not twice.
+    std::optional<HelperThread> late;
+    int calls = 0;
+    TestAccess flaky;
+    flaky.list = [&](const std::function<void(int)>& visit) {
+        if (++calls == 2) {
+            late.emplace();
+            (void)RealList(visit);
+            return false;
+        }
+        return RealList(visit);
+    };
+    const auto count = Common::detail::ReserveCpusForCurrentThread(cpus->second, flaky.Get());
+    REQUIRE(count.has_value());
+    CHECK(calls == 3);
+    CHECK(*count == *clean + 1);
+    REQUIRE(late.has_value());
+    cpu_set_t narrowed = allowed;
+    for (const u32 cpu : cpus->second) {
+        CPU_CLR(cpu, &narrowed);
+    }
+    const cpu_set_t late_during = ThreadMask(late->Id());
+    CHECK(CPU_EQUAL(&late_during, &narrowed));
+    Common::detail::ReleaseReservedCpus(Common::detail::ProcessThreadAccess());
+    CheckMasksAsBefore(before);
+    const cpu_set_t late_after = ThreadMask(late->Id());
+    CHECK(CPU_EQUAL(&late_after, &allowed));
+}
+
+TEST_CASE("Core pinning: an exception in the second listing undoes the reservation",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    HelperThread creator{};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    // The second listing visits a child its narrowed creator just made (born narrowed), then
+    // throws as an allocation would. The reservation must not throw, and its undo must reach the
+    // child.
+    int calls = 0;
+    pid_t child = 0;
+    TestAccess throwing;
+    throwing.list = [&](const std::function<void(int)>& visit) -> bool {
+        if (++calls == 2) {
+            child = creator.Spawn();
+            RealList(visit);
+            throw std::bad_alloc{};
+        }
+        return RealList(visit);
+    };
+    std::optional<size_t> result{0};
+    CHECK_NOTHROW(result =
+                      Common::detail::ReserveCpusForCurrentThread(cpus->second, throwing.Get()));
+    CHECK(!result);
+    REQUIRE(child != 0);
+    CheckMasksAsBefore(before);
+    const cpu_set_t child_after = ThreadMask(child);
+    CHECK(CPU_EQUAL(&child_after, &allowed));
+    CheckReserveAndReleaseWork(cpus->second, before);
+}
+
+TEST_CASE("Core pinning: an exception in the undo's own listing ends the reservation without "
+          "throwing",
+          "[common][core_pinning]") {
+    const auto cpus = ReservableCpus();
+    if (!cpus) {
+        SKIP("needs at least four CPUs");
+    }
+    const cpu_set_t allowed = ThreadMask(0);
+    HelperThread creator{};
+    const auto before = ProcessMasks();
+    // Restores the main thread only: the helpers end with the test, and every other thread's mask
+    // is checked below.
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    // The second listing throws after visiting a new child born narrowed, and so does the undo's
+    // listing: the stated residue. The saved masks are back, the child keeps its narrowed mask, and
+    // nothing throws or stays reserved.
+    int calls = 0;
+    pid_t child = 0;
+    TestAccess throwing;
+    throwing.list = [&](const std::function<void(int)>& visit) -> bool {
+        ++calls;
+        if (calls == 2) {
+            child = creator.Spawn();
+            RealList(visit);
+        }
+        if (calls >= 2) {
+            throw std::bad_alloc{};
+        }
+        return RealList(visit);
+    };
+    std::optional<size_t> result{0};
+    CHECK_NOTHROW(result =
+                      Common::detail::ReserveCpusForCurrentThread(cpus->second, throwing.Get()));
+    CHECK(!result);
+    CHECK(calls == 3);
+    CheckMasksAsBefore(before);
+    REQUIRE(child != 0);
+    cpu_set_t narrowed = allowed;
+    for (const u32 cpu : cpus->second) {
+        CPU_CLR(cpu, &narrowed);
+    }
+    const cpu_set_t child_after = ThreadMask(child);
+    CHECK(CPU_EQUAL(&child_after, &narrowed));
+    // Nothing stayed reserved: a real reservation works.
+    CheckReserveAndReleaseWork(cpus->second, before);
 }
 #endif

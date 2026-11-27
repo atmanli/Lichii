@@ -157,13 +157,22 @@ void PinCurrentThread(PinnedRole role);
 /// after pinning itself, which start on them. Every thread's mask is listed first, changing
 /// nothing; the threads are then narrowed, and listed again for those created since. Returns how
 /// many threads were moved. Returns nothing, with nothing reserved, while a reservation is active,
-/// for no CPUs, when the caller's mask can't be read, when the first listing fails (nothing has
-/// been changed), when the second fails (every thread listed is put back: its mask from before,
-/// or for one created since, its own mask or, if it started with a narrowed creator's mask, the
-/// reserved CPUs added back), and on other hosts. After a failed second listing, a thread created
-/// since the first that it did not reach keeps its narrowed creator's mask, and one it reached
-/// whose creator was pinned off the reserved CPUs gets them added.
-std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus);
+/// for no CPUs, when the caller's mask can't be read, when the first listing fails or a live
+/// thread's mask can't be read in it (anything but its having exited: nothing has been changed),
+/// when the second listing or a mask read in it fails, and on other hosts. A listing that fails is
+/// tried up to three times. After a failed second listing the reservation is undone exactly as
+/// ReleaseReservedCpus undoes one (see its limits): the saved masks go back, and every thread with
+/// none, created since the first listing, gets the reserved CPUs added to its mask, or the
+/// caller's mask from before if its mask has only reserved CPUs. So such a thread does not get its
+/// exact mask back: one the second walk narrowed gets the reserved CPUs added, and one pinned to
+/// reserved CPUs alone gets the caller's whole mask. What can remain narrowed, each logged: a
+/// thread created since the first listing by a narrowed thread, or narrowed by a failed second
+/// attempt, if the undo's own listing fails too; and one whose mask still can't be read during the
+/// undo. It does not throw: the process's listing and reads allocate nothing, and its logs catch
+/// their own exceptions. An exception once narrowing has begun (only an injected lister's or
+/// reader's, in tests) takes the same undo and returns nothing, so the caller stays unpinned; one
+/// before it returns nothing with nothing changed.
+std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus) noexcept;
 /// Gives every thread that existed at the reservation, the caller included, its own mask from
 /// before it. A thread created during it gets the reserved CPUs back, or the caller's mask from
 /// before if its mask has only reserved CPUs (one the pinned caller created). Nothing while no
@@ -177,17 +186,18 @@ std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus);
 /// back; a thread created while Release walks the threads may keep its creator's narrowed mask;
 /// a process started during the reservation keeps the narrowed mask of the thread that started it;
 /// and if the threads can't be listed at release, those created during the reservation stay as
-/// they are.
-void ReleaseReservedCpus();
+/// they are, as does one created during it whose mask can't be read (both logged). It does not
+/// throw.
+void ReleaseReservedCpus() noexcept;
 
 /// With pin_gpu_threads, on a CPU that gets the four-core plan: reserves the back's physical core
 /// with ReserveCpusForCurrentThread. The back calls it as it starts, then pins itself to that
 /// core, so threads it creates from then on start on that core until the release. Returns
 /// whether the back may pin itself: false only on the four-core plan when nothing was reserved
 /// (logged), true when it was or nothing needs reserving.
-[[nodiscard]] bool ReserveGpuBackCore();
+[[nodiscard]] bool ReserveGpuBackCore() noexcept;
 /// ReleaseReservedCpus; the back calls it when it stops.
-void ReleaseGpuBackCore();
+void ReleaseGpuBackCore() noexcept;
 
 /// Whether ReserveGpuBackCore reserves a core on this machine: the four-core plan (Linux; false
 /// elsewhere).

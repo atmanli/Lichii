@@ -87,6 +87,24 @@ public:
             }
         }
         query->size_slots = slots_per_query;
+        running = {query->start_bank_id, query->size_banks, query->start_slot, query->size_slots};
+        pending_flush_queries.push_back(query_id);
+        return query_id;
+    }
+
+    /// A report over the slots of the last one, reserving none: SamplesStreamer::WriteCounter
+    /// with the running query kept over a flush (PresyncWrites' early return on tiler drivers).
+    /// The next flush closes that bank again.
+    size_t RepeatLast(VAddr address) {
+        const size_t query_id = BuildQuery(false, address);
+        auto* const query = GetQuery(query_id);
+        query->start_bank_id = running.start_bank_id;
+        query->size_banks = running.size_banks;
+        query->start_slot = running.start_slot;
+        query->size_slots = running.size_slots;
+        bank_pool.ForEachBankOf(*query, [](TestBank* bank, size_t, size_t amount) {
+            bank->AddReference(amount);
+        });
         pending_flush_queries.push_back(query_id);
         return query_id;
     }
@@ -152,7 +170,15 @@ private:
         current_bank = &bank_pool.GetBank(current_bank_id);
     }
 
+    struct Range {
+        u32 start_bank_id;
+        u32 size_banks;
+        size_t start_slot;
+        size_t size_slots;
+    };
+
     const size_t slots_per_query;
+    Range running{};
     VideoCommon::BankPool<TestBank> bank_pool;
     TestBank* current_bank{};
     size_t current_bank_id{};
@@ -247,6 +273,44 @@ TEST_CASE("Queries over two banks are freed while their banks are reused",
     CacheFixture f{3};
     RecordWhileLanding(f, 200'000, 4);
     CHECK(f.runtime.streamer.landed == 200'000);
+    CHECK(f.runtime.streamer.wrong == 0);
+}
+
+TEST_CASE("A bank closed again by a second report is read while the first flush lands",
+          "[video_core][query_cache]") {
+    // Each report is flushed twice: once as recorded, closing its bank, and once more as a report
+    // over the same slots, which closes the same bank again while the fencing thread reads the
+    // first flush's banks (Size).
+    CacheFixture f{1};
+    std::atomic<size_t> committed{};
+    std::atomic<bool> recording{true};
+    std::thread fencing([&] {
+        size_t popped = 0;
+        while (true) {
+            const bool last = !recording.load(std::memory_order_acquire);
+            while (popped < committed.load(std::memory_order_acquire)) {
+                f.cache->PopAsyncFlushes();
+                ++popped;
+            }
+            if (last) {
+                break;
+            }
+            std::this_thread::yield();
+        }
+    });
+    constexpr size_t Reports = 100'000;
+    for (size_t i = 0; i < Reports; ++i) {
+        const VAddr address = static_cast<VAddr>(i) << 4;
+        f.runtime.streamer.WriteCounter(address, false, static_cast<u32>(i), std::nullopt);
+        f.cache->CommitAsyncFlushes();
+        committed.fetch_add(1, std::memory_order_release);
+        f.runtime.streamer.RepeatLast(address);
+        f.cache->CommitAsyncFlushes();
+        committed.fetch_add(1, std::memory_order_release);
+    }
+    recording.store(false, std::memory_order_release);
+    fencing.join();
+    CHECK(f.runtime.streamer.landed == 2 * Reports);
     CHECK(f.runtime.streamer.wrong == 0);
 }
 

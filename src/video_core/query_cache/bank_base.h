@@ -70,8 +70,14 @@ public:
         return added_now - dropped_now;
     }
 
+    /// Only the recording thread writes bank_size; the fencing thread reads it (Size) for flushes
+    /// handed over after the first close. A closed bank reserves no slot, so a later close (a
+    /// second report flushed over the same slots on tiler drivers) would store the same value
+    /// while a flush is read: it only reads the field.
     void Close() {
-        bank_size = current_slot;
+        if (bank_size != current_slot) {
+            bank_size = current_slot;
+        }
     }
 
     bool IsClosed() const {

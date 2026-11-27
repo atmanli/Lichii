@@ -42,9 +42,18 @@ permissions:
 
 # Clang major the Linux PGO build uses, from apt.llvm.org. A profile is written by a current clang
 # and an older reader refuses it, so this has to stay at or above whatever produced
-# eglantine.profdata; bump it when a refreshed profile needs a newer LLVM.
+# eglantine.profdata and lichii-linux.profdata (LLVM 23); bump it when a refreshed profile needs
+# a newer LLVM.
 env:
   PGO_LLVM_VERSION: "23"
+  # The Linux PGO summary warns when the build gives more missing-profile warnings than this
+  # (one per function and translation unit the profile has no entry for). Measured on a Steam
+  # Deck with the job's flags, training in one checkout and building in another: a profile
+  # trained on the same tree gives about 1,100, one keyed to the training checkout's path (the
+  # failure the strip flag prevents) about 13,800, and eglantine.profdata about 31,800. Code
+  # added after training raises the count, so 3000 leaves room for that drift and still flags
+  # a path mismatch clearly (docs/CI.md).
+  PGO_MISSING_MAX: "3000"
 
 # A running build is never cancelled: it finishes and publishes. A push meanwhile queues one build;
 # a later push replaces it, so the newest commit builds as soon as the running one is done.
@@ -115,8 +124,9 @@ jobs:
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
-          # Linux x86-64 PGO builds the same programs with clang against the repo's
-          # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
+          # Linux x86-64 PGO builds the same programs with clang against lichii-linux.profdata,
+          # eglantine.profdata merged with Ocarina of Time gameplay on x86-64 (see docs/CI.md).
+          # Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
           # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
           # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
           # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
@@ -124,6 +134,7 @@ jobs:
           - platform: linux-x86_64-pgo
             runner: ubuntu-24.04
             pgo: true
+            profile: lichii-linux.profdata
           - platform: windows-x86_64
             runner: windows-2022
           - platform: windows-x86_64-pgo
@@ -267,7 +278,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s "${{ matrix.profile || 'eglantine.profdata' }}"
+          profile='${{ matrix.profile }}'
+          if [ -z "$profile" ]; then echo "::error::PGO matrix entry without a profile"; exit 1; fi
+          test -s "$profile"
 
       - name: Set up MSVC
         if: startsWith(matrix.platform, 'windows')
@@ -385,8 +398,15 @@ jobs:
             -DUSE_CCACHE=ON
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
-            # Same flags Eden's CI passes for its clang PGO build.
-            profile="-fprofile-use=$PWD/eglantine.profdata -Wbackend-plugin -Wno-error=backend-plugin \
+            # Eden's CI flags for its clang PGO build, plus two LLVM options. A profile names a
+            # file-local (static or anonymous-namespace) function by its file's path, so
+            # static-func-strip-dirname-prefix drops the directories down to the source root, which
+            # makes a profile trained in another checkout match; training passes the same line
+            # (docs/CI.md). pgo-warn-missing-function warns for each function the profile has no entry
+            # for, which the summary below counts.
+            strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
+            profile="-fprofile-use=$PWD/${{ matrix.profile }} -mllvm -static-func-strip-dirname-prefix=$strip_n \
+              -mllvm -pgo-warn-missing-function -Wbackend-plugin -Wno-error=backend-plugin \
               -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
@@ -498,12 +518,20 @@ jobs:
                   total++
                   if ($0 ~ / up to [1-9][0-9]* count discarded/) nonzero++
                 }
+                /no profile data available for function/ { missing++ }
                 END {
                   printf "### PGO profile mismatches: %s\n\n", platform
                   printf "- Discarded profile warnings: %d\n- With nonzero counts: %d\n", total, nonzero
+                  if (platform ~ /^linux/) printf "- Missing-profile warnings: %d\n", missing
                 }
               ' "$RUNNER_TEMP/pgo-build.log" >> "$GITHUB_STEP_SUMMARY" ||
                 echo "::warning::Could not write PGO mismatch summary"
+              if [[ "${{ matrix.platform }}" == linux* ]]; then
+                missing=$(grep -c 'no profile data available for function' "$RUNNER_TEMP/pgo-build.log" || true)
+                if (( missing > PGO_MISSING_MAX )); then
+                  echo "::warning::$missing missing-profile warnings (more than $PGO_MISSING_MAX): the profile no longer matches this tree or its paths, see docs/CI.md"
+                fi
+              fi
             else
               build_status=${PIPESTATUS[0]}
               if (( build_status != 0 )); then exit "$build_status"; fi
@@ -865,7 +893,7 @@ jobs:
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile merged with one trained in Lichii on Ocarina of Time; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
           fi
 
           cat > notes.md <<EOF

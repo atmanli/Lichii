@@ -54,6 +54,7 @@
 namespace VideoCommon {
 
 inline constexpr u64 Xc2ProgramId = 0x0400E95004038001ULL;
+inline constexpr u64 DkbProgramId = 0x040074A01BF12000ULL;
 
 /// EDEN_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
@@ -210,7 +211,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     // Not const, here and below: with OpenGL both would be constant expressions, which the
     // lambda below must then not capture (-Wunused-lambda-capture), while Vulkan's must be.
     bool download_overlaps = std::is_trivially_destructible_v<DownloadMap> &&
-                             WritebackSwitches::DuskbloodsDefault();
+                             WritebackSwitches::WritebackDefault();
     // The collector does not wait for its
     // write-backs (each wait was 5-10 ms, several a second in combat); they reach guest memory
     // when the GPU is done with them.
@@ -862,7 +863,7 @@ void TextureCache<P>::WriteBackBadOverlaps(ImageId new_image_id) {
     // memory without their data. The Duskbloods renders its characters' 64x64 detail maps through
     // other render targets at the same addresses and samples them through new images, which
     // showed the memory's fill pattern (purple enemies) or zeros (black outfits).
-    if (!WritebackSwitches::DuskbloodsDefault()) {
+    if (!WritebackSwitches::WritebackDefault()) {
         return;
     }
     const bool async = AsyncOverlapDownloadsEnabled();
@@ -1361,6 +1362,25 @@ void TextureCache<P>::TickFrame() {
                runtime.IsFree(gpu_sentenced_images.front().tick)) {
             gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
             gpu_sentenced_images.pop_front();
+        }
+        while (!retained_image_keepers.empty() &&
+               runtime.IsFree(retained_image_keepers.front().tick)) {
+            retained_image_keepers.pop_front();
+        }
+        if (frame_tick % 600 == 0) {
+            const u64 total = free_guard.retained_held + free_guard.landed_early +
+                              free_guard.freed_early + free_guard.unswizzle_dropped;
+            if (total != free_guard.logged_total) {
+                free_guard.logged_total = total;
+                LOG_INFO(HW_GPU,
+                         "Free guard (session): {} images deleted with a download queued held "
+                         "until their delete tick completed, {} downloads landed before that "
+                         "tick was known complete, {} images held now, {} early frees "
+                         "(must be 0); {} async unswizzles dropped with their image",
+                         free_guard.retained_held, free_guard.landed_early,
+                         retained_image_keepers.size(), free_guard.freed_early,
+                         free_guard.unswizzle_dropped);
+            }
         }
     }
     // If we can obtain the memory info, use it instead of the estimate. Read before the budget
@@ -2188,6 +2208,9 @@ bool TextureCache<P>::RescaleRenderTargets() {
     bool rescaled = false;
     std::array<ImageId, NUM_RT> tmp_color_images{};
     ImageId tmp_depth_image{};
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const bool clip_moved = UsePaddedTargetWidths() &&
+                            render_target_clip.Update(clip.x.Value() + clip.width.Value());
     do {
         flags[Dirty::RenderTargets] = false;
 
@@ -2218,14 +2241,14 @@ bool TextureCache<P>::RescaleRenderTargets() {
         };
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            if (flags[Dirty::ColorBuffer0 + index] || force) {
+            if (flags[Dirty::ColorBuffer0 + index] || force || clip_moved) {
                 flags[Dirty::ColorBuffer0 + index] = false;
                 BindRenderTarget(&color_buffer_id, FindColorBuffer(index));
             }
             check_rescale(color_buffer_id, tmp_color_images[index]);
         }
         // The surface clip, which a padded depth target's size depends on, has no flag of its own.
-        if (flags[Dirty::ZetaBuffer] || force || depth_target_padded) {
+        if (flags[Dirty::ZetaBuffer] || force || clip_moved || depth_target_padded) {
             flags[Dirty::ZetaBuffer] = false;
             BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer());
         }
@@ -2390,7 +2413,8 @@ bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame(u32 index) noexcept {
         !maxwell3d->dirty.flags[Dirty::ColorBuffer0 + index]) {
         image_id = rt_image_id[index];
     } else {
-        const ImageInfo info(rt, regs.anti_alias_samples_mode);
+        ImageInfo info(rt, regs.anti_alias_samples_mode);
+        ClipPaddedTarget(info);
         if (info.format == PixelFormat::Invalid || info.size.width == 0 || info.size.height == 0 ||
             info.size.depth == 0 || info.size.width > 65536 || info.size.height > 65536 ||
             info.size.depth > 2048 || info.resources.layers <= 0 ||
@@ -3256,6 +3280,11 @@ bool TextureCache<P>::HasAsyncFlushWork() const noexcept {
 }
 
 template <class P>
+bool TextureCache<P>::RenderTargetsDirty() const noexcept {
+    return maxwell3d != nullptr && maxwell3d->dirty.flags[VideoCommon::Dirty::RenderTargets];
+}
+
+template <class P>
 bool TextureCache<P>::ShouldWaitAsyncFlushes() const noexcept {
     return !committed_downloads.empty() && !committed_downloads.front().empty();
 }
@@ -3342,6 +3371,22 @@ void TextureCache<P>::PopAsyncFlushes() {
             auto& download_buffer = download_map[download_info.async_buffer_id];
             if (download_info.is_swizzle) {
                 const ImageBase& image = download_info.GetImage(slot_images);
+                if constexpr (requires { runtime.IsFree(u64{}); }) {
+                    if (download_info.retired_image &&
+                        !runtime.IsFree(download_info.retired_tick)) {
+                        if (download_info.retired_image.use_count() == 1) {
+                            ++free_guard.freed_early;
+                        }
+                        if (free_guard.landed_early++ < 8) {
+                            LOG_WARNING(HW_GPU,
+                                        "Free guard: image {:#x} ({}x{}) deleted with a download "
+                                        "queued; the download landed before the GPU passed the "
+                                        "delete (tick {}), kept until it does",
+                                        image.gpu_addr, image.info.size.width,
+                                        image.info.size.height, download_info.retired_tick);
+                        }
+                    }
+                }
                 const auto copies = FullDownloadCopies(image.info);
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
@@ -3672,18 +3717,16 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
 
-    const bool gpu_unswizzle_enabled = Settings::values.gpu_unswizzle_enabled.GetValue();
-
-    if (gpu_unswizzle_enabled &&
-        IsPixelFormatBCn(image.info.format) &&
-        image.info.type == ImageType::e3D &&
-        image.info.resources.levels == 1 &&
-        image.info.resources.layers == 1 &&
-        MapSizeBytes(image) >= gpu_unswizzle_maxsize &&
-        False(image.flags & ImageFlagBits::GpuModified)) {
-
-        QueueAsyncUnswizzle(image, image_id);
-        return;
+    // OpenGL has no deferred upload staging and uploads the whole volume at once.
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        if (Settings::values.gpu_unswizzle_enabled.GetValue() &&
+            IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
+            image.info.resources.levels == 1 && image.info.resources.layers == 1 &&
+            MapSizeBytes(image) >= gpu_unswizzle_maxsize &&
+            False(image.flags & ImageFlagBits::GpuModified)) {
+            QueueAsyncUnswizzle(image, image_id);
+            return;
+        }
     }
     using TraceClock = std::chrono::steady_clock;
     const bool tc_trace = TextureCacheTrace();
@@ -4188,7 +4231,13 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
         return NULL_IMAGE_VIEW_ID;
     }
     ImageBase& image = slot_images[image_id];
-    const SubresourceBase base = image.TryFindBase(config.Address()).value();
+    const std::optional<SubresourceBase> found_base = image.TryFindBase(config.Address());
+    if (!found_base) {
+        LOG_WARNING(HW_GPU, "No subresource of image {:#x} at {:#x}, dropping the view",
+                    image.gpu_addr, config.Address());
+        return NULL_IMAGE_VIEW_ID;
+    }
+    const SubresourceBase base = *found_base;
     ASSERT(base.level == 0);
     const ImageViewInfo view_info(config, base.layer);
     const ImageViewId image_view_id = FindOrEmplaceImageView(image_id, view_info);
@@ -5046,10 +5095,25 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     if (can_be_depth_blit) {
         try_options |= RelaxedOptions::Format;
     }
+    const bool try_padded = src_addr != dst_addr && UsePaddedTargetWidths() &&
+                            copy.filter == Tegra::Engines::Fermi2D::Filter::Point;
+    const auto find_image = [&](const ImageInfo& info, GPUVAddr addr, s32 x0, s32 x1) {
+        const ImageId exact = FindImage(info, addr, try_options);
+        if (exact || !try_padded || GetFormatType(info.format) != SurfaceType::ColorTexture) {
+            return exact;
+        }
+        const u32 width = PaddedBlitWidth(info, x0, x1);
+        if (width == info.size.width) {
+            return ImageId{};
+        }
+        ImageInfo narrow = info;
+        narrow.size.width = width;
+        return FindImage(narrow, addr, RelaxedOptions::RequireBlockLayout);
+    };
     do {
         has_deleted_images = false;
-        src_id = FindImage(src_info, src_addr, try_options);
-        dst_id = FindImage(dst_info, dst_addr, try_options);
+        src_id = find_image(src_info, src_addr, copy.src_x0, copy.src_x1);
+        dst_id = find_image(dst_info, dst_addr, copy.dst_x0, copy.dst_x1);
         if (!copy.must_accelerate) {
             do {
                 if (!src_id && !dst_id) {
@@ -5217,8 +5281,24 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
     if (rt.format == Tegra::RenderTargetFormat::NONE) {
         return ImageViewId{};
     }
-    const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ClipPaddedTarget(info);
     return FindRenderTargetView(info, gpu_addr);
+}
+
+template <class P>
+bool TextureCache<P>::UsePaddedTargetWidths() const {
+    return gpu_memory && gpu_memory->UsesNativeTiling() &&
+           Settings::GetCurrentProgramID() == DkbProgramId;
+}
+
+template <class P>
+void TextureCache<P>::ClipPaddedTarget(ImageInfo& info) const {
+    if (!UsePaddedTargetWidths()) {
+        return;
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    info.size.width = PaddedTargetWidth(info, clip.x.Value() + clip.width.Value());
 }
 
 template <class P>
@@ -5241,6 +5321,8 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     const u32 clip_right = regs.surface_clip.x.Value() + regs.surface_clip.width.Value();
     if (depth_target_padded && clip_right <= info.size.height) {
         info.size.width = info.size.height;
+    } else if (!depth_target_padded) {
+        ClipPaddedTarget(info);
     }
     return FindRenderTargetView(info, gpu_addr);
 }
@@ -5749,6 +5831,24 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
             async_decode->cancelled = true;
         }
     }
+    // The slot can be reused before the next chunk. Return any staging at the current GPU tick
+    // so already-recorded chunks can finish reading it.
+    for (auto it = unswizzle_queue.begin(); it != unswizzle_queue.end();) {
+        if (it->image_id != image_id) {
+            ++it;
+            continue;
+        }
+        if (it->initialized) {
+            runtime.FreeDeferredStagingBuffer(it->staging_buffer);
+        }
+        if (free_guard.unswizzle_dropped++ < 8) {
+            LOG_WARNING(HW_GPU,
+                        "Free guard: async unswizzle of image {:#x} dropped with the image ({} of "
+                        "{} bytes read)",
+                        image.gpu_addr, it->current_offset, it->total_size);
+        }
+        it = unswizzle_queue.erase(it);
+    }
     if (image.HasScaled()) {
         total_used_memory -= GetScaledImageSizeBytes(image);
     }
@@ -5815,14 +5915,22 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         }
         slot_image_views.erase(image_view_id);
     }
-    const bool retained = RetainPendingImageDownloads(image_id, slot_images[image_id],
-                                                       uncommitted_downloads, committed_downloads);
+    u64 delete_tick = 0;
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        delete_tick = runtime.CurrentTick();
+    }
+    std::shared_ptr<Image> retained = RetainPendingImageDownloads(
+        image_id, slot_images[image_id], uncommitted_downloads, committed_downloads, delete_tick);
     if (retained) {
         LOG_INFO(Render_Vulkan, "Retained image for queued download: id={}", image_id.Value());
+        if constexpr (requires { runtime.CurrentTick(); }) {
+            retained_image_keepers.push_back({delete_tick, std::move(retained)});
+            ++free_guard.retained_held;
+        }
     } else if (!immediate_delete) {
         if constexpr (requires { runtime.CurrentTick(); }) {
             gpu_sentenced_images.push_back(
-                {runtime.CurrentTick(), freed_bytes, std::move(slot_images[image_id])});
+                {delete_tick, freed_bytes, std::move(slot_images[image_id])});
             gpu_sentenced_bytes += freed_bytes;
         } else {
             sentenced_images.Push(std::move(slot_images[image_id]));

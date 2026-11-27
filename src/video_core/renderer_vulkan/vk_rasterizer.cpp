@@ -595,6 +595,11 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         [this](const std::function<void(DAddr, size_t)>& callback) {
             gpu.ForEachPendingCpuWrite(callback);
         });
+    buffer_cache.SetReadRunPageFilter([this](DAddr addr, u64 size) {
+        return !texture_cache.page_filter.Any(addr, size) &&
+               !query_cache.page_filter.Any(addr, size) &&
+               !buffer_cache_runtime.Nx2Slots().HasOwed();
+    });
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) {
             auto* const rasterizer = static_cast<RasterizerVulkan*>(argument);
@@ -628,6 +633,7 @@ RasterizerVulkan::~RasterizerVulkan() {
     state_tracker.ClearChannel();
     scheduler.WaitWorker();
     scheduler.Finish();
+    buffer_cache_runtime.ClearMultiRangeBuffers();
 }
 
 GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_indirect) {
@@ -1410,6 +1416,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             verify_kept ? buffer_cache.KeptGraphicsBindingsHash(false, false, true) : 0;
         if (fast_draw_on) {
             pipeline->CaptureNextDelta(verify_kept);
+            FastDraw::NoteHandlesRead();
         }
         if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed, output)) {
             report_failure("configure failed");
@@ -1439,16 +1446,30 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (frame_dump.Capturing()) {
         FrameDumpPass(texture_cache.GetFramebuffer());
         frame_dump.NoteDraw(pipeline->ShaderHashes());
-        if (frame_dump.WantsShaders(pipeline)) {
+        if (frame_dump.IncludesGraphicsPass() && frame_dump.WantsShaders(pipeline)) {
             frame_dump.NoteGraphicsShaders(
                 *pipeline, pipeline_cache.CaptureGraphicsPrograms(pipeline->ShaderHashes()));
         }
         bool recorded = false;
-        if (frame_dump.CapturingSampled()) {
+        if (frame_dump.IncludesGraphicsPass() && frame_dump.CapturingSampled()) {
             boost::container::small_vector<FrameDump::Sampled, 16> sampled;
             for (const auto& image : pipeline->SampledImages()) {
-                sampled.push_back({image.stage, image.tic, &texture_cache.GetImageView(image.id),
-                                   &texture_cache.GetSampler(image.sampler)});
+                auto& sample = sampled.emplace_back(FrameDump::Sampled{
+                    image.stage, image.tic, &texture_cache.GetImageView(image.id),
+                    &texture_cache.GetSampler(image.sampler)});
+                if (frame_dump.Focused()) {
+                    const auto& header = maxwell3d->regs.tex_header;
+                    const u32 index = Tegra::Texture::TextureHeaderIndex(
+                        image.tic, header.limit,
+                        Tegra::Texture::UsesHeaderByteOffsetHandles(
+                            gpu_memory->UsesNativeTiling(), Settings::GetCurrentProgramID()));
+                    if (index <= header.limit) {
+                        Tegra::Texture::TICEntry tic{};
+                        gpu_memory->ReadBlockUnsafe(header.Address() + u64{index} * sizeof(tic),
+                                                    &tic, sizeof(tic));
+                        sample.tic_raw = tic.raw;
+                    }
+                }
             }
             recorded = frame_dump.NoteSampled(sampled);
         }
@@ -1593,13 +1614,27 @@ void RasterizerVulkan::NoteOcarinaDraw(const GraphicsPipeline& pipeline) {
                 scene.size.width == oot_motion.extent.width &&
                 scene.size.height == oot_motion.extent.height && !scene.IsRescaled() &&
                 scene.range == VideoCommon::SubresourceRange{}) {
-                oot_effects_scene = scene.Handle(Shader::TextureType::Color2D);
+                oot_effects_view = scene_id;
+                oot_effects_generation = texture_cache.ImageViewGeneration(scene_id);
                 oot_effects_address = scene.gpu_addr;
                 oot_effects_frame = render_trace_frame;
-                oot_live_dlss->SaveEffectsBase(oot_effects_scene, oot_motion.extent,
-                                               render_trace_frame);
+                oot_live_dlss->SaveEffectsBase(scene.Handle(Shader::TextureType::Color2D),
+                                               oot_motion.extent, render_trace_frame);
             }
         }
+    }
+}
+
+void RasterizerVulkan::MarkOcarinaEffectsIfAlive() {
+    if (const auto* scene =
+            texture_cache.GetImageViewIfCurrent(oot_effects_view, oot_effects_generation)) {
+        oot_live_dlss->MarkEffects(scene->Handle(Shader::TextureType::Color2D), render_trace_frame);
+    } else if (oot_effects_stale_warnings < 8) {
+        ++oot_effects_stale_warnings;
+        LOG_WARNING(Render_Vulkan,
+                    "OoT effects mark skipped: scene view at {:#x} was retired since the fog "
+                    "draw ({} so far)",
+                    oot_effects_address, oot_effects_stale_warnings);
     }
 }
 
@@ -3369,7 +3404,7 @@ void RasterizerVulkan::PlayUnlentDispatch(UnlentDispatch& dispatch) {
         VideoCommon::GpuSplit::SetPlayingPosition(~u64{0});
     };
     Profile::Scope profile_scope{Profile::Zone::Compute};
-    FlushWork();
+    FlushWork(true);
     auto& slots = buffer_cache_runtime.Nx2Slots();
     if (dispatch.list_slot && !slots.Held(*dispatch.list_slot)) {
         split.NoteUnlentSlotUnheld();
@@ -3423,7 +3458,7 @@ void RasterizerVulkan::PlayUnlentDispatch(UnlentDispatch& dispatch) {
         if (std::ranges::any_of(pipeline->WrittenImages(), [this](VideoCommon::ImageViewId id) {
                 return id && texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
             })) {
-            oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
+            MarkOcarinaEffectsIfAlive();
             oot_effects_frame.reset();
         }
     }
@@ -3457,7 +3492,7 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
-    FlushWork();
+    FlushWork(true);
     gpu_memory->FlushCaching();
     if (frame_dump.Capturing()) {
         frame_dump.EndPass();
@@ -3519,13 +3554,13 @@ void RasterizerVulkan::DispatchCompute() {
         frame_dump.CaptureDispatch(pipeline->ShaderHash(), written);
     };
     TracePendingCpuWrites(true, std::array{pipeline->ShaderHash()});
-    if (frame_dump.WantsShaders(pipeline)) {
+    if (!frame_dump.Focused() && frame_dump.WantsShaders(pipeline)) {
         const auto& launch = kepler_compute->launch_description;
         frame_dump.NoteComputeShaders(
             *pipeline, pipeline_cache.CaptureComputeProgram(),
             std::span(reinterpret_cast<const u8*>(&launch), sizeof(launch)));
     }
-    if (frame_dump.CapturingSampled()) {
+    if (!frame_dump.Focused() && frame_dump.CapturingSampled()) {
         boost::container::small_vector<FrameDump::Sampled, 16> sampled;
         for (const auto& image : pipeline->SampledImages()) {
             sampled.push_back({5, image.tic, &texture_cache.GetImageView(image.id),
@@ -3647,7 +3682,7 @@ void RasterizerVulkan::DispatchCompute() {
         if (std::ranges::any_of(written, [this](VideoCommon::ImageViewId id) {
                 return id && texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
             })) {
-            oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
+            MarkOcarinaEffectsIfAlive();
             oot_effects_frame.reset();
         }
     }
@@ -4416,8 +4451,8 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
         }
         return std::nullopt;
     };
-    const auto lend = [&split](Site site) {
-        split.NoteInvalidation(site);
+    const auto lend = [&split](Site lent) {
+        split.NoteInvalidation(lent);
         return false;
     };
     // Shaders are looked up on the back as well: their invalidation stays lent.
@@ -5701,6 +5736,7 @@ void RasterizerVulkan::TickFrame() {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();
     }
+    scheduler.JoinRecorders();
     {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();
@@ -6001,7 +6037,7 @@ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_load
     pipeline_cache.LoadDiskResources(title_id, stop_loading, callback);
 }
 
-void RasterizerVulkan::FlushWork() {
+void RasterizerVulkan::FlushWork(bool ends_pass) {
 #ifdef __ANDROID__
     static constexpr bool android = true;
 #else
@@ -6039,7 +6075,19 @@ void RasterizerVulkan::FlushWork() {
         }();
         legacy_budget = forced_draws != 0 ? forced_draws : (device.IsMoltenVK() ? 128U : 4096U);
     }
-    switch (SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget)) {
+    bool pass_boundary = false;
+    if (native && !android && draw_counter + 1 >= budget / 2 && draw_counter + 1 < budget) {
+        pass_boundary = ends_pass || scheduler.IsBetweenRenderPasses() ||
+                        (texture_cache.RenderTargetsDirty() && scheduler.IsRenderPassActive());
+    }
+    auto action = SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget,
+                                            pass_boundary);
+    if (action != SubmissionPolicy::Action::Flush && native && !android &&
+        scheduler.IdleGpuAwaitsWork()) {
+        draw_counter = 0;
+        action = SubmissionPolicy::Action::Flush;
+    }
+    switch (action) {
     case SubmissionPolicy::Action::None:
         break;
     case SubmissionPolicy::Action::Dispatch:

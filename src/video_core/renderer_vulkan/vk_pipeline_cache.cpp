@@ -717,6 +717,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
+        .has_broken_global_memory_search_call =
+            driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+            device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
         // Mesa MR 45092 ("radv: Clear stale vertex user SGPR state when binding mesh shaders"),
         // in 26.2.5. Only GFX11+ is affected, but the workaround costs one SGPR read anywhere.
         .has_broken_mesh_user_sgprs = driver_id == VK_DRIVER_ID_MESA_RADV &&
@@ -734,6 +737,15 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     if (profile.has_broken_mesh_user_sgprs) {
         LOG_INFO(Render_Vulkan, "RADV before 26.2.5: native mesh shaders read the grid size to "
                                 "avoid the stale mesh user SGPR hang");
+    }
+    if (profile.select_global_memory_buffer) {
+        constexpr std::array arch_names{"Kepler or older", "Maxwell", "Pascal", "Volta", "Turing",
+                                        "Ampere or newer"};
+        LOG_INFO(Render_Vulkan, "NVIDIA {}: global memory accesses search the bound buffers {}",
+                 arch_names[static_cast<size_t>(device.GetNvidiaArch())],
+                 profile.has_broken_global_memory_search_call
+                     ? "inline in every stage"
+                     : "through one non-inlined function outside task and mesh programs");
     }
 
     host_info = Shader::HostTranslateInfo{
@@ -1766,11 +1778,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                 .cpu_bytes = TranslationBytes(bytes),
                 .driver_bytes = DriverCompileBytes,
                 .cpu = [this, &state, &built_one, &records, &pipeline_record, &unreadable, key,
-                        indices = std::move(indices),
+                        job_indices = std::move(indices),
                         read_properties](VideoCommon::ShaderJobContext& context)
                     -> VideoCommon::ShaderDriverStage {
                     std::vector<CachedComputeTranslation> candidates;
-                    for (const size_t index : indices) {
+                    for (const size_t index : job_indices) {
                         const CacheV2::LogRecord& record = *records[index];
                         Common::UniqueFunction<void, std::istream&, FileEnvironment> read_compute{
                             [&](std::istream& file, FileEnvironment env) {

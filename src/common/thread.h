@@ -13,6 +13,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <thread>
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
@@ -142,9 +144,56 @@ enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
 
 /// The experimental pin_gpu_threads setting (Windows and Linux): the split GPU thread's front and
 /// back each get a physical performance core of their own and the guest cores keep off those two.
-/// Skipped, with one log line, on CPUs with too few cores, with EDEN_HYBRID_CORES=0 (Windows), and
-/// on other hosts.
+/// On a CPU that gets the four-core plan (CoresForGpuBackCorePinning cores with SMT; Linux only)
+/// only the back is pinned, after ReserveGpuBackCore; the front and the guest cores are left as
+/// they are. Skipped, with one log line, on other CPUs with fewer than MinCoresForGpuThreadPinning
+/// performance cores, with EDEN_HYBRID_CORES=0 (Windows), and on other hosts.
 void PinCurrentThread(PinnedRole role);
+
+/// Linux: takes `cpus` out of the affinity of every other thread of the process, each keeping the
+/// rest of its own mask (a thread whose mask has only those CPUs is left as it is), so that the
+/// calling thread can then be pinned to them alone. A thread starts with its creator's mask, so
+/// the threads created during the reservation keep off them too, except those the caller creates
+/// after pinning itself, which start on them. Every thread's mask is listed first, changing
+/// nothing; the threads are then narrowed, and listed again for those created since. Returns how
+/// many threads were moved. Returns nothing, with nothing reserved, while a reservation is active,
+/// for no CPUs, when the caller's mask can't be read, when the first listing fails (nothing has
+/// been changed), when the second fails (every thread listed is put back: its mask from before,
+/// or for one created since, its own mask or, if it started with a narrowed creator's mask, the
+/// reserved CPUs added back), and on other hosts. After a failed second listing, a thread created
+/// since the first that it did not reach keeps its narrowed creator's mask, and one it reached
+/// whose creator was pinned off the reserved CPUs gets them added.
+std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus);
+/// Gives every thread that existed at the reservation, the caller included, its own mask from
+/// before it. A thread created during it gets the reserved CPUs back, or the caller's mask from
+/// before if its mask has only reserved CPUs (one the pinned caller created). Nothing while no
+/// reservation is active. A saved mask goes back only to an id that is still a thread of this
+/// process.
+///
+/// Limits: threads are told apart by id, so a thread created during the reservation under an id
+/// that an exited thread had gets that thread's mask; a thread created during it that someone
+/// pinned to a narrow set gets the reserved CPUs added, or, if that set lies inside the reserved
+/// CPUs, the caller's whole mask; a thread that changed its own mask during it gets its old one
+/// back; a thread created while Release walks the threads may keep its creator's narrowed mask;
+/// a process started during the reservation keeps the narrowed mask of the thread that started it;
+/// and if the threads can't be listed at release, those created during the reservation stay as
+/// they are.
+void ReleaseReservedCpus();
+
+/// With pin_gpu_threads, on a CPU that gets the four-core plan: reserves the back's physical core
+/// with ReserveCpusForCurrentThread. The back calls it as it starts, then pins itself to that
+/// core, so threads it creates from then on start on that core until the release. Returns
+/// whether the back may pin itself: false only on the four-core plan when nothing was reserved
+/// (logged), true when it was or nothing needs reserving.
+[[nodiscard]] bool ReserveGpuBackCore();
+/// ReleaseReservedCpus; the back calls it when it stops.
+void ReleaseGpuBackCore();
+
+/// Whether ReserveGpuBackCore reserves a core on this machine: the four-core plan (Linux; false
+/// elsewhere).
+[[nodiscard]] bool ReservesGpuBackCore();
+/// Whether PinCurrentThread pins any role on this machine (Linux; false elsewhere).
+[[nodiscard]] bool PlansGpuThreadPinning();
 
 void RefreshThreadPolicies();
 void PollThreadPolicies();

@@ -50,7 +50,8 @@ std::optional<u32> SharedAccessBytes(IR::Opcode opcode) {
 
 void SharedMemoryBoundsPass(IR::Program& program, u32 shared_memory_size) {
     // Accesses that do not fit in the shared memory the shader got are sent to its last 16 bytes
-    // instead, so they stay inside the allocation. Their results are wrong, but defined.
+    // instead, so they stay inside the allocation. Their results are wrong, and redirected stores
+    // from different invocations may race on those bytes.
     if (shared_memory_size < 16) {
         return;
     }

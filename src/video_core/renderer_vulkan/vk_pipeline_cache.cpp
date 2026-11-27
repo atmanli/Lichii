@@ -3811,6 +3811,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     key.unique_hash,
                     program.shared_memory_size / 1024,
                     max_shared_memory / 1024);
+        Shader::Optimization::SharedMemoryBoundsPass(program, max_shared_memory);
         program.shared_memory_size = max_shared_memory;
     }
     std::unique_ptr<ComputePipeline> pipeline;

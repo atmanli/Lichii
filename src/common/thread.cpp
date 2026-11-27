@@ -913,43 +913,80 @@ std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus) {
         return std::nullopt;
     }
     const pid_t self = gettid();
-    size_t count = 0;
+    // First every thread's mask, changing nothing: if the threads can't all be listed, nothing
+    // has been changed and nothing is reserved.
     reservation.saved.clear();
     const bool listed = ForEachProcessThread([&](pid_t tid) {
         SavedAffinity entry{tid, {}};
-        if (!GetThreadAffinity(tid, entry.mask)) {
-            return;
-        }
-        reservation.saved.push_back(entry);
-        if (tid != self && NarrowThread(tid, entry.mask, reservation.reserved)) {
-            ++count;
+        if (GetThreadAffinity(tid, entry.mask)) {
+            reservation.saved.push_back(entry);
         }
     });
     if (!listed) {
-        // Not every thread was reached: give those that were their masks back and reserve
-        // nothing.
+        reservation.saved.clear();
+        return std::nullopt;
+    }
+    std::ranges::sort(reservation.saved, {}, &SavedAffinity::tid);
+    size_t count = 0;
+    for (const SavedAffinity& entry : reservation.saved) {
+        if (entry.tid != self && IsOwnThread(entry.tid) &&
+            NarrowThread(entry.tid, entry.mask, reservation.reserved)) {
+            ++count;
+        }
+    }
+    // Again for a thread created since the list, which started with its creator's mask from
+    // before or after the narrowing. Like every thread created during the reservation it has no
+    // saved mask, and Release gives it the reserved CPUs back. The threads this walk reaches
+    // are kept, with whether it narrowed them, so that a failed walk can undo it.
+    struct LaterThread {
+        SavedAffinity before;
+        bool narrowed;
+    };
+    std::vector<LaterThread> later;
+    const bool relisted = ForEachProcessThread([&](pid_t tid) {
+        SavedAffinity entry{tid, {}};
+        if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid) ||
+            !GetThreadAffinity(tid, entry.mask)) {
+            return;
+        }
+        const bool narrowed = NarrowThread(tid, entry.mask, reservation.reserved);
+        later.push_back({entry, narrowed});
+        if (narrowed) {
+            ++count;
+        }
+    });
+    if (!relisted) {
+        // Undo everything and reserve nothing, so that the caller does not pin itself.
         for (const SavedAffinity& entry : reservation.saved) {
             if (IsOwnThread(entry.tid)) {
                 SetThreadAffinity(entry.tid, entry.mask);
             }
         }
+        // One this walk narrowed gets its mask from before; one that started with a narrowed
+        // creator's mask gets the reserved CPUs back, as Release would give it. A mask that already
+        // holds a reserved CPU was not narrowed by anyone and is left as it is.
+        for (const LaterThread& thread : later) {
+            if (!IsOwnThread(thread.before.tid)) {
+                continue;
+            }
+            if (thread.narrowed) {
+                SetThreadAffinity(thread.before.tid, thread.before.mask);
+                continue;
+            }
+            cpu_set_t held;
+            CPU_AND(&held, &thread.before.mask, &reservation.reserved);
+            if (CPU_COUNT(&held) != 0) {
+                continue;
+            }
+            cpu_set_t widened;
+            CPU_OR(&widened, &thread.before.mask, &reservation.reserved);
+            if (!CPU_EQUAL(&widened, &thread.before.mask)) {
+                SetThreadAffinity(thread.before.tid, widened);
+            }
+        }
         reservation.saved.clear();
         return std::nullopt;
     }
-    std::ranges::sort(reservation.saved, {}, &SavedAffinity::tid);
-    // Again for a thread created during the first pass by a creator it had not reached yet, which
-    // started with the creator's old mask. Like every thread created during the reservation it
-    // has no saved mask, and Release gives it the reserved CPUs back.
-    ForEachProcessThread([&](pid_t tid) {
-        cpu_set_t mask;
-        if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid) ||
-            !GetThreadAffinity(tid, mask)) {
-            return;
-        }
-        if (NarrowThread(tid, mask, reservation.reserved)) {
-            ++count;
-        }
-    });
     reservation.active = true;
     return count;
 #else

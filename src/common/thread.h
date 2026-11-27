@@ -154,10 +154,15 @@ void PinCurrentThread(PinnedRole role);
 /// rest of its own mask (a thread whose mask has only those CPUs is left as it is), so that the
 /// calling thread can then be pinned to them alone. A thread starts with its creator's mask, so
 /// the threads created during the reservation keep off them too, except those the caller creates
-/// after pinning itself, which start on them. Returns how many threads were moved. Returns nothing,
-/// with nothing reserved, while a reservation is active, for no CPUs, when the caller's mask can't
-/// be read, when the threads can't all be listed (those reached get their masks back), and on
-/// other hosts.
+/// after pinning itself, which start on them. Every thread's mask is listed first, changing
+/// nothing; the threads are then narrowed, and listed again for those created since. Returns how
+/// many threads were moved. Returns nothing, with nothing reserved, while a reservation is active,
+/// for no CPUs, when the caller's mask can't be read, when the first listing fails (nothing has
+/// been changed), when the second fails (every thread listed is put back: its mask from before,
+/// or for one created since, its own mask or, if it started with a narrowed creator's mask, the
+/// reserved CPUs added back), and on other hosts. After a failed second listing, a thread created
+/// since the first that it did not reach keeps its narrowed creator's mask, and one it reached
+/// whose creator was pinned off the reserved CPUs gets them added.
 std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus);
 /// Gives every thread that existed at the reservation, the caller included, its own mask from
 /// before it. A thread created during it gets the reserved CPUs back, or the caller's mask from

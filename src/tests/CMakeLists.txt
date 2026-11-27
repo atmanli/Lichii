@@ -83,6 +83,7 @@ add_executable(tests
     core/builtin_patches.cpp
     core/cheat_parser.cpp
     core/builtin_font_glyphs.cpp
+    core/system_test_context.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp
@@ -176,6 +177,7 @@ add_executable(tests
     video_core/safe_command_reads.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
+    video_core/nx2_fast_draw_landing.cpp
     hid_core/emulated_controller_config.cpp
     hid_core/npad_assignment.cpp
     hid_core/sensor_info.cpp

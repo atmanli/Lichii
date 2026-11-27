@@ -6,6 +6,20 @@
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include "common/core_pinning.h"
+#include "common/thread.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <condition_variable>
+#include <filesystem>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <string>
+#include <thread>
+#include <utility>
+#include <sched.h>
+#include <unistd.h>
+#include "common/scope_exit.h"
+#endif
 
 namespace {
 
@@ -144,6 +158,34 @@ TEST_CASE("Core pinning: hybrid 4 P-cores and 8 E-cores is skipped", "[common][c
     CheckSkipped(plan);
 }
 
+TEST_CASE("Core pinning: 4 cores, 8 threads gives only the back a core", "[common][core_pinning]") {
+    const auto processors = Uniform(4, 2);
+    const auto plan = Common::PlanGpuThreadPinning(processors);
+    CHECK(plan.performance_cores == 4);
+    CHECK(plan.back_core_reserved);
+    CHECK(plan.back == Ids(2, 2));
+    CHECK(plan.front == Concat(Ids(0, 2), Ids(4, 4)));
+    CHECK(plan.guest == plan.front);
+    for (const u32 id : plan.guest) {
+        CHECK(CoreOf(processors, id) != CoreOf(processors, plan.back.front()));
+    }
+}
+
+TEST_CASE("Core pinning: other plans leave the back's core unreserved",
+          "[common][core_pinning]") {
+    CHECK(!Common::PlanGpuThreadPinning(Uniform(6, 2)).back_core_reserved);
+    CHECK(!Common::PlanGpuThreadPinning(Uniform(4, 1)).back_core_reserved);
+}
+
+TEST_CASE("Core pinning: 4 cores of which one lacks SMT is skipped", "[common][core_pinning]") {
+    std::vector<LogicalProcessor> processors;
+    AddCores(processors, 3, 2, 0);
+    AddCores(processors, 1, 1, 0);
+    const auto plan = Common::PlanGpuThreadPinning(processors);
+    CHECK(!plan.back_core_reserved);
+    CheckSkipped(plan);
+}
+
 TEST_CASE("Core pinning: 4 cores, 4 threads is skipped", "[common][core_pinning]") {
     const auto plan = Common::PlanGpuThreadPinning(Uniform(4, 1));
     CHECK(plan.performance_cores == 4);
@@ -202,3 +244,197 @@ TEST_CASE("Core pinning: a 4P+4E CPU whose E-cores rank lower is skipped",
     CHECK(plan.performance_cores == 4);
     CheckSkipped(plan);
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+namespace {
+
+cpu_set_t ThreadMask(pid_t tid) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    REQUIRE(sched_getaffinity(tid, sizeof(mask), &mask) == 0);
+    return mask;
+}
+
+// A thread of the test process may exit while the test runs (one a library started).
+std::optional<cpu_set_t> MaskIfAlive(pid_t tid) {
+    cpu_set_t mask;
+    if (sched_getaffinity(tid, sizeof(mask), &mask) != 0) {
+        return std::nullopt;
+    }
+    return mask;
+}
+
+std::vector<std::pair<pid_t, cpu_set_t>> ProcessMasks() {
+    std::vector<std::pair<pid_t, cpu_set_t>> masks;
+    for (const auto& entry : std::filesystem::directory_iterator{"/proc/self/task"}) {
+        const pid_t tid = static_cast<pid_t>(std::stoi(entry.path().filename().string()));
+        if (const auto mask = MaskIfAlive(tid)) {
+            masks.emplace_back(tid, *mask);
+        }
+    }
+    return masks;
+}
+
+cpu_set_t MaskOf(std::span<const u32> cpus) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    for (const u32 cpu : cpus) {
+        CPU_SET(cpu, &mask);
+    }
+    return mask;
+}
+
+// A thread that reports its id and waits until told to finish; it sets its own mask first if
+// given one, and otherwise keeps the mask it started with, its creator's.
+class HelperThread {
+public:
+    explicit HelperThread(std::optional<cpu_set_t> mask = std::nullopt) {
+        thread = std::thread([this, mask] {
+            if (mask) {
+                sched_setaffinity(0, sizeof(*mask), &*mask);
+            }
+            Run();
+        });
+        Started();
+    }
+    ~HelperThread() {
+        Finish();
+        thread.join();
+    }
+    pid_t Id() const {
+        return tid;
+    }
+    /// Has the helper create a helper of its own, which starts with the helper's mask.
+    pid_t Spawn() {
+        std::unique_lock lock{mutex};
+        spawn = true;
+        changed.notify_all();
+        changed.wait(lock, [this] { return child_tid != 0; });
+        return child_tid;
+    }
+
+private:
+    void Run() {
+        std::unique_lock lock{mutex};
+        tid = gettid();
+        changed.notify_all();
+        std::optional<HelperThread> child;
+        while (!done) {
+            changed.wait(lock, [this, &child] { return done || (spawn && !child); });
+            if (spawn && !child && !done) {
+                lock.unlock();
+                child.emplace();
+                lock.lock();
+                child_tid = child->Id();
+                changed.notify_all();
+            }
+        }
+        lock.unlock();
+        child.reset();
+    }
+    void Started() {
+        std::unique_lock lock{mutex};
+        changed.wait(lock, [this] { return tid != 0; });
+    }
+    void Finish() {
+        std::scoped_lock lock{mutex};
+        done = true;
+        changed.notify_all();
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    pid_t tid{};
+    pid_t child_tid{};
+    bool spawn{};
+    bool done{};
+    std::thread thread;
+};
+
+} // Anonymous namespace
+
+// Reserves two of the CPUs this process may run on, whatever the host: the threads keep their
+// own masks less those two, and get exactly their old masks back.
+TEST_CASE("Core pinning: a reservation keeps each thread's own mask and restores it",
+          "[common][core_pinning]") {
+    const cpu_set_t allowed = ThreadMask(0);
+    std::vector<u32> cpus;
+    for (u32 cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &allowed)) {
+            cpus.push_back(cpu);
+        }
+    }
+    if (cpus.size() < 4) {
+        SKIP("needs at least four CPUs, this process may use " << cpus.size());
+    }
+    const std::vector<u32> reserved{cpus[cpus.size() - 2], cpus[cpus.size() - 1]};
+    const cpu_set_t reserved_mask = MaskOf(reserved);
+    // Threads that start off the reserved CPUs, on one of them alone, and over both and one other.
+    const HelperThread off{MaskOf(std::vector<u32>{cpus[0]})};
+    const HelperThread inside{MaskOf(std::vector<u32>{reserved[0]})};
+    const HelperThread across{MaskOf(std::vector<u32>{cpus[1], reserved[0], reserved[1]})};
+    HelperThread creator{};
+    const auto before = ProcessMasks();
+
+    SCOPE_EXIT {
+        Common::ReleaseReservedCpus();
+        sched_setaffinity(0, sizeof(allowed), &allowed);
+    };
+    CHECK(Common::ReserveCpusForCurrentThread(reserved).value_or(0) >= 2);
+    CHECK(!Common::ReserveCpusForCurrentThread(reserved)); // a second one changes nothing
+    for (const auto& [tid, mask] : before) {
+        const auto during = MaskIfAlive(tid);
+        if (!during) {
+            continue;
+        }
+        if (tid == gettid() || tid == inside.Id()) {
+            // The caller is left for its own pinning; the other would be left with no CPU.
+            CHECK(CPU_EQUAL(&*during, &mask));
+            continue;
+        }
+        // Its own mask less the reserved CPUs.
+        cpu_set_t overlap;
+        CPU_AND(&overlap, &mask, &reserved_mask);
+        cpu_set_t expected;
+        CPU_XOR(&expected, &mask, &overlap);
+        CHECK(CPU_EQUAL(&*during, &expected));
+    }
+    const cpu_set_t across_during = ThreadMask(across.Id());
+    const cpu_set_t across_expected = MaskOf(std::vector<u32>{cpus[1]});
+    CHECK(CPU_EQUAL(&across_during, &across_expected));
+
+    // Created during the reservation: by a narrowed thread, it starts narrowed and gets the
+    // reserved CPUs back; by the caller once pinned to the reserved CPUs, as the back does, it
+    // starts on them and gets the caller's old mask.
+    const pid_t from_narrowed = creator.Spawn();
+    cpu_set_t narrowed_expected = allowed;
+    for (const u32 cpu : reserved) {
+        CPU_CLR(cpu, &narrowed_expected);
+    }
+    const cpu_set_t from_narrowed_during = ThreadMask(from_narrowed);
+    CHECK(CPU_EQUAL(&from_narrowed_during, &narrowed_expected));
+    const cpu_set_t caller_before = ThreadMask(0);
+    REQUIRE(sched_setaffinity(0, sizeof(reserved_mask), &reserved_mask) == 0);
+    std::optional<HelperThread> from_pinned_caller;
+    from_pinned_caller.emplace();
+    const cpu_set_t from_pinned_during = ThreadMask(from_pinned_caller->Id());
+    CHECK(CPU_EQUAL(&from_pinned_during, &reserved_mask));
+
+    Common::ReleaseReservedCpus();
+    for (const auto& [tid, mask] : before) {
+        if (const auto after = MaskIfAlive(tid)) {
+            CHECK(CPU_EQUAL(&*after, &mask));
+        }
+    }
+    const cpu_set_t from_narrowed_after = ThreadMask(from_narrowed);
+    CHECK(CPU_EQUAL(&from_narrowed_after, &allowed));
+    const cpu_set_t from_pinned_after = ThreadMask(from_pinned_caller->Id());
+    CHECK(CPU_EQUAL(&from_pinned_after, &caller_before));
+    Common::ReleaseReservedCpus(); // a second release changes nothing
+    for (const auto& [tid, mask] : before) {
+        if (const auto after = MaskIfAlive(tid)) {
+            CHECK(CPU_EQUAL(&*after, &mask));
+        }
+    }
+}
+#endif

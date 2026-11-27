@@ -382,21 +382,23 @@ public:
         const auto low_amplitude = static_cast<u16>((std::max)(left.low, right.low) * 0xFFFF);
         const auto high_amplitude = static_cast<u16>((std::max)(left.high, right.high) * 0xFFFF);
 
+        bool rumbled = false;
         if (sdl_controller) {
-            const bool rumbled = SDL_RumbleGamepad(sdl_controller.get(), low_amplitude,
-                                                   high_amplitude, rumble_max_duration_ms);
+            rumbled = SDL_RumbleGamepad(sdl_controller.get(), low_amplitude, high_amplitude,
+                                        rumble_max_duration_ms);
             // After the body motors: on Windows with raw input, SDL plays trigger rumble through
             // Windows.Gaming.Input, which sets all four motors at once from the values SDL kept
             // from the last SDL_RumbleGamepad. Sent first, it played the previous update's body
             // rumble over the one XInput had just set.
             TriggerRumblePlay(left.high, right.high, rumble_max_duration_ms);
-            return rumbled;
         } else if (sdl_joystick) {
-            return SDL_RumbleJoystick(sdl_joystick.get(), low_amplitude, high_amplitude,
-                                      rumble_max_duration_ms);
+            rumbled = SDL_RumbleJoystick(sdl_joystick.get(), low_amplitude, high_amplitude,
+                                         rumble_max_duration_ms);
         }
-
-        return false;
+        if (rumbled) {
+            rumble_pending = low_amplitude != 0 || high_amplitude != 0;
+        }
+        return rumbled;
     }
 
     /// On controllers with motors in their triggers, plays each side's light (high band) rumble
@@ -430,14 +432,28 @@ public:
         triggers_rumbling = left_trigger != 0 || right_trigger != 0;
     }
 
-    /// Plays the vibration on the DualSense haptics. Returns false when the controller uses
-    /// standard rumble instead.
+    /// Plays native haptics when available. Returns false to use standard rumble.
     bool HapticsPlay(const Common::Input::VibrationStatus& vibration) {
         {
-            std::scoped_lock lock{steam_haptics_mutex};
+            std::scoped_lock rumble_lock{rumble_mutex};
+            std::unique_lock lock{steam_haptics_mutex};
             if (steam_haptics) {
-                return steam_haptics->SetVibration(
-                    vibration, Settings::values.enable_steam_controller_hd_rumble.GetValue());
+                const bool enabled = Settings::values.enable_steam_controller_hd_rumble.GetValue();
+                if (enabled && !steam_haptics->HasFailed() && rumble_pending) {
+                    // Clear SDL's cached rumble before PCM starts. Never take SDL's joystick
+                    // lock under steam_haptics_mutex: removal callbacks take them in reverse.
+                    lock.unlock();
+                    SDL_LockJoysticks();
+                    const bool stopped = SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
+                    SDL_UnlockJoysticks();
+                    lock.lock();
+                    if (!stopped || !steam_haptics) {
+                        return false;
+                    }
+                    side_vibrations = {};
+                    rumble_pending = false;
+                }
+                return steam_haptics->SetVibration(vibration, enabled);
             }
         }
         if (!UseDualSenseHaptics()) {
@@ -804,6 +820,7 @@ private:
 
     std::mutex rumble_mutex;
     std::array<Common::Input::VibrationStatus, 2> side_vibrations{};
+    bool rumble_pending{};         // (under rumble_mutex)
     bool triggers_rumbling{};      // (under rumble_mutex)
     bool trigger_rumble_logged{};  // (under rumble_mutex)
 };

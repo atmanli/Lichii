@@ -529,11 +529,11 @@ void EmulatedController::ReloadInput() {
 
 void EmulatedController::StopVibration() {
     for (std::size_t i = 0; i < 2; ++i) {
-        if (streamed_vibration_used[i] && output_devices[i]) {
+        if (vibration_used[i] && output_devices[i]) {
             output_devices[i]->SetVibration({.side = Common::Input::VibrationSide::Both});
         }
     }
-    streamed_vibration_used.fill(false);
+    vibration_used.fill(false);
     last_vibration_value.fill(DEFAULT_VIBRATION_VALUE);
     last_vibration_timepoint.fill({});
 }
@@ -1260,11 +1260,10 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
 
     // Skip duplicated vibrations
     const bool streamed = output_devices[index]->IsVibrationStreamed();
-    if (!streamed && last_vibration_value[index] == vibration) {
+    if (!streamed && last_vibration_timepoint[index] != std::chrono::steady_clock::time_point{} &&
+        last_vibration_value[index] == vibration) {
         return Settings::values.vibration_enabled.GetValue();
     }
-
-    last_vibration_value[index] = vibration;
 
     if (!Settings::values.vibration_enabled) {
         return false;
@@ -1290,8 +1289,6 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
             duration_cast<milliseconds>(now - last_vibration_timepoint[index]) < milliseconds(15)) {
             return false;
         }
-
-        last_vibration_timepoint[index] = now;
     }
 
     // Exponential amplification is too strong at low amplitudes. Switch to a linear
@@ -1314,9 +1311,13 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
 
     const bool delivered =
         output_devices[index]->SetVibration(status) == Common::Input::DriverResult::Success;
-    if (delivered && streamed && (status.low_amplitude > 0 || status.high_amplitude > 0)) {
-        // A Both request can leave the other grip playing after a one-sided stop.
-        streamed_vibration_used[index] = true;
+    if (delivered) {
+        last_vibration_value[index] = vibration;
+        last_vibration_timepoint[index] = std::chrono::steady_clock::now();
+        if (status.low_amplitude > 0 || status.high_amplitude > 0) {
+            // A Both request can leave the other grip playing after a one-sided stop.
+            vibration_used[index] = true;
+        }
     }
     return delivered;
 }

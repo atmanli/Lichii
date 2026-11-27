@@ -524,6 +524,16 @@ if (NOT ANDROID)
         SDL_hid_open_path=SteamHapticsTestOpen
         SDL_hid_write=SteamHapticsTestWrite
         SDL_hid_close=SteamHapticsTestClose)
+    if (WIN32)
+        target_sources(steam_controller_haptics_tests PRIVATE
+            ../input_common/drivers/sdl_driver.cpp
+            ../input_common/input_engine.cpp
+            ../input_common/helpers/dualsense_haptics.cpp
+            ../input_common/helpers/rumble_mapping.cpp)
+        target_compile_definitions(steam_controller_haptics_tests PRIVATE
+            SDL_GetJoysticks=SteamHapticsTestJoysticks
+            SDL_GetJoystickPath=SteamHapticsTestPath)
+    endif()
     add_test(NAME steam_controller_haptics_tests COMMAND steam_controller_haptics_tests)
     set_tests_properties(steam_controller_haptics_tests PROPERTIES TIMEOUT 20)
 

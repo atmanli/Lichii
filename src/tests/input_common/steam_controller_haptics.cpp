@@ -12,6 +12,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "input_common/helpers/steam_controller_haptics.h"
+#ifdef _WIN32
+#include <SDL3/SDL.h>
+#include "common/scope_exit.h"
+#include "common/settings.h"
+#include "input_common/drivers/sdl_driver.h"
+#endif
 
 namespace {
 using namespace std::chrono_literals;
@@ -24,7 +30,7 @@ struct Device {
     std::mutex mutex;
     std::condition_variable wake;
     Report last{};
-    int writes{}, opens{}, closes{}, modes{};
+    int writes{}, opens{}, closes{};
     bool open_ok{true}, write_ok{true};
 
     template <typename Predicate>
@@ -34,12 +40,17 @@ struct Device {
     }
 };
 Device devices[2];
+#ifdef _WIN32
+SDL_JoystickID virtual_joystick{};
+std::atomic<bool> ordinary_rumble{}, overlapping_rumble{};
+std::atomic<unsigned> rumble_stops{};
+#endif
 
 void Reset() {
     for (auto& d : devices) {
         std::scoped_lock lock{d.mutex};
         d.last = {};
-        d.writes = d.opens = d.closes = d.modes = 0;
+        d.writes = d.opens = d.closes = 0;
         d.open_ok = d.write_ok = true;
     }
 }
@@ -88,7 +99,11 @@ extern "C" int SDL_hid_write(SDL_hid_device* handle, const unsigned char* data, 
         std::copy_n(data, d.last.size(), d.last.begin());
         ++d.writes;
     } else if (data[0] == 0x86) {
-        ++d.modes;
+#ifdef _WIN32
+        if (data[1] == 2 && ordinary_rumble) {
+            overlapping_rumble = true;
+        }
+#endif
     }
     d.wake.notify_all();
     return static_cast<int>(length) + 1;
@@ -181,11 +196,10 @@ TEST_CASE("Steam HID streams separately and sleeps when idle", "[input][rumble]"
     }
 }
 
-TEST_CASE("Steam HID closes during setup and falls back after failure", "[input][rumble]") {
+TEST_CASE("Disabling Steam HID closes output and permits retry after failure", "[input][rumble]") {
     Reset();
     SteamControllerHaptics haptics{"1", 0x1302};
     REQUIRE(haptics.SetVibration(Tone(), true));
-    REQUIRE(devices[0].Wait([] { return devices[0].modes == 6; }));
     REQUIRE_FALSE(haptics.SetVibration({}, false));
     REQUIRE(devices[0].closes == 1);
     devices[0].write_ok = false;
@@ -228,3 +242,81 @@ TEST_CASE("Steam HID expires each grip independently and resumes from idle", "[i
                            [](u8 value) { return value != 0xff && value != 0x7f; });
     }));
 }
+
+#ifdef _WIN32
+// Restrict the driver fixture to its virtual controller, with no physical HID access.
+extern "C" SDL_JoystickID* SDL_GetJoysticks(int* count) {
+    *count = virtual_joystick ? 1 : 0;
+    auto* ids = static_cast<SDL_JoystickID*>(SDL_calloc(2, sizeof(SDL_JoystickID)));
+    ids[0] = virtual_joystick;
+    return ids;
+}
+
+extern "C" const char* SDL_GetJoystickPath(SDL_Joystick*) {
+    return "1";
+}
+
+TEST_CASE("SDL ordinary rumble stops before Steam PCM takes ownership", "[input][rumble]") {
+    Reset();
+    ordinary_rumble = overlapping_rumble = false;
+    rumble_stops = 0;
+    const bool saved = Settings::values.enable_steam_controller_hd_rumble.GetValue();
+    SCOPE_EXIT {
+        Settings::values.enable_steam_controller_hd_rumble.SetValue(saved);
+    };
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+    REQUIRE(SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD));
+    SCOPE_EXIT {
+        SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD);
+    };
+    SDL_VirtualJoystickDesc desc{};
+    desc.version = sizeof(desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.vendor_id = 0x28DE;
+    desc.product_id = 0x1302;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.Rumble = [](void*, Uint16 low, Uint16 high) {
+        ordinary_rumble = low != 0 || high != 0;
+        if (!ordinary_rumble) {
+            ++rumble_stops;
+        }
+        return true;
+    };
+    virtual_joystick = SDL_AttachVirtualJoystick(&desc);
+    REQUIRE(virtual_joystick != 0);
+    SCOPE_EXIT {
+        SDL_DetachVirtualJoystick(virtual_joystick);
+        virtual_joystick = 0;
+    };
+    InputCommon::SDLDriver driver{"steam-haptics-test"};
+    const auto pads = driver.GetInputDevices();
+    REQUIRE(pads.size() == 1);
+    const PadIdentifier pad{.guid = Common::UUID{pads[0].Get("guid", "")},
+                            .port = static_cast<std::size_t>(pads[0].Get("port", 0))};
+    const auto success = Common::Input::DriverResult::Success;
+    Settings::values.enable_steam_controller_hd_rumble.SetValue(false);
+    REQUIRE(driver.SetVibration(pad, Tone()) == success);
+    REQUIRE(ordinary_rumble);
+    const unsigned stops = rumble_stops;
+    Settings::values.enable_steam_controller_hd_rumble.SetValue(true);
+    // Even a zero native update must stop ordinary rumble left by the dialog.
+    REQUIRE(driver.SetVibration(pad, {}) == success);
+    REQUIRE_FALSE(ordinary_rumble);
+    REQUIRE(rumble_stops > stops);
+    REQUIRE(driver.SetVibration(pad, Tone()) == success);
+    REQUIRE(devices[0].Wait([] { return devices[0].writes > 0; }));
+    REQUIRE_FALSE(overlapping_rumble);
+    const unsigned native_stops = rumble_stops;
+    REQUIRE(driver.SetVibration(pad, Tone()) == success);
+    REQUIRE(rumble_stops == native_stops);
+    Settings::values.enable_steam_controller_hd_rumble.SetValue(false);
+    REQUIRE(driver.SetVibration(pad, Tone()) == success);
+    REQUIRE(ordinary_rumble);
+    Settings::values.enable_steam_controller_hd_rumble.SetValue(true);
+    REQUIRE(driver.SetVibration(pad, Tone()) == success);
+    REQUIRE_FALSE(ordinary_rumble);
+    REQUIRE(devices[0].Wait([] { return devices[0].opens == 2 && devices[0].writes > 0; }));
+    REQUIRE_FALSE(overlapping_rumble);
+}
+#endif

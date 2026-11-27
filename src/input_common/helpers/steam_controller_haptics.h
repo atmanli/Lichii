@@ -50,6 +50,9 @@ public:
     SteamControllerHaptics(std::string path, u16 product);
     ~SteamControllerHaptics();
     bool SetVibration(const Common::Input::VibrationStatus& vibration, bool enabled);
+    bool HasFailed() const {
+        return failed.load();
+    }
 
 private:
     void Close();

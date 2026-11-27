@@ -604,7 +604,7 @@ private:
     std::size_t nfc_handles{0};
     std::array<VibrationValue, 2> last_vibration_value{DEFAULT_VIBRATION_VALUE,
                                                        DEFAULT_VIBRATION_VALUE};
-    std::array<bool, 2> streamed_vibration_used{};
+    std::array<bool, 2> vibration_used{};
     std::array<std::chrono::steady_clock::time_point, 2> last_vibration_timepoint{};
 
     // Atomically synched values

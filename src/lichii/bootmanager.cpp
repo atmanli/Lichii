@@ -787,12 +787,14 @@ bool GRenderWindow::InitRenderTarget() {
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
     OnFramebufferSizeChanged();
     BackupGeometry();
-    mouse_update_timer.start();
 
-    if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLSL ||
-        Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLASM ||
-        Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_SPIRV)
-        return LoadOpenGL();
+    if ((Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLSL ||
+         Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_GLASM ||
+         Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::OpenGL_SPIRV) &&
+        !LoadOpenGL()) {
+        return false;
+    }
+    mouse_update_timer.start();
     return true;
 }
 

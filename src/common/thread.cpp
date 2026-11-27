@@ -47,7 +47,12 @@
 #endif
 
 #ifdef __linux__
+#include <cerrno>
+#include <charconv>
+#include <filesystem>
+#include <mutex>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <algorithm>
 
 namespace {
@@ -621,6 +626,111 @@ void SetCurrentThreadAffinity(const std::vector<u32>& cpus) {
         LOG_WARNING(Common, "pthread_setaffinity_np failed: {}", std::strerror(error));
     }
 }
+
+const Common::GpuThreadPinning& LinuxPinningPlan() {
+    static const Common::GpuThreadPinning plan = [] {
+        Common::GpuThreadPinning result = Common::PlanGpuThreadPinning(LinuxProcessors());
+        if (result.back_core_reserved) {
+            LOG_INFO(Common,
+                     "GPU thread pinning: {} cores with SMT; while a GPU back thread runs, it "
+                     "gets a physical core of its own and every other thread the other {} "
+                     "logical processors",
+                     result.performance_cores, result.guest.size());
+        } else if (result.front.empty()) {
+            LOG_WARNING(Common,
+                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
+                        result.performance_cores, Common::MinCoresForGpuThreadPinning);
+        } else {
+            LOG_INFO(Common,
+                     "GPU thread pinning: front and back on a physical core each, guest cores on "
+                     "the other {} performance cores ({} logical processors)",
+                     result.performance_cores - 2, result.guest.size());
+        }
+        return result;
+    }();
+    return plan;
+}
+
+// Calls `visit` with the id of every thread of the process. A thread created meanwhile can be
+// missed, and one that exits meanwhile still visited. False if the listing failed.
+template <typename Visit>
+bool ForEachProcessThread(Visit&& visit) {
+    std::error_code error;
+    std::filesystem::directory_iterator it{"/proc/self/task", error};
+    for (; !error && it != std::filesystem::directory_iterator{}; it.increment(error)) {
+        pid_t tid{};
+        const std::string name = it->path().filename().string();
+        if (std::from_chars(name.data(), name.data() + name.size(), tid).ec == std::errc{}) {
+            visit(tid);
+        }
+    }
+    if (error) {
+        LOG_WARNING(Common, "Could not list the threads of the process: {}", error.message());
+        return false;
+    }
+    return true;
+}
+
+bool GetThreadAffinity(pid_t tid, cpu_set_t& mask) {
+    if (sched_getaffinity(tid, sizeof(mask), &mask) == 0) {
+        return true;
+    }
+    if (errno != ESRCH) {
+        LOG_WARNING(Common, "Could not read the affinity of thread {}: {}", tid,
+                    std::strerror(errno));
+    }
+    return false;
+}
+
+void SetThreadAffinity(pid_t tid, const cpu_set_t& mask) {
+    if (sched_setaffinity(tid, sizeof(mask), &mask) != 0 && errno != ESRCH) {
+        LOG_WARNING(Common, "Could not set the affinity of thread {}: {}", tid,
+                    std::strerror(errno));
+    }
+}
+
+// Whether `tid` is still a thread of this process. An id from an earlier listing can have been
+// given to a thread of another process since its thread exited.
+bool IsOwnThread(pid_t tid) {
+    return syscall(SYS_tgkill, getpid(), tid, 0) == 0;
+}
+
+// Takes the reserved CPUs out of a thread's own mask. A thread whose mask has only reserved CPUs
+// is left as it is. True if the mask changed.
+bool NarrowThread(pid_t tid, const cpu_set_t& mask, const cpu_set_t& reserved) {
+    cpu_set_t narrowed;
+    CPU_ZERO(&narrowed);
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &mask) && !CPU_ISSET(cpu, &reserved)) {
+            CPU_SET(cpu, &narrowed);
+        }
+    }
+    if (CPU_COUNT(&narrowed) == 0 || CPU_EQUAL(&narrowed, &mask)) {
+        return false;
+    }
+    SetThreadAffinity(tid, narrowed);
+    return true;
+}
+
+struct SavedAffinity {
+    pid_t tid;
+    cpu_set_t mask;
+};
+
+struct CpuReservation {
+    std::mutex mutex;
+    bool active{};
+    cpu_set_t reserved{};
+    /// The caller's mask from before the reservation.
+    cpu_set_t caller{};
+    /// Every thread's own mask from before the reservation, by thread id.
+    std::vector<SavedAffinity> saved;
+};
+
+CpuReservation& Reservation() {
+    static CpuReservation reservation;
+    return reservation;
+}
 } // Anonymous namespace
 #endif
 
@@ -737,6 +847,13 @@ void PinCurrentThread(PinnedRole role) {
     };
     static const PinnedCpuSets pinned = [] {
         const GpuThreadPinning plan = PlanGpuThreadPinning(CpuSets().processors);
+        if (plan.back_core_reserved) {
+            // Its gain comes from keeping every other thread off the back's core, which
+            // ReserveGpuBackCore does only on Linux.
+            LOG_INFO(Common, "GPU thread pinning skipped: the {}-core plan is Linux only",
+                     plan.performance_cores);
+            return PinnedCpuSets{};
+        }
         if (plan.front.empty()) {
             LOG_WARNING(Common,
                         "GPU thread pinning skipped: {} physical performance cores, needs {}",
@@ -758,20 +875,12 @@ void PinCurrentThread(PinnedRole role) {
         SelectCurrentThreadCpuSets(ids);
     }
 #elif defined(__linux__) && !defined(__ANDROID__)
-    static const GpuThreadPinning plan = [] {
-        GpuThreadPinning result = PlanGpuThreadPinning(LinuxProcessors());
-        if (result.front.empty()) {
-            LOG_WARNING(Common,
-                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
-                        result.performance_cores, MinCoresForGpuThreadPinning);
-        } else {
-            LOG_INFO(Common,
-                     "GPU thread pinning: front and back on a physical core each, guest cores on "
-                     "the other {} performance cores ({} logical processors)",
-                     result.performance_cores - 2, result.guest.size());
-        }
-        return result;
-    }();
+    const GpuThreadPinning& plan = LinuxPinningPlan();
+    if (plan.back_core_reserved && role != PinnedRole::GpuBack) {
+        // The four-core plan pins only the back, after ReserveGpuBackCore moved every other
+        // thread off its core: a title without a back keeps every CPU.
+        return;
+    }
     const std::vector<u32>& cpus = role == PinnedRole::GpuFront  ? plan.front
                                    : role == PinnedRole::GpuBack ? plan.back
                                                                  : plan.guest;
@@ -784,6 +893,147 @@ void PinCurrentThread(PinnedRole role) {
         LOG_INFO(Common, "GPU thread pinning is only supported on Windows and Linux");
         return true;
     }();
+#endif
+}
+
+std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    CpuReservation& reservation = Reservation();
+    std::scoped_lock lock{reservation.mutex};
+    if (reservation.active || cpus.empty()) {
+        return std::nullopt;
+    }
+    CPU_ZERO(&reservation.reserved);
+    for (const u32 cpu : cpus) {
+        if (cpu < CPU_SETSIZE) {
+            CPU_SET(cpu, &reservation.reserved);
+        }
+    }
+    if (sched_getaffinity(0, sizeof(reservation.caller), &reservation.caller) != 0) {
+        return std::nullopt;
+    }
+    const pid_t self = gettid();
+    size_t count = 0;
+    reservation.saved.clear();
+    const bool listed = ForEachProcessThread([&](pid_t tid) {
+        SavedAffinity entry{tid, {}};
+        if (!GetThreadAffinity(tid, entry.mask)) {
+            return;
+        }
+        reservation.saved.push_back(entry);
+        if (tid != self && NarrowThread(tid, entry.mask, reservation.reserved)) {
+            ++count;
+        }
+    });
+    if (!listed) {
+        // Not every thread was reached: give those that were their masks back and reserve
+        // nothing.
+        for (const SavedAffinity& entry : reservation.saved) {
+            if (IsOwnThread(entry.tid)) {
+                SetThreadAffinity(entry.tid, entry.mask);
+            }
+        }
+        reservation.saved.clear();
+        return std::nullopt;
+    }
+    std::ranges::sort(reservation.saved, {}, &SavedAffinity::tid);
+    // Again for a thread created during the first pass by a creator it had not reached yet, which
+    // started with the creator's old mask. Like every thread created during the reservation it
+    // has no saved mask, and Release gives it the reserved CPUs back.
+    ForEachProcessThread([&](pid_t tid) {
+        cpu_set_t mask;
+        if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid) ||
+            !GetThreadAffinity(tid, mask)) {
+            return;
+        }
+        if (NarrowThread(tid, mask, reservation.reserved)) {
+            ++count;
+        }
+    });
+    reservation.active = true;
+    return count;
+#else
+    (void)cpus;
+    return std::nullopt;
+#endif
+}
+
+void ReleaseReservedCpus() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    CpuReservation& reservation = Reservation();
+    std::scoped_lock lock{reservation.mutex};
+    if (!reservation.active) {
+        return;
+    }
+    // The saved masks first, from the list itself, so they are restored even if the listing
+    // below fails; only to ids that are still threads of this process.
+    for (const SavedAffinity& entry : reservation.saved) {
+        if (IsOwnThread(entry.tid)) {
+            SetThreadAffinity(entry.tid, entry.mask);
+        }
+    }
+    ForEachProcessThread([&](pid_t tid) {
+        if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+            return;
+        }
+        // Created during the reservation. One on the reserved CPUs alone was created by the
+        // pinned caller and gets the caller's old mask; the others came from narrowed creators
+        // and get the reserved CPUs back.
+        cpu_set_t mask;
+        if (!GetThreadAffinity(tid, mask)) {
+            return;
+        }
+        cpu_set_t inside;
+        CPU_AND(&inside, &mask, &reservation.reserved);
+        if (CPU_EQUAL(&inside, &mask)) {
+            SetThreadAffinity(tid, reservation.caller);
+            return;
+        }
+        cpu_set_t widened;
+        CPU_OR(&widened, &mask, &reservation.reserved);
+        if (!CPU_EQUAL(&widened, &mask)) {
+            SetThreadAffinity(tid, widened);
+        }
+    });
+    reservation.saved.clear();
+    reservation.active = false;
+#endif
+}
+
+bool ReserveGpuBackCore() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    const GpuThreadPinning& plan = LinuxPinningPlan();
+    if (!plan.back_core_reserved) {
+        return true;
+    }
+    if (const auto count = ReserveCpusForCurrentThread(plan.back)) {
+        LOG_INFO(Common, "GPU back core reserved: {} other threads moved off it", *count);
+        return true;
+    }
+    LOG_WARNING(Common, "GPU back core not reserved: the GPU back thread is left unpinned");
+    return false;
+#else
+    return true;
+#endif
+}
+
+void ReleaseGpuBackCore() {
+    ReleaseReservedCpus();
+}
+
+bool ReservesGpuBackCore() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return LinuxPinningPlan().back_core_reserved;
+#else
+    return false;
+#endif
+}
+
+bool PlansGpuThreadPinning() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return !LinuxPinningPlan().back.empty();
+#else
+    return false;
 #endif
 }
 

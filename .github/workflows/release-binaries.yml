@@ -558,34 +558,45 @@ jobs:
           if [[ '${{ matrix.pgo }}' == 'true' ]]; then
             if cmake --build build/release --target $targets --parallel 2>&1 |
                 tee --output-error=warn "$RUNNER_TEMP/pgo-build.log"; then
-              awk -v platform='${{ matrix.platform }}' '
-                /function control flow change detected \(hash mismatch\).* up to [0-9]+ count discarded/ {
-                  total++
-                  if ($0 ~ / up to [1-9][0-9]* count discarded/) nonzero++
-                }
-                /no profile data available for function/ { missing++ }
-                END {
-                  printf "### PGO profile mismatches: %s\n\n", platform
-                  printf "- Discarded profile warnings: %d\n- With nonzero counts: %d\n", total, nonzero
-                  if (platform ~ /^linux/) printf "- Missing-profile warnings: %d\n", missing
-                }
-              ' "$RUNNER_TEMP/pgo-build.log" >> "$GITHUB_STEP_SUMMARY" ||
-                echo "::warning::Could not write PGO mismatch summary"
-              if [[ "${{ matrix.platform }}" == linux* ]]; then
-                missing=$(grep -c 'no profile data available for function' "$RUNNER_TEMP/pgo-build.log" || true)
-                if (( missing > PGO_MISSING_MAX )); then
-                  echo "::warning::$missing missing-profile warnings (more than $PGO_MISSING_MAX): the profile no longer matches this tree or its paths, see docs/CI.md"
+              # The summary only reports: the binaries are built by now, so nothing in it may fail
+              # the step. It runs in a subshell whose failure is a warning.
+              (
+                # Counted as functions: one that lost its data in several translation units warns
+                # once per unit. The name follows "(hash mismatch) ".
+                awk -v platform='${{ matrix.platform }}' '
+                  /function control flow change detected \(hash mismatch\).* up to [0-9]+ count discarded/ {
+                    name = match($0, /\(hash mismatch\) [^ ]+/) ? substr($0, RSTART + 16, RLENGTH - 16) : $0
+                    if (!(name in all)) { all[name] = 1; total++ }
+                    if ($0 ~ / up to [1-9][0-9]* count discarded/ && !(name in counted)) {
+                      counted[name] = 1; nonzero++
+                    }
+                  }
+                  /no profile data available for function/ { missing++ }
+                  END {
+                    printf "### PGO profile mismatches: %s\n\n", platform
+                    printf "- Functions whose profile data was discarded: %d\n", total
+                    printf "- Of them, with nonzero counts: %d\n", nonzero
+                    if (platform ~ /^linux/) printf "- Missing-profile warnings (one per function and translation unit): %d\n", missing
+                  }
+                ' "$RUNNER_TEMP/pgo-build.log" >> "$GITHUB_STEP_SUMMARY" ||
+                  echo "::warning::Could not write PGO mismatch summary"
+                if [[ "${{ matrix.platform }}" == linux* ]]; then
+                  missing=$(grep -c 'no profile data available for function' "$RUNNER_TEMP/pgo-build.log" || true)
+                  if (( missing > PGO_MISSING_MAX )); then
+                    echo "::warning::$missing missing-profile warnings (more than $PGO_MISSING_MAX): the profile no longer matches this tree or its paths, see docs/CI.md"
+                  fi
+                  # None at all is not a perfect profile: the flags that report them were dropped,
+                  # or the warnings were silenced. The summary could not see a lost profile then.
+                  if (( missing == 0 )); then
+                    echo "::warning::No missing-profile warnings: the PGO build's warning flags did not reach it, so the summary cannot show a profile that no longer fits (docs/CI.md)"
+                  fi
+                  lost=$({ grep -E 'hash mismatch\).* up to [1-9][0-9]* count discarded' "$RUNNER_TEMP/pgo-build.log" || true; } |
+                    sed -E 's/.*\(hash mismatch\) ([^ ]+).*/\1/' | sort -u | wc -l)
+                  if (( lost > PGO_MISMATCH_MAX )); then
+                    echo "::warning::$lost functions lost profile data that had counts (more than $PGO_MISMATCH_MAX): the profile no longer fits this tree or its toolchain, retrain (docs/CI.md)"
+                  fi
                 fi
-                # None at all is not a perfect profile: the flags that report them were dropped, or
-                # the warnings were silenced. The summary could not see a lost profile then.
-                if (( missing == 0 )); then
-                  echo "::warning::No missing-profile warnings: the PGO build's warning flags did not reach it, so the summary cannot show a profile that no longer fits (docs/CI.md)"
-                fi
-                lost=$(grep -cE 'hash mismatch\).* up to [1-9][0-9]* count discarded' "$RUNNER_TEMP/pgo-build.log" || true)
-                if (( lost > PGO_MISMATCH_MAX )); then
-                  echo "::warning::$lost functions lost profile data that had counts (more than $PGO_MISMATCH_MAX): the profile no longer fits this tree or its toolchain, retrain (docs/CI.md)"
-                fi
-              fi
+              ) || echo "::warning::PGO mismatch summary failed; the build itself succeeded"
             else
               build_status=${PIPESTATUS[0]}
               if (( build_status != 0 )); then exit "$build_status"; fi

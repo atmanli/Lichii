@@ -24,6 +24,7 @@
 #include "common/settings_enums.h"
 #include "common/shutdown_progress.h"
 #include "common/string_util.h"
+#include "common/thread.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 
@@ -776,6 +777,8 @@ struct System::Impl {
             guest_memory_released = true;
         }
 
+        // The back releases its core when it stops; this covers a back that never got to.
+        Common::ReleaseGpuBackCore();
         LOG_DEBUG(Core, "Shutdown OK");
     }
 

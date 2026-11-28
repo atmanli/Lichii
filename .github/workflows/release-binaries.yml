@@ -54,6 +54,16 @@ env:
   # added after training raises the count, so 3000 leaves room for that drift and still flags
   # a path mismatch clearly (docs/CI.md).
   PGO_MISSING_MAX: "3000"
+  # The GCC whose C++ standard library headers the Linux PGO build compiles against, and the clang
+  # build that trained lichii-linux.profdata. A profile hashes each function's control flow with
+  # the std:: code inlined into it, so training and the job must use the same headers: Ubuntu
+  # 24.04's default GCC 13 here, while the runner image also carries a newer GCC that clang
+  # would pick by itself (a fork's release build lost the profile of 308 functions that way). The
+  # clang build is checked against PGO_CLANG_BUILD and only warned about: apt.llvm.org keeps the
+  # newest snapshot of each major, so an exact pin would fail the install once it moves
+  # (docs/CI.md).
+  PGO_GCC_MAJOR: "13"
+  PGO_CLANG_BUILD: "23.1.6~++20261116013850+5b10d2d74929-1~exp1~20261116133903.98"
 
 # A running build is never cancelled: it finishes and publishes. A push meanwhile queues one build;
 # a later push replaces it, so the newest commit builds as soon as the running one is done.
@@ -247,6 +257,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             "clang-$PGO_LLVM_VERSION" "lld-$PGO_LLVM_VERSION"
           "clang-$PGO_LLVM_VERSION" --version
+          installed=$(dpkg-query -W -f '${Version}' "clang-$PGO_LLVM_VERSION" | sed 's/^[0-9]*://')
+          if [ "$installed" != "$PGO_CLANG_BUILD" ]; then
+            echo "::warning::clang-$PGO_LLVM_VERSION is $installed, not the $PGO_CLANG_BUILD that trained lichii-linux.profdata; a different build can change function hashes (see the mismatch summary and docs/CI.md)"
+          fi
+          # The standard library headers the profile was trained against must exist, or clang
+          # would silently use another GCC's and the profile would lose its hot functions.
+          gcc_dir="/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR"
+          if [ ! -d "$gcc_dir" ] || [ ! -d "/usr/include/c++/$PGO_GCC_MAJOR" ]; then
+            echo "::error::GCC $PGO_GCC_MAJOR's libstdc++ headers are missing on this runner ($gcc_dir, /usr/include/c++/$PGO_GCC_MAJOR): the PGO build would compile against another standard library than the profile was trained with (docs/CI.md)"
+            exit 1
+          fi
 
       # Branch builds restore nx2's caches without saving their own, which no other branch can
       # restore: only nx2 saves and keeps one entry per cache family (docs/CI.md).
@@ -407,7 +428,10 @@ jobs:
             strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
             profile="-fprofile-use=$PWD/${{ matrix.profile }} -mllvm -static-func-strip-dirname-prefix=$strip_n \
               -mllvm -pgo-warn-missing-function -Wbackend-plugin -Wno-error=backend-plugin \
-              -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+              -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date \
+              --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR"
+            # CMake passes CMAKE_CXX_FLAGS to the link step too, so the same GCC's crt files and
+            # libstdc++ are linked.
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
               "-DCMAKE_CXX_COMPILER=clang++-$PGO_LLVM_VERSION"
@@ -415,6 +439,13 @@ jobs:
               "-DCMAKE_C_FLAGS=$profile"
               "-DCMAKE_CXX_FLAGS=$profile"
             )
+          fi
+          # Which standard library the build compiles against (docs/CI.md, Linux PGO profile).
+          if [ '${{ matrix.pgo }}' = 'true' ]; then
+            "clang++-$PGO_LLVM_VERSION" -v --gcc-install-dir="/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR" \
+              -x c++ -E /dev/null -o /dev/null 2>&1 | grep -E 'clang version|Selected GCC' || true
+          else
+            c++ -v 2>&1 | grep -E '^gcc version|Selected GCC' || true
           fi
           cmake -S . -B build/release -G Ninja "${flags[@]}"
 

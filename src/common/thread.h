@@ -159,8 +159,12 @@ void PinCurrentThread(PinnedRole role);
 /// many threads were moved. Returns nothing, with nothing reserved, while a reservation is active,
 /// for no CPUs, when the caller's mask can't be read, when the first listing fails or a live
 /// thread's mask can't be read in it (anything but its having exited: nothing has been changed),
-/// when the second listing or a mask read in it fails, and on other hosts. A listing that fails is
-/// tried up to three times. After a failed second listing the reservation is undone exactly as
+/// when the second listing or a mask read in it fails, when a live thread that needed narrowing
+/// could not be moved (its write failed, in either pass), and on other hosts. A write can fail
+/// every time for a thread the kernel refuses to move (its allowed set holds only CPUs being
+/// reserved, for example): then every reservation fails, and the back stays unpinned, with a
+/// warning naming the thread and the reason. A listing that fails is tried up to three times. After
+/// a failed second listing or a failed write, the reservation is undone exactly as
 /// ReleaseReservedCpus undoes one (see its limits): the saved masks go back, and every thread with
 /// none, created since the first listing, gets the reserved CPUs added to its mask, or the
 /// caller's mask from before if its mask has only reserved CPUs. So such a thread does not get its

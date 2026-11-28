@@ -704,16 +704,20 @@ bool ForEachProcessThread(void (*visit)(void*, int), void* context) {
         }                                                                                          \
     } while (0)
 
-// True if the mask was set. A thread that has exited (ESRCH) is not warned about.
-bool SetThreadAffinity(pid_t tid, const cpu_set_t& mask) noexcept {
+enum class SetResult { Set, Exited, Failed };
+
+// A thread that has exited (ESRCH) is not warned about. Failed: a live thread kept its mask (for
+// example EINVAL, its allowed set no longer holding any CPU of the new mask).
+SetResult SetThreadAffinity(pid_t tid, const cpu_set_t& mask) noexcept {
     if (sched_setaffinity(tid, sizeof(mask), &mask) == 0) {
-        return true;
+        return SetResult::Set;
     }
-    if (errno != ESRCH) {
-        LOG_WARNING_NOTHROW(Common, "Could not set the affinity of thread {}: {}", tid,
-                            std::strerror(errno));
+    if (errno == ESRCH) {
+        return SetResult::Exited;
     }
-    return false;
+    LOG_WARNING_NOTHROW(Common, "Could not set the affinity of thread {}: {}", tid,
+                        std::strerror(errno));
+    return SetResult::Failed;
 }
 
 // The reason for a failed listing, for its log line.
@@ -727,10 +731,19 @@ bool IsOwnThread(pid_t tid) noexcept {
     return syscall(SYS_tgkill, getpid(), tid, 0) == 0;
 }
 
+enum class Narrowed {
+    Changed,
+    /// Nothing to change, or the thread exited before it was set (which the count would otherwise
+    /// include).
+    Unchanged,
+    /// A live thread that needed narrowing could not be moved: it would keep running on the
+    /// reserved CPUs, so the reservation fails.
+    Failed,
+};
+
 // Takes the reserved CPUs out of a thread's own mask. A thread whose mask has only reserved CPUs
-// is left as it is. True if the mask changed: not for a thread that exited before it was set,
-// which the count would otherwise include.
-bool NarrowThread(pid_t tid, const cpu_set_t& mask, const cpu_set_t& reserved) noexcept {
+// is left as it is.
+Narrowed NarrowThread(pid_t tid, const cpu_set_t& mask, const cpu_set_t& reserved) noexcept {
     cpu_set_t narrowed;
     CPU_ZERO(&narrowed);
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
@@ -739,9 +752,17 @@ bool NarrowThread(pid_t tid, const cpu_set_t& mask, const cpu_set_t& reserved) n
         }
     }
     if (CPU_COUNT(&narrowed) == 0 || CPU_EQUAL(&narrowed, &mask)) {
-        return false;
+        return Narrowed::Unchanged;
     }
-    return SetThreadAffinity(tid, narrowed);
+    switch (SetThreadAffinity(tid, narrowed)) {
+    case SetResult::Set:
+        return Narrowed::Changed;
+    case SetResult::Exited:
+        return Narrowed::Unchanged;
+    case SetResult::Failed:
+        break;
+    }
+    return Narrowed::Failed;
 }
 
 struct SavedAffinity {
@@ -959,7 +980,7 @@ bool RestoreReservation(CpuReservation& reservation, const detail::ThreadAccess&
     // Nothing here allocates or throws: the saved masks go back whatever the listing does.
     for (const SavedAffinity& entry : reservation.saved) {
         if (IsOwnThread(entry.tid)) {
-            SetThreadAffinity(entry.tid, entry.mask);
+            (void)SetThreadAffinity(entry.tid, entry.mask);
         }
     }
     // A test's lister or reader can throw: a restore cut short by an exception is not clean, and is
@@ -968,6 +989,11 @@ bool RestoreReservation(CpuReservation& reservation, const detail::ThreadAccess&
         size_t unreadable = 0;
         const auto visit = [&](int tid) {
             if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+                return;
+            }
+            // An id from the listing may have been given to another process's thread since. Still
+            // possible between this check and the write below.
+            if (!IsOwnThread(tid)) {
                 return;
             }
             cpu_set_t mask;
@@ -983,13 +1009,13 @@ bool RestoreReservation(CpuReservation& reservation, const detail::ThreadAccess&
             cpu_set_t inside;
             CPU_AND(&inside, &mask, &reservation.reserved);
             if (CPU_EQUAL(&inside, &mask)) {
-                SetThreadAffinity(tid, reservation.caller);
+                (void)SetThreadAffinity(tid, reservation.caller);
                 return;
             }
             cpu_set_t widened;
             CPU_OR(&widened, &mask, &reservation.reserved);
             if (!CPU_EQUAL(&widened, &mask)) {
-                SetThreadAffinity(tid, widened);
+                (void)SetThreadAffinity(tid, widened);
             }
         };
         // An unreadable mask counts for the attempt it happened in.
@@ -1073,6 +1099,11 @@ std::optional<size_t> ReserveLocked(CpuReservation& reservation, std::span<const
         reservation.saved.clear();
         read_failed = false;
         const auto visit = [&](int tid) {
+            // As in the later walks: an id that is no longer a thread of this process (given to
+            // another process's thread since the listing) is skipped like one that exited.
+            if (!IsOwnThread(tid)) {
+                return;
+            }
             SavedAffinity entry{tid, {}};
             switch (ReadMask(access, tid, entry.mask)) {
             case AffinityRead::Read:
@@ -1097,11 +1128,19 @@ std::optional<size_t> ReserveLocked(CpuReservation& reservation, std::span<const
     std::ranges::sort(reservation.saved, {}, &SavedAffinity::tid);
     size_t count = 0;
     mutated = true;
+    // A live thread that could not be moved fails the reservation: the undo below, nothing
+    // reserved, and the caller left unpinned.
+    bool narrow_failed = false;
     for (const SavedAffinity& entry : reservation.saved) {
-        if (entry.tid != self && IsOwnThread(entry.tid) &&
-            NarrowThread(entry.tid, entry.mask, reservation.reserved)) {
-            ++count;
+        if (entry.tid == self || !IsOwnThread(entry.tid)) {
+            continue;
         }
+        const Narrowed narrowed = NarrowThread(entry.tid, entry.mask, reservation.reserved);
+        if (narrowed == Narrowed::Failed) {
+            narrow_failed = true;
+            break;
+        }
+        count += narrowed == Narrowed::Changed ? 1 : 0;
     }
     // Again for a thread created since the list, which started with its creator's mask from
     // before or after the narrowing. Like every thread created during the reservation it has no
@@ -1110,17 +1149,30 @@ std::optional<size_t> ReserveLocked(CpuReservation& reservation, std::span<const
     // narrowing a narrowed thread again changes nothing (nor the count).
     bool relisted = false;
     bool relist_read_failed = false;
-    for (int attempt = 0; attempt < ListAttempts && !relisted; ++attempt) {
+    for (int attempt = 0; attempt < ListAttempts && !relisted && !narrow_failed; ++attempt) {
         relist_read_failed = false;
         const auto visit = [&](int tid) {
-            if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+            if (narrow_failed ||
+                std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+                return;
+            }
+            // An id from the listing may have been given to another process's thread since. Still
+            // possible between this check and the write in NarrowThread.
+            if (!IsOwnThread(tid)) {
                 return;
             }
             cpu_set_t mask;
             switch (ReadMask(access, tid, mask)) {
             case AffinityRead::Read:
-                if (NarrowThread(tid, mask, reservation.reserved)) {
+                switch (NarrowThread(tid, mask, reservation.reserved)) {
+                case Narrowed::Changed:
                     ++count;
+                    break;
+                case Narrowed::Unchanged:
+                    break;
+                case Narrowed::Failed:
+                    narrow_failed = true;
+                    break;
                 }
                 break;
             case AffinityRead::Exited:
@@ -1132,11 +1184,14 @@ std::optional<size_t> ReserveLocked(CpuReservation& reservation, std::span<const
         };
         relisted = ListOnce(access, visit);
     }
-    if (!relisted) {
+    if (narrow_failed) {
+        LOG_WARNING_NOTHROW(Common, "A thread could not be moved off the CPUs to reserve: nothing "
+                                    "is reserved");
+    } else if (!relisted) {
         LOG_WARNING_NOTHROW(Common, "Could not list the threads of the process again: {}",
                             ListFailure());
     }
-    if (!relisted || relist_read_failed) {
+    if (narrow_failed || !relisted || relist_read_failed) {
         // Undo everything as Release would, and reserve nothing, so that the caller does not pin
         // itself. RestoreReservation warns if the undo is not clean.
         (void)RestoreReservation(reservation, access);

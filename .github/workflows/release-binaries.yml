@@ -48,12 +48,15 @@ env:
   PGO_LLVM_VERSION: "23"
   # The Linux PGO summary warns when the build gives more missing-profile warnings than this
   # (one per function and translation unit the profile has no entry for). Measured on a Steam
-  # Deck with the job's flags, training in one checkout and building in another: a profile
-  # trained on the same tree gives about 1,100, one keyed to the training checkout's path (the
-  # failure the strip flag prevents) about 13,800, and eglantine.profdata about 31,800. Code
-  # added after training raises the count, so 3000 leaves room for that drift and still flags
-  # a path mismatch clearly (docs/CI.md).
+  # Deck with the job's flags, training in one checkout and building in another: the committed
+  # profile gives 1,282 on its own tree, and eglantine.profdata 31,799. Code added after training
+  # raises the count, so 3000 leaves room for that drift and still flags a profile that no
+  # longer fits the tree or its paths (docs/CI.md).
   PGO_MISSING_MAX: "3000"
+  # The summary also warns when more functions than this lost profile data that had counts
+  # (hash mismatches, template and inline functions included): the committed profile gives one
+  # on its own tree (lichii-cmd's main, which shares the name of lichii's). Past it, retrain.
+  PGO_MISMATCH_MAX: "10"
   # The GCC whose C++ standard library headers the Linux PGO build compiles against, and the clang
   # build that trained lichii-linux.profdata. A profile hashes each function's control flow with
   # the std:: code inlined into it, so training and the job must use the same headers: Ubuntu
@@ -259,11 +262,12 @@ jobs:
           "clang-$PGO_LLVM_VERSION" --version
           installed=$(dpkg-query -W -f '${Version}' "clang-$PGO_LLVM_VERSION" | sed 's/^[0-9]*://')
           if [ "$installed" != "$PGO_CLANG_BUILD" ]; then
-            echo "::warning::clang-$PGO_LLVM_VERSION is $installed, not the $PGO_CLANG_BUILD that trained lichii-linux.profdata; a different build can change function hashes (see the mismatch summary and docs/CI.md)"
+            echo "::warning::clang-$PGO_LLVM_VERSION is $installed, not the $PGO_CLANG_BUILD that trained ${{ matrix.profile }}; a different build can change function hashes (see the mismatch summary and docs/CI.md)"
           fi
-          # The standard library headers the profile was trained against must exist, or clang
-          # would silently use another GCC's and the profile would lose its hot functions.
-          gcc_dir="/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR"
+          # The standard library headers the profile was trained against must exist: said here,
+          # before the configure step, whose --gcc-install-dir would only fail on the missing
+          # directory.
+          gcc_dir="/usr/lib/gcc/$(gcc -dumpmachine)/$PGO_GCC_MAJOR"
           if [ ! -d "$gcc_dir" ] || [ ! -d "/usr/include/c++/$PGO_GCC_MAJOR" ]; then
             echo "::error::GCC $PGO_GCC_MAJOR's libstdc++ headers are missing on this runner ($gcc_dir, /usr/include/c++/$PGO_GCC_MAJOR): the PGO build would compile against another standard library than the profile was trained with (docs/CI.md)"
             exit 1
@@ -426,12 +430,16 @@ jobs:
             # (docs/CI.md). pgo-warn-missing-function warns for each function the profile has no entry
             # for, which the summary below counts.
             strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
+            # no-pgo-warn-mismatch-comdat-weak=false also reports the hash mismatches of template and
+            # inline functions, which clang otherwise keeps silent; it changes only diagnostics.
+            gcc_dir="/usr/lib/gcc/$(gcc -dumpmachine)/$PGO_GCC_MAJOR"
             profile="-fprofile-use=$PWD/${{ matrix.profile }} -mllvm -static-func-strip-dirname-prefix=$strip_n \
-              -mllvm -pgo-warn-missing-function -Wbackend-plugin -Wno-error=backend-plugin \
+              -mllvm -pgo-warn-missing-function -mllvm -no-pgo-warn-mismatch-comdat-weak=false \
+              -Wbackend-plugin -Wno-error=backend-plugin \
               -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date \
-              --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR"
-            # CMake passes CMAKE_CXX_FLAGS to the link step too, so the same GCC's crt files and
-            # libstdc++ are linked.
+              --gcc-install-dir=$gcc_dir"
+            # CMake passes CMAKE_CXX_FLAGS to the link step too, so that GCC's crt files and libgcc
+            # are linked; libstdc++.so.6 is the system's single copy either way.
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
               "-DCMAKE_CXX_COMPILER=clang++-$PGO_LLVM_VERSION"
@@ -440,10 +448,16 @@ jobs:
               "-DCMAKE_CXX_FLAGS=$profile"
             )
           fi
-          # Which standard library the build compiles against (docs/CI.md, Linux PGO profile).
+          # Which standard library the build compiles against (docs/CI.md, Linux PGO profile). For
+          # the PGO entry it must be the pinned GCC's: anything else stops the job.
           if [ '${{ matrix.pgo }}' = 'true' ]; then
-            "clang++-$PGO_LLVM_VERSION" -v --gcc-install-dir="/usr/lib/gcc/x86_64-linux-gnu/$PGO_GCC_MAJOR" \
-              -x c++ -E /dev/null -o /dev/null 2>&1 | grep -E 'clang version|Selected GCC' || true
+            selected=$("clang++-$PGO_LLVM_VERSION" -v --gcc-install-dir="$gcc_dir" \
+              -x c++ -E /dev/null -o /dev/null 2>&1 | grep -E 'clang version|Selected GCC' || true)
+            printf '%s\n' "$selected"
+            if ! printf '%s\n' "$selected" | grep -qxF "Selected GCC installation: $gcc_dir"; then
+              echo "::error::clang did not select $gcc_dir, the GCC the profile was trained against (docs/CI.md)"
+              exit 1
+            fi
           else
             c++ -v 2>&1 | grep -E '^gcc version|Selected GCC' || true
           fi
@@ -561,6 +575,15 @@ jobs:
                 missing=$(grep -c 'no profile data available for function' "$RUNNER_TEMP/pgo-build.log" || true)
                 if (( missing > PGO_MISSING_MAX )); then
                   echo "::warning::$missing missing-profile warnings (more than $PGO_MISSING_MAX): the profile no longer matches this tree or its paths, see docs/CI.md"
+                fi
+                # None at all is not a perfect profile: the flags that report them were dropped, or
+                # the warnings were silenced. The summary could not see a lost profile then.
+                if (( missing == 0 )); then
+                  echo "::warning::No missing-profile warnings: the PGO build's warning flags did not reach it, so the summary cannot show a profile that no longer fits (docs/CI.md)"
+                fi
+                lost=$(grep -cE 'hash mismatch\).* up to [1-9][0-9]* count discarded' "$RUNNER_TEMP/pgo-build.log" || true)
+                if (( lost > PGO_MISMATCH_MAX )); then
+                  echo "::warning::$lost functions lost profile data that had counts (more than $PGO_MISMATCH_MAX): the profile no longer fits this tree or its toolchain, retrain (docs/CI.md)"
                 fi
               fi
             else

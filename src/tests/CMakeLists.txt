@@ -191,6 +191,7 @@ add_executable(tests
     video_core/maxwell_fast_method.cpp
     video_core/nx2_fast_draw_landing.cpp
     hid_core/emulated_controller_config.cpp
+    hid_core/motion_input.cpp
     hid_core/npad_assignment.cpp
     hid_core/second_button_binding.cpp
     hid_core/sensor_info.cpp

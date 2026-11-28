@@ -1830,12 +1830,26 @@ struct Nx2NativeObjects {
         return offset <= limit && size <= limit - offset;
     }
 
+    // The image `id` names: its own entry, or the pool it belongs to. A pool made by one call (a
+    // native image pool, 429) has one entry, at its first id, for `count` ids; a decoder pool
+    // (911) has one per image. Null if no image has that id. Call with `mutex` held.
+    const Image* FindImage(u32 id) const {
+        auto it = images.upper_bound(id);
+        if (it == images.begin()) {
+            return nullptr;
+        }
+        --it;
+        return id - it->first < it->second.count ? &it->second : nullptr;
+    }
+
     // An image that exists and is not a decoder output image (911), the only kind a decoded
-    // frame is written into. Ids are never reused, so a missing one cannot become such an image.
+    // frame is written into. The images of a native pool other than its first count too (they
+    // have no entry of their own). A missing id is not refused: a released id is never reused,
+    // and one not yet made, which could become another kind, is checked again in WriteImage.
     bool IsOtherImage(u32 id) {
         std::scoped_lock lk{mutex};
-        const auto image = images.find(id);
-        return image != images.end() && !(image->second.decoder && image->second.decoder_mutex);
+        const Image* const image = FindImage(id);
+        return image != nullptr && !(image->decoder && image->decoder_mutex);
     }
 
     std::shared_ptr<std::mutex> DecoderMutex(u32 id) {

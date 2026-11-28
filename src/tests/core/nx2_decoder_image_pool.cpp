@@ -90,6 +90,57 @@ TEST_CASE("Only an existing image of another kind is refused decoded frames", "[
     CHECK(objects.DecoderMutex(2) == nullptr);
 }
 
+TEST_CASE("Every image of a native image pool is refused decoded frames", "[nx2_gsv]") {
+    Service::Nx2NativeObjects objects;
+    // A native image pool of three (429): one entry, at its first id, for ids 5 to 7.
+    objects.images[5].count = 3;
+    // A decoder pool of two (911) right after it: an entry per image.
+    for (const u32 id : {8U, 9U}) {
+        auto& decoder = objects.images[id];
+        decoder.decoder = true;
+        decoder.decoder_mutex = std::make_shared<std::mutex>();
+    }
+    CHECK(objects.IsOtherImage(5));
+    CHECK(objects.IsOtherImage(6));
+    CHECK(objects.IsOtherImage(7));
+    CHECK_FALSE(objects.IsOtherImage(8));
+    CHECK_FALSE(objects.IsOtherImage(9));
+    // Missing ids, before the first image and past the last pool, are still not refused.
+    CHECK_FALSE(objects.IsOtherImage(4));
+    CHECK_FALSE(objects.IsOtherImage(10));
+    // A missing id right after a pool, with nothing after it.
+    Service::Nx2NativeObjects alone;
+    alone.images[1].count = 2;
+    CHECK(alone.IsOtherImage(2));
+    CHECK_FALSE(alone.IsOtherImage(3));
+    CHECK_FALSE(alone.IsOtherImage(0));
+}
+
+TEST_CASE("Ids no image has are not refused decoded frames, wherever they fall", "[nx2_gsv]") {
+    // No image at all.
+    Service::Nx2NativeObjects empty;
+    CHECK_FALSE(empty.IsOtherImage(0));
+    CHECK_FALSE(empty.IsOtherImage(1));
+    CHECK_FALSE(empty.IsOtherImage(0xFFFFFFFF));
+    // A native pool of three at 5 (ids 5 to 7) and a decoder image at 9: 8 lies between them.
+    Service::Nx2NativeObjects objects;
+    objects.images[5].count = 3;
+    auto& decoder = objects.images[9];
+    decoder.decoder = true;
+    decoder.decoder_mutex = std::make_shared<std::mutex>();
+    CHECK_FALSE(objects.IsOtherImage(8));
+    CHECK_FALSE(objects.IsOtherImage(9));
+    // The decoder image right after the pool, released (erased): its id is missing again.
+    objects.images.erase(9);
+    CHECK_FALSE(objects.IsOtherImage(8));
+    CHECK_FALSE(objects.IsOtherImage(9));
+    // A pool ending at the top of the id range: the last id is past it, not wrapped into it.
+    Service::Nx2NativeObjects top;
+    top.images[0xFFFFFFF0].count = 0xF;
+    CHECK(top.IsOtherImage(0xFFFFFFFE));
+    CHECK_FALSE(top.IsOtherImage(0xFFFFFFFF));
+}
+
 TEST_CASE("A decoder image is written only within its memory", "[nx2_gsv]") {
     using Service::Nx2NativeObjects;
     const Nx2NativeObjects::Memory memory{.size = 0x10000};

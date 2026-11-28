@@ -18,6 +18,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <openssl/evp.h>
 #include <zstd.h>
+#ifdef __linux__
+#include <sys/stat.h>
+#endif
 
 #include "common/zstd_compression.h"
 #include "core/file_sys/nup_container.h"
@@ -194,6 +197,33 @@ std::size_t SpillBytes(const fs::path& dir) {
     }
 #endif
     return total;
+}
+#endif
+
+#if defined(_WIN32) || defined(__linux__)
+/// The container's spill files under `dir`, each as its identity and size: on Linux the unlinked
+/// ones still held open (their descriptor's target, which names the file and its inode is held),
+/// with any named ones; elsewhere the named ones.
+std::vector<std::pair<std::string, std::uintmax_t>> SpillFiles(const fs::path& dir) {
+    std::vector<std::pair<std::string, std::uintmax_t>> files;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        files.emplace_back(entry.path().filename().string(), entry.file_size(ec));
+    }
+#ifdef __linux__
+    const auto prefix = fs::canonical(dir, ec).string();
+    for (const auto& fd : fs::directory_iterator("/proc/self/fd", ec)) {
+        const auto target = fs::read_symlink(fd.path(), ec).string();
+        if (target.starts_with(prefix) && target.ends_with(" (deleted)")) {
+            struct stat st{};
+            const std::string inode =
+                stat(fd.path().c_str(), &st) == 0 ? std::to_string(st.st_ino) : target;
+            files.emplace_back("inode " + inode, fs::file_size(fd.path(), ec));
+        }
+    }
+#endif
+    std::ranges::sort(files);
+    return files;
 }
 #endif
 
@@ -685,13 +715,6 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
         const auto wide = Content(700 * 1024, 42);
         const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
         const auto bytes = BuildNup({member_of(game), wide_member});
-        const auto entries = [](const fs::path& dir) {
-            std::vector<fs::path> names;
-            for (const auto& entry : fs::directory_iterator(dir)) {
-                names.push_back(entry.path().filename());
-            }
-            return names;
-        };
         // The same reads on a container nobody verifies, for the backing reads they take.
         const auto backing = std::make_shared<CountingFile>(bytes);
         const auto control_backing = std::make_shared<CountingFile>(bytes);
@@ -705,10 +728,17 @@ TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was"
         const auto control_file = control.OpenFile(0);
         REQUIRE(ReadMatches(file, game, 0, 8 * 1024));
         REQUIRE(ReadMatches(control_file, game, 0, 8 * 1024));
-        const auto before = entries(t.path);
+#if defined(_WIN32) || defined(__linux__)
+        // The game's member holds one spill file (on POSIX unlinked since #2649, and seen through
+        // its descriptor). Verification opens none of its own, and leaves that one, its identity
+        // and its size, as they were.
+        const auto before = SpillFiles(t.path);
         REQUIRE(before.size() == 1);
+#endif
         REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
-        REQUIRE(entries(t.path) == before);
+#if defined(_WIN32) || defined(__linux__)
+        REQUIRE(SpillFiles(t.path) == before);
+#endif
         backing->reads = 0;
         control_backing->reads = 0;
         REQUIRE(ReadMatches(file, game, 8 * 1024, 64 * 1024));
